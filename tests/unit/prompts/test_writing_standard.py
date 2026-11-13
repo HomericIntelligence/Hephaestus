@@ -29,7 +29,7 @@ def _directive() -> str:
     return _writing_directive()
 
 
-def test_decomposition_generation_prompt_carries_the_writing_standard(
+def test_plan_decomposition_generation_prompt_carries_the_writing_standard(
     _directive: str,
 ) -> None:
     """The one-shot generation prompt carries the complete directive."""
@@ -49,7 +49,7 @@ def test_decomposition_generation_prompt_carries_the_writing_standard(
         assert required in prompt, required
 
 
-def test_decomposition_review_prompt_carries_the_writing_standard(
+def test_plan_decomposition_review_prompt_carries_the_writing_standard(
     _directive: str,
 ) -> None:
     """The one-shot independent review prompt carries the complete directive."""
@@ -68,7 +68,7 @@ def test_decomposition_review_prompt_carries_the_writing_standard(
         assert required in prompt, required
 
 
-def test_decomposition_prompts_fence_untrusted_inputs() -> None:
+def test_plan_decomposition_prompts_fence_untrusted_inputs() -> None:
     """GitHub-derived inputs are fenced, and the receipt binds the draft digest."""
     manifest: list[dict[str, str]] = [{"identifier": "req-0123456789ab", "digest": "c" * 64}]
     prompt: str = get_plan_decomposition_prompt(

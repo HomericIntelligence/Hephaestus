@@ -1113,6 +1113,40 @@ flowchart LR
     Trigger -->|"no trigger"| Amend["Amendment"]
 ```
 
+#### Plan decomposition transaction (issue #2982)
+
+After a trigger holds, the plan-review stage runs one durable
+host-supervised transaction. The model output stays untrusted at every
+step; only the host validates, publishes, and mutates:
+
+1. **Generation.** One one-shot decomposition session receives the complete
+   normalized plan, the requirement and finding manifests, and the writing
+   standard, and returns one complete normalized work-unit manifest.
+2. **Independent review.** A separate one-shot review session, bound to the
+   exact draft digest, must return a `GO` verdict. A changed draft invalidates
+   the review. Every non-`GO` verdict blocks the item.
+3. **Child creation and readback.** The host creates or recovers every child
+   issue by its deterministic recovery marker (repository, parent, epoch,
+   generation, node id), verifies one exact readback against the sealed
+   specification, and applies the confirmed child labels
+   (`state:needs-plan` plus the parent severity).
+4. **Parent transition.** The host publishes one parent summary comment and
+   applies the exclusive label transition: `epic` and `state:skip` replace
+   `state:needs-plan`, `state:plan-no-go`, and `state:plan-go`. The exact
+   parent title and body are digest-verified before and after the write.
+5. **Admission.** The coordinator re-reads the seal, bindings, and
+   transition records, verifies each bound child, and queues ready children
+   one topological layer at a time. A child queues only when all of its
+   direct prerequisites finished successfully; one failed prerequisite
+   finishes every not-yet-queued descendant failed.
+
+Restart reconciliation resumes inside the transaction and fast-forwards
+through recovered records. Provider and GitHub write failures retry within
+the bounded budget and then block the item; a partial tree is never
+admitted. The same-run recursion guard defers a generated child issue to a
+later run, and dry-run publishes no decomposition mutation and queues no
+child. See [ADR-0066](adr/0066-plan-decomposition.md).
+
 ### 5.4 Implementation
 
 Implementation converts an approved plan into a published pull request. It may

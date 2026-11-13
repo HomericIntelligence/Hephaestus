@@ -53,6 +53,7 @@ from hephaestus.automation.pipeline.jobs import (
     JobHandle,
     JobResult,
 )
+from hephaestus.automation.pipeline.plan_journal import requirements_epoch
 from hephaestus.automation.pipeline.queues import CompletionQueue
 from hephaestus.automation.pipeline.routing import (
     Disposition,
@@ -5382,3 +5383,354 @@ def test_run_releases_intake_leases_after_shutdown_and_reporting(
         "summary",
         "main_release",
     ]
+
+
+def make_admission_coordinator(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, dry_run: bool = False
+) -> tuple[Coordinator, FakeWorkerPool, FakeStageGitHub]:
+    """Build one coordinator with bounded real capacity for admission tests."""
+    return make_coordinator(tmp_path, monkeypatch, max_workers=4, dry_run=dry_run)
+
+
+def _decomposition_epoch(seed: str = "coordinator admission epoch") -> str:
+    """Return one 64-hex requirements-epoch identity for admission tests."""
+    import hashlib
+
+    return hashlib.sha256(seed.encode("utf-8")).hexdigest()
+
+
+_ADMISSION_PARENT_BODY = "The authoritative parent issue body."
+
+
+def _decomposition_unit_payload(node_id: str, **overrides: Any) -> dict[str, Any]:
+    """Return one valid closed-schema work-unit payload."""
+    payload: dict[str, Any] = {
+        "node_id": node_id,
+        "title": f"Implement {node_id}",
+        "owned_behavior": f"Node {node_id} owns one parser behavior.",
+        "repository_paths": ("hephaestus/utils/parser.py",),
+        "acceptance_criteria": ("The parser rejects malformed payloads.",),
+        "failure_behavior": "The parser raises ValueError.",
+        "verification_commands": ("uv run pytest tests/unit/utils/test_parser.py",),
+        "expected_evidence": "The focused parser test passes.",
+        "prerequisites": (),
+        "requirement_ids": ("req-" + "0" * 12,),
+        "finding_ids": (),
+        "single_pr": True,
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _publish_decomposition_records(
+    gh: FakeStageGitHub,
+    parent: int,
+    *,
+    epoch: str,
+    tree: list[dict[str, Any]],
+    bindings: dict[str, int],
+    revision: int = 3,
+) -> None:
+    """Publish the complete durable record set for one sealed tree."""
+    from hephaestus.automation.pipeline.plan_journal import (
+        DecompositionBindings,
+        DecompositionIntent,
+        DecompositionSeal,
+        DecompositionTransitionReceipt,
+        publish_decomposition_bindings,
+        publish_decomposition_intent,
+        publish_decomposition_seal,
+        publish_decomposition_transition,
+    )
+
+    seal = DecompositionSeal(
+        requirements_epoch=epoch,
+        draft_digest="c" * 64,
+        nodes=tuple(dict(unit) for unit in tree),
+    )
+    publish_decomposition_seal(parent, seal, gh)
+    publish_decomposition_bindings(
+        parent,
+        DecompositionBindings(
+            requirements_epoch=epoch,
+            seal_digest=seal.seal_digest,
+            bindings=tuple(sorted(bindings.items())),
+        ),
+        gh,
+    )
+    publish_decomposition_transition(
+        parent,
+        DecompositionTransitionReceipt(
+            requirements_epoch=epoch,
+            labels_added=("epic", "state:skip"),
+            labels_removed=("state:needs-plan",),
+            needs_plan_confirmed=tuple(sorted(bindings)),
+            summary_confirmed=True,
+        ),
+        gh,
+    )
+    publish_decomposition_intent(
+        parent,
+        DecompositionIntent(
+            repository="org/repo-a",
+            parent=parent,
+            requirements_epoch=epoch,
+            trigger="convergence",
+            source_plan_revision=revision,
+            source_plan_fingerprint="b" * 64,
+            requirement_manifest=({"identifier": "req-" + "0" * 12, "digest": "d" * 64},),
+            finding_manifest=(),
+            created_at="2026-01-01T00:00:00+00:00",
+        ),
+        gh,
+    )
+
+
+def _admission_child_payloads(
+    parent: int,
+    node_bindings: dict[str, int],
+    *,
+    epoch: str,
+    revision: int = 3,
+    prerequisite_issues: dict[str, int] | None = None,
+) -> dict[int, str]:
+    """Render the exact expected body for each bound child."""
+    from hephaestus.automation.plan_decomposition import (
+        child_recovery_marker,
+        normalize_work_unit,
+        render_child_body,
+    )
+
+    prerequisites = prerequisite_issues or {}
+    bodies: dict[int, str] = {}
+    for node_id, issue_number in sorted(node_bindings.items(), key=lambda entry: entry[1]):
+        unit = normalize_work_unit(_decomposition_unit_payload(node_id))
+        assert unit is not None
+        bodies[issue_number] = render_child_body(
+            parent_issue=parent,
+            unit=unit,
+            prerequisite_issues={
+                prerequisite: issue
+                for prerequisite, issue in prerequisites.items()
+                if prerequisite in unit.prerequisites
+            },
+            plan_revision=revision,
+            requirements_epoch=epoch,
+            marker=child_recovery_marker(
+                repository="org/repo-a",
+                parent_issue=parent,
+                requirements_epoch=epoch,
+                generation=1,
+                node_id=node_id,
+            ),
+        )
+    return bodies
+
+
+def _seed_admission_children(
+    gh: FakeStageGitHub,
+    bodies: dict[int, str],
+    node_bindings: dict[str, int],
+    *,
+    labels: dict[int, set[str]] | None = None,
+) -> None:
+    """Seed each bound child issue with its sealed title, body, and labels."""
+    for node_id, issue_number in node_bindings.items():
+        gh.issues[issue_number] = {
+            "title": f"Implement {node_id}",
+            "body": bodies[issue_number],
+            "state": "OPEN",
+        }
+    for issue_number, label_set in (labels or {}).items():
+        gh.labels[issue_number] = set(label_set)
+
+
+def _admission_parent_item(
+    parent: int, children: list[dict[str, Any]], *, body: str = "The parent body"
+) -> WorkItem:
+    item = WorkItem(repo="repo-a", kind=ItemKind.ISSUE, issue=parent, stage=StageName.PLAN_REVIEW)
+    item.payload["issue_body"] = body
+    item.payload["decomposition_children"] = children
+    item.state = "VERIFY"
+    return item
+
+
+def test_all_children_exist_and_match_seal_before_admission(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every bound child verifies against the seal before the coordinator queues it."""
+    coordinator, _pool, gh = make_admission_coordinator(tmp_path, monkeypatch)
+    parent = 8
+    epoch = requirements_epoch(_ADMISSION_PARENT_BODY)
+    tree = [
+        _decomposition_unit_payload("node-a"),
+        _decomposition_unit_payload("node-b"),
+    ]
+    node_bindings = {"node-a": 41, "node-b": 42}
+    bodies = _admission_child_payloads(parent, node_bindings, epoch=epoch)
+    _seed_admission_children(
+        gh,
+        bodies,
+        node_bindings,
+        labels={
+            8: {"severity:high"},
+            41: {STATE_NEEDS_PLAN, "severity:high"},
+            42: {STATE_NEEDS_PLAN, "severity:high"},
+        },
+    )
+    _publish_decomposition_records(gh, parent, epoch=epoch, tree=tree, bindings=node_bindings)
+    item = claim_test_item(
+        coordinator,
+        _admission_parent_item(
+            parent,
+            [
+                {"node_id": node, "issue": issue}
+                for node, issue in sorted(node_bindings.items(), key=lambda entry: entry[1])
+            ],
+            body=_ADMISSION_PARENT_BODY,
+        ),
+    )
+
+    coordinator._admit_decomposition_children(item)
+
+    queued = [
+        entry.issue for entry in coordinator.queues[StageName.PLANNING].snapshot() if entry.issue
+    ]
+    assert sorted(queued) == [41, 42]
+    assert coordinator._generated_issue_ids == {41, 42}
+
+    # A child that drifted from its sealed body finishes the parent failed
+    # and queues no child.
+    coordinator2, _pool2, gh2 = make_admission_coordinator(tmp_path, monkeypatch)
+    _seed_admission_children(
+        gh2,
+        bodies,
+        node_bindings,
+        labels={8: {"severity:high"}, 41: {STATE_NEEDS_PLAN, "severity:high"}},
+    )
+    _publish_decomposition_records(gh2, parent, epoch=epoch, tree=tree, bindings=node_bindings)
+    gh2.issues[41] = {
+        "title": "Implement node-a",
+        "body": bodies[41] + "\nDrift.",
+        "state": "OPEN",
+    }
+    item2 = claim_test_item(
+        coordinator2,
+        _admission_parent_item(
+            parent,
+            [
+                {"node_id": node, "issue": issue}
+                for node, issue in sorted(node_bindings.items(), key=lambda entry: entry[1])
+            ],
+            body=_ADMISSION_PARENT_BODY,
+        ),
+    )
+
+    coordinator2._admit_decomposition_children(item2)
+
+    assert coordinator2.queues[StageName.PLANNING].snapshot() == []
+    finished = [
+        entry
+        for entry in coordinator2.queues[StageName.FINISHED].snapshot()
+        if entry.issue == parent and entry.result is not None
+    ]
+    assert finished and finished[0].result is not None
+    assert finished[0].result.passed is False
+    assert "sealed specification" in finished[0].result.reason
+
+
+def test_child_admission_requires_confirmed_needs_plan_and_severity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A child without its confirmed planning labels cannot be admitted."""
+    from hephaestus.automation.plan_decomposition import normalize_work_tree, topological_layers
+
+    parent = 8
+    epoch = requirements_epoch(_ADMISSION_PARENT_BODY)
+    tree = [_decomposition_unit_payload("node-a")]
+    node_bindings = {"node-a": 41}
+    bodies = _admission_child_payloads(parent, node_bindings, epoch=epoch)
+    children = [{"node_id": "node-a", "issue": 41}]
+
+    # Scenario 1: the parent carries severity:high, so the child must too.
+    coordinator, _pool, gh = make_admission_coordinator(tmp_path, monkeypatch)
+    _seed_admission_children(
+        gh, bodies, node_bindings, labels={8: {"severity:high"}, 41: {STATE_NEEDS_PLAN}}
+    )
+    _publish_decomposition_records(gh, parent, epoch=epoch, tree=tree, bindings=node_bindings)
+    item = claim_test_item(
+        coordinator,
+        _admission_parent_item(parent, children, body=_ADMISSION_PARENT_BODY),
+    )
+
+    coordinator._admit_decomposition_children(item)
+
+    assert coordinator.queues[StageName.PLANNING].snapshot() == []
+    finished = [
+        entry
+        for entry in coordinator.queues[StageName.FINISHED].snapshot()
+        if entry.issue == parent and entry.result is not None
+    ]
+    assert finished and finished[0].result is not None
+    assert "labels are not confirmed" in finished[0].result.reason
+
+    # Scenario 2: the child lacks state:needs-plan entirely.
+    coordinator2, _pool2, gh2 = make_admission_coordinator(tmp_path, monkeypatch)
+    _seed_admission_children(gh2, bodies, node_bindings, labels={8: {"severity:high"}, 41: set()})
+    _publish_decomposition_records(gh2, parent, epoch=epoch, tree=tree, bindings=node_bindings)
+    item2 = claim_test_item(
+        coordinator2,
+        _admission_parent_item(parent, children, body=_ADMISSION_PARENT_BODY),
+    )
+
+    coordinator2._admit_decomposition_children(item2)
+
+    assert coordinator2.queues[StageName.PLANNING].snapshot() == []
+    finished2 = [
+        entry
+        for entry in coordinator2.queues[StageName.FINISHED].snapshot()
+        if entry.issue == parent and entry.result is not None
+    ]
+    assert finished2 and finished2[0].result is not None
+    assert "labels are not confirmed" in finished2[0].result.reason
+
+    # The label contract mirrors the admission facts the coordinator verifies:
+    # one sealed normalized tree with its confirmed topological layers.
+    units = normalize_work_tree(list(tree))
+    assert units is not None
+    assert topological_layers(units) == (("node-a",),)
+
+
+def test_decomposition_dry_run_has_no_comment_issue_label_record_or_queue_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Dry-run admission reads nothing durable and queues no child."""
+    coordinator, _pool, gh = make_admission_coordinator(tmp_path, monkeypatch, dry_run=True)
+    parent = 8
+    epoch = requirements_epoch(_ADMISSION_PARENT_BODY)
+    tree = [_decomposition_unit_payload("node-a")]
+    node_bindings = {"node-a": 41}
+    bodies = _admission_child_payloads(parent, node_bindings, epoch=epoch)
+    _seed_admission_children(
+        gh,
+        bodies,
+        node_bindings,
+        labels={8: {"severity:high"}, 41: {STATE_NEEDS_PLAN, "severity:high"}},
+    )
+    _publish_decomposition_records(gh, parent, epoch=epoch, tree=tree, bindings=node_bindings)
+    comments_before = len(gh.comments.get(parent, []))
+    mutations_before = len(gh.mutation_log)
+    item = claim_test_item(
+        coordinator,
+        _admission_parent_item(
+            parent, [{"node_id": "node-a", "issue": 41}], body=_ADMISSION_PARENT_BODY
+        ),
+    )
+
+    coordinator._admit_decomposition_children(item)
+
+    assert coordinator.queues[StageName.PLANNING].snapshot() == []
+    assert coordinator._decomposition_graph == {}
+    assert coordinator._generated_issue_ids == set()
+    assert len(gh.comments.get(parent, [])) == comments_before
+    assert len(gh.mutation_log) == mutations_before
