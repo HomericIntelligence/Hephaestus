@@ -19,7 +19,9 @@ from collections import Counter
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from functools import partial
+from typing import Any
 
+import hephaestus.automation.pipeline.phase_timing as _phase_timing
 from hephaestus.automation.pipeline.work_item import ItemKind, PreservedWorktree, WorkItem
 from hephaestus.cli.localization import Localizer, get_localizer
 from hephaestus.cli.utils import emit_json_status
@@ -404,6 +406,61 @@ def _merge_admission_evidence(item: WorkItem) -> dict[str, object] | None:
     }
 
 
+def _item_timing_receipt(item: WorkItem, run_identity: str | None) -> dict[str, object] | None:
+    """Return one closed-schema timing receipt for *item*, or None.
+
+    Items without recorded phases, without a result, or with out-of-schema
+    timing contribute no receipt: the summary stays sanitized by construction.
+    """
+    result = item.result
+    if result is None:
+        return None
+    if not item.timing.phases and not item.timing.causes:
+        return None
+    identity = {
+        "repo": item.repo,
+        "issue": item.issue,
+        "pr": item.pr,
+        "head_sha": (
+            item.payload.get("_impl_source_revision") or item.payload.get("reviewed_pr_head_sha")
+        ),
+    }
+    try:
+        return _phase_timing.encode_timing_receipt(
+            identity,
+            item.timing,
+            run_identity=run_identity or None,
+            passed=result.passed,
+            final_stage=result.final_stage.value,
+        )
+    except (TypeError, ValueError):
+        return None
+
+
+def _item_timing_line(item: WorkItem) -> str | None:
+    """Return one bounded sanitized per-item phase-timing line, or None."""
+    receipt: dict[str, Any] | None = _item_timing_receipt(item, run_identity=None)
+    if receipt is None:
+        return None
+    phases = ", ".join(
+        f"{name}:{record['elapsed_s']:.1f}s" for name, record in sorted(receipt["phases"].items())
+    )
+    causes = ", ".join(f"{cause}:{count}" for cause, count in sorted(receipt["causes"].items()))
+    line = (
+        f"timing wall={(receipt['wall_s'] if receipt['wall_s'] is not None else 0.0):.1f}s "
+        f"active={receipt['active_s']:.1f}s wait={receipt['wait_s']:.1f}s"
+    )
+    if phases:
+        line += f" phases={phases}"
+    if receipt["current_phase"] is not None:
+        line += f" current={receipt['current_phase']}"
+    if receipt["last_cause"] is not None:
+        line += f" last_cause={receipt['last_cause']}"
+    if causes:
+        line += f" causes={causes}"
+    return line
+
+
 def print_summary(  # noqa: C901
     items: list[WorkItem],
     stats: RunStats,
@@ -412,6 +469,7 @@ def print_summary(  # noqa: C901
     json_out: bool,
     recovery_preserved: Sequence[PreservedWorktree] = (),
     terminal_summary: TerminalSummary | None = None,
+    run_identity: str = "",
 ) -> None:
     """Log the end-of-run summary; emit the JSON envelope when requested.
 
@@ -426,6 +484,7 @@ def print_summary(  # noqa: C901
         terminal_summary: Optional constant-space aggregate for all terminal
             outcomes.  When supplied, it controls aggregate counts while
             ``items`` remains the bounded detailed reporting window.
+        run_identity: The bounded run identifier recorded on the receipts.
 
     """
     items = latest_logical_items(items)
@@ -466,6 +525,9 @@ def print_summary(  # noqa: C901
                 merge_admission.get("detail"),
                 merge_admission.get("contexts"),
             )
+        timing_line = _item_timing_line(item)
+        if timing_line is not None:
+            logger.info("    %s", timing_line)
 
     if terminal_summary is None:
         dispositions: dict[str, int] = {}
@@ -497,6 +559,20 @@ def print_summary(  # noqa: C901
         logger.info("  review-run reasons: %s", review_run_reasons)
     if terminal_summary is not None and total_items > len(items):
         logger.info("  detailed terminal rows retained: %d of %d", len(items), total_items)
+    wall_total = sum(
+        item.timing.phases[name].elapsed_s for item in items for name in item.timing.phases
+    )
+    wall_active = sum(record.active_s for item in items for record in item.timing.phases.values())
+    wall_wait = sum(record.wait_s for item in items for record in item.timing.phases.values())
+    item_attempts = sum(record.attempts for item in items for record in item.timing.phases.values())
+    if wall_total or item_attempts:
+        logger.info(
+            "  phase-timing (detailed window): elapsed=%.1fs active=%.1fs wait=%.1fs attempts=%d",
+            wall_total,
+            wall_active,
+            wall_wait,
+            item_attempts,
+        )
     logger.info(
         "  agent jobs: %d (%.1fs total)  loops: %d  wall: %.1fs  interrupted: %s",
         stats.agent_job_count,
@@ -548,6 +624,11 @@ def print_summary(  # noqa: C901
             for item in items
             if item.payload.get("plan_review_cycle_id")
         ]
+        phase_timing = [
+            receipt
+            for item in items
+            if (receipt := _item_timing_receipt(item, run_identity)) is not None
+        ]
         resumable = [
             f"{item.repo}#{item.issue or item.pr or ''}@{item.stage.value}"
             for item in items
@@ -571,4 +652,5 @@ def print_summary(  # noqa: C901
             preserved_worktrees=[[number, path] for _, number, path in preserved],
             recovery_worktrees=[[number, path] for _, number, path in recovery_preserved],
             plan_review_sessions=review_sessions,
+            phase_timing=phase_timing,
         )

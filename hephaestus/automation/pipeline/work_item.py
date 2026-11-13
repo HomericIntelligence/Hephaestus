@@ -16,6 +16,7 @@ from enum import StrEnum
 from hashlib import sha256
 from typing import Any
 
+from .phase_timing import WorkItemTiming
 from .routing import StageName, budget_keys
 
 #: Maximum retained history events per item (oldest dropped first).
@@ -335,6 +336,9 @@ class WorkItem:
     learning_resume_stage: StageName | None = None
     post_processing: PostProcessingRecord | None = None
     result: ItemResult | None = None
+    # Coordinator-thread-owned observation accumulator.  Same single-threaded
+    # contract as ``history``; timing never routes, gates, or fails an item.
+    timing: WorkItemTiming = field(default_factory=WorkItemTiming)
 
     def learning_journal_identity(self, intent: LearningIntent) -> dict[str, object]:
         """Return restart identity plus bounded terminal cleanup state."""

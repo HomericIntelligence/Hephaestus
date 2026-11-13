@@ -10,6 +10,7 @@ from pathlib import Path
 
 import hephaestus.automation.pipeline.coordinator_types as ct
 import hephaestus.automation.pipeline.implementer_checkpoint as _checkpoint
+import hephaestus.automation.pipeline.phase_timing as _phase_timing
 from hephaestus.automation.pipeline.jobs import AgentJob, GitJob, JobHandle, JobResult
 from hephaestus.automation.repo_intake import RepoIntakeError, RepoIntakeReceipt
 from hephaestus.resilience import is_transient_subprocess_error
@@ -283,7 +284,7 @@ class ExecutionCoordinator(_CoordinatorHost):
         if facts.remaining is not None and facts.remaining < self.config.rate_guard_threshold:
             assert facts.reset_epoch is not None  # noqa: S101
             delay = max(0.0, facts.reset_epoch - self._wall_time() + 5.0)
-            self._timer_park(item, delay)
+            self._timer_park(item, delay, wait_cause=_phase_timing.WAIT_CAUSE_RATE_GUARD)
             return
         self._submit_ready_job(item, request)
 
@@ -344,6 +345,7 @@ class ExecutionCoordinator(_CoordinatorHost):
             self.inflight_per_repo[item.repo] -= 1
             if self.inflight_per_repo[item.repo] <= 0:
                 del self.inflight_per_repo[item.repo]
+        self._timing_record_job(item, handle, result)
         if isinstance(handle.job, AgentJob):
             self._agent_job_count += 1
             self._agent_job_time_s += result.duration_s
@@ -511,6 +513,38 @@ class ExecutionCoordinator(_CoordinatorHost):
         self.config.repo_intake_receipts[item.repo] = receipt.to_dict()
         self._ctx_cache.pop(item.repo, None)
         return None
+
+    def _timing_record_job(
+        self,
+        item: ct.WorkItem,
+        handle: JobHandle,
+        result: JobResult,
+    ) -> None:
+        """Attribute one completed job's bounded seconds to its phase.
+
+        A failed test job with no specific error text records the closed
+        ``test_failure`` sentinel so the following retry classification maps
+        to TEST_FAILURE; every other job records its closed error class.
+        """
+        error_class = self._job_result_error_class(result)
+        if (
+            error_class is None
+            and not result.ok
+            and not result.interrupted
+            and isinstance(handle.job, BuildTestJob)
+        ):
+            error_class = _phase_timing.TEST_FAILURE_ERROR_CLASS
+        phase = _phase_timing.classify_job_phase(
+            type(handle.job).__name__,
+            handle.job.op if isinstance(handle.job, GitJob) else None,
+            item.stage,
+        )
+        try:
+            item.timing.record_job(phase, result.duration_s, error_class)
+        except (TypeError, ValueError) as exc:
+            logger.warning(
+                "phase timing job attribution rejected for %s: %s", self._item_key(item), exc
+            )
 
     def _record_completion_metrics(
         self,

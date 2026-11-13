@@ -270,6 +270,7 @@ class SourceCoordinator(_CoordinatorHost):
             self._seen_item_ids.add(id(item))
             self.items.append(item)
             item.payload.setdefault("entry_stage", stage.value)
+        self._timing_note_push(item, stage)
         self._record_event("push", stage.value, self._item_key(item))
         return True
 

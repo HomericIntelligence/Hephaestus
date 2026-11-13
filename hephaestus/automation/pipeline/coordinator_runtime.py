@@ -4,6 +4,7 @@ import heapq
 import logging
 import signal
 import time
+from collections.abc import Callable
 from contextlib import suppress
 from pathlib import Path
 
@@ -11,6 +12,7 @@ import hephaestus.automation.pipeline.coordinator_observability as _observabilit
 import hephaestus.automation.pipeline.coordinator_types as ct
 import hephaestus.automation.pipeline.direct_scope_keys as direct_scope_keys
 import hephaestus.automation.pipeline.implementer_checkpoint as _checkpoint
+import hephaestus.automation.pipeline.phase_timing as _phase_timing
 import hephaestus.automation.pipeline.stage_base as stage_base_mod
 import hephaestus.automation.pipeline.stages as stages_mod
 import hephaestus.automation.pipeline.summary as summary_mod
@@ -48,6 +50,7 @@ logger = logging.getLogger("hephaestus.automation.pipeline.coordinator")
 
 _DYNAMIC_METRIC_SERIES_CAP = 100
 _DIRECT_SCOPE_BOOTSTRAP_KEY = direct_scope_keys.DIRECT_SCOPE_BOOTSTRAP_KEY
+_TIMING_RECEIPT_RECORDED_KEY = "_timing_receipt_recorded"
 _PIPELINE_STAGE_LABELS = frozenset(stage.value for stage in ct.StageName)
 _JOB_OUTCOME_LABELS = frozenset({"ok", "failed", "interrupted"})
 _LANE_LABELS = frozenset({"main", "auxiliary"})
@@ -148,6 +151,111 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
     def _record_event(self, event: str, *fields: ct.Any) -> None:
         """Append an event to memory and, when configured, to JSONL on disk."""
         _observability.record_event(self, event, *fields, now_fn=self._wall_time, logger=logger)
+
+    # --- Phase timing (observation-only; issue #3295) ------------------------
+    # The coordinator thread is the single writer of WorkItemTiming.  Every
+    # recording call is guarded: a timing-validation failure logs a warning
+    # and records nothing, so timing can never route, poison, or fail an item.
+
+    def _timing_observe(self, item: ct.WorkItem, observe: Callable[[], object]) -> None:
+        """Apply one timing observation without ever failing the item."""
+        try:
+            observe()
+        except (TypeError, ValueError) as exc:
+            logger.warning(
+                "phase timing observation rejected for %s: %s", self._item_key(item), exc
+            )
+
+    def _timing_enter_stage(self, item: ct.WorkItem, stage: ct.StageName, now_s: float) -> None:
+        """Open the item's phase interval for *stage* when the stage maps."""
+        phase = _phase_timing.PHASE_FOR_STAGE.get(stage)
+        if phase is not None:
+            self._timing_observe(item, lambda: item.timing.enter_phase(phase, now_s))
+
+    def _timing_leave_stage(self, item: ct.WorkItem, stage: ct.StageName, now_s: float) -> None:
+        """Close the item's open phase interval for *stage* when it maps."""
+        phase = _phase_timing.PHASE_FOR_STAGE.get(stage)
+        if phase is not None:
+            self._timing_observe(item, lambda: item.timing.leave_phase(phase, now_s))
+
+    def _timing_begin_wait(
+        self, item: ct.WorkItem, phase: _phase_timing.PhaseName | None, now_s: float
+    ) -> None:
+        """Open one parked-wait interval owned by *phase*."""
+        if phase is not None:
+            self._timing_observe(item, lambda: item.timing.begin_wait(phase, now_s))
+
+    def _timing_end_wait(self, item: ct.WorkItem, now_s: float) -> None:
+        """Close the item's open parked-wait interval."""
+        self._timing_observe(item, lambda: item.timing.end_wait(now_s))
+
+    def _timing_close(self, item: ct.WorkItem, now_s: float) -> None:
+        """Close every open interval once (idempotent)."""
+        self._timing_observe(item, lambda: item.timing.close(now_s))
+
+    def _timing_note_push(self, item: ct.WorkItem, stage: ct.StageName) -> None:
+        """Record the phase effect of one successful queue push.
+
+        A seeding push opens the item's first phase; a timer wake closes the
+        parked wait and reopens the stage phase.
+        """
+        now_s = self._monotonic()
+        if item.timing.current_waiting:
+            self._timing_end_wait(item, now_s)
+        self._timing_enter_stage(item, stage, now_s)
+
+    def _timing_record_retry(self, item: ct.WorkItem, outcome: ct.StageOutcome) -> None:
+        """Record one classified retry cause when a closed input maps it."""
+        cause = _phase_timing.classify_retry_cause(
+            item.stage, outcome.note, item.timing.last_error_class
+        )
+        phase = _phase_timing.PHASE_FOR_STAGE.get(item.stage)
+        if cause is None or phase is None:
+            return
+        self._timing_observe(item, lambda: item.timing.record_attempt(phase, cause))
+        item.timing.last_error_class = None
+
+    def _timing_record_correction(self, item: ct.WorkItem, outcome: ct.StageOutcome) -> None:
+        """Record one correction attempt for a regression to an earlier stage."""
+        cause = _phase_timing.classify_retry_cause(
+            item.stage, outcome.note, item.timing.last_error_class
+        )
+        if cause is None:
+            cause = _phase_timing.default_retry_cause(item.stage)
+        phase = _phase_timing.PhaseName.CORRECTION
+        self._timing_observe(item, lambda: item.timing.record_attempt(phase, cause))
+        item.timing.last_error_class = None
+
+    def _emit_timing_receipt(self, item: ct.WorkItem) -> None:
+        """Emit one bounded ``work_item_timing`` receipt for a terminal item."""
+        if item.payload.get(_TIMING_RECEIPT_RECORDED_KEY, False):
+            return
+        item.payload[_TIMING_RECEIPT_RECORDED_KEY] = True
+        result = item.result
+        if result is None:  # pragma: no cover - guarded by _record_terminal_result
+            return
+        self._timing_close(item, self._monotonic())
+        identity = {
+            "repo": item.repo,
+            "issue": item.issue,
+            "pr": item.pr,
+            "head_sha": (
+                item.payload.get("_impl_source_revision")
+                or item.payload.get("reviewed_pr_head_sha")
+            ),
+        }
+        try:
+            receipt = _phase_timing.encode_timing_receipt(
+                identity,
+                item.timing,
+                run_identity=self.config.run_identity,
+                passed=result.passed,
+                final_stage=result.final_stage.value,
+            )
+        except (TypeError, ValueError) as exc:
+            logger.warning("timing receipt rejected for %s: %s", self._item_key(item), exc)
+            return
+        self._record_event("work_item_timing", receipt)
 
     def _observability_snapshot(self) -> dict[str, ct.Any]:
         """Read the coordinator lifecycle values that observability exposes."""
@@ -396,6 +504,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
                         terminal_summary=(
                             self._terminal_summary if self._terminal_summary.total else None
                         ),
+                        run_identity=self.config.run_identity,
                     )
                 finally:
                     if self._metrics_server is not None:
@@ -483,6 +592,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
             return
         item.payload["_summary_recorded"] = True
         self._terminal_summary.record(item)
+        self._emit_timing_receipt(item)
         self._seen_item_ids.discard(id(item))
 
         # Single identity scan: locate the item; collect recorded indices.
@@ -574,6 +684,9 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
             item.add_history_event(target, item.state, note="enqueued")
         if result is not None:
             item.result = result
+        now_s = self._monotonic()
+        self._timing_leave_stage(item, source, now_s)
+        self._timing_enter_stage(item, target, now_s)
         self._record_event("push", target.value, self._item_key(item))
 
     def _handoff_item(
@@ -679,7 +792,9 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
         )
         self._drain_queues()
 
-    def _timer_park(self, item: ct.WorkItem, delay_s: float) -> None:
+    def _timer_park(
+        self, item: ct.WorkItem, delay_s: float, *, wait_cause: str = _phase_timing.WAIT_CAUSE_STAGE
+    ) -> None:
         """Park *item* on the timer heap for ``delay_s`` seconds."""
         # A timer is outside every stage queue.  Release a normal drain's
         # source lease before parking so its capacity is not stranded while
@@ -689,6 +804,9 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
         heapq.heappush(self.timers, (wake, self._seq, item))
         self._seq += 1
         item.add_history_event(item.stage, item.state, note=f"timer-parked {delay_s:.1f}s")
+        self._timing_begin_wait(
+            item, _phase_timing.classify_wait_phase(item.stage, wait_cause), self._monotonic()
+        )
         self._record_event("timer_park", item.stage.value, self._item_key(item), delay_s)
 
     def _wake_timers(self) -> None:
@@ -991,7 +1109,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
                     item.stage.value,
                     delay,
                 )
-                self._timer_park(item, delay)
+                self._timer_park(item, delay, wait_cause=_phase_timing.WAIT_CAUSE_RATE_GUARD)
                 return
             logger.exception(
                 "pipeline item %s poisoned at %s; routing to finished(fail)",
@@ -1259,6 +1377,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
             pending = f"would wait {delay}s" if delay is not None else "would retry"
             self._finish(item, passed=False, reason=f"[dry-run] {pending}: {outcome.note}")
             return
+        self._timing_record_retry(item, outcome)
         if delay is None:
             if not self._restore_source_lease(item):
                 raise RuntimeError("retry requires an owned source lease")
@@ -1372,6 +1491,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
         if target is ct.StageName.FINISHED:
             self._finish(item, passed=False, reason=outcome.note or "fail_back")
         else:
+            self._timing_record_correction(item, outcome)
             if (
                 item.stage is ct.StageName.PLAN_REVIEW
                 and target is ct.StageName.PLANNING
