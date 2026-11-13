@@ -518,3 +518,21 @@ def test_render_current_plan_rejects_an_invalid_provenance_line() -> None:
             revision=1,
             consolidation_provenance="<!-- not-a-provenance -->",
         )
+
+
+def test_complete_current_plan_context_is_not_truncated() -> None:
+    """The decomposition trigger renders the complete plan without a budget."""
+    from hephaestus.automation.review_journal import (
+        MAX_CURRENT_REVISION_CONTEXT_CHARS,
+        complete_current_plan_context,
+        render_current_plan,
+    )
+
+    plan = "Big plan\n" * 4_000
+    comments = [IssueComment(body=render_current_plan(plan, revision=2), viewer_did_author=True)]
+
+    complete = complete_current_plan_context(comments)
+
+    assert len(plan) > MAX_CURRENT_REVISION_CONTEXT_CHARS
+    assert complete.count("Big plan") == plan.count("Big plan")
+    assert "truncated" not in complete
