@@ -318,7 +318,7 @@ remaining narrowly approved runtime variables and the deny-by-default policy.
 
 Run any command with `--help` to see full usage.
 
-The 57 console scripts are declared in `[project.scripts]` in
+The 59 console scripts are declared in `[project.scripts]` in
 [`pyproject.toml`](pyproject.toml).
 
 ### Automation
@@ -458,6 +458,8 @@ sync (#993).
 | `hephaestus-audit-worktrees` | Emit a read-only inventory of registered worktrees |
 | `hephaestus-remove-worktree` | Remove one approved, clean registered worktree at its audited HEAD |
 | `hephaestus-resolve-pr` | Resolve an explicit or current-branch open pull request |
+| `hephaestus-prepare-pr-worktree` | Prepare a pull-request-bound repair worktree with an immutable receipt |
+| `hephaestus-publish-pr-worktree` | Publish a receipt-bound repair with revalidation and an exact lease |
 | `hephaestus-collect-pr-evidence` | Collect pull-request metadata, changed paths, and check evidence |
 | `hephaestus-pr-diff-context` | Compute author-intent and current-base pull-request diff ranges |
 | `hephaestus-repository-evidence` | Collect bounded Git history and source-pattern evidence |

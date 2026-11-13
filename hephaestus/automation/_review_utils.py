@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import os
 import re
 from collections.abc import Mapping
 from copy import deepcopy
@@ -85,33 +84,18 @@ def add_max_workers_arg(
 
 def _parse_gh_extra_path_root(value: str) -> Path:
     """Validate an explicit root whose only admitted executable is ``bin/gh``."""
-    root = Path(value).expanduser()
-    if not root.is_absolute():
-        raise argparse.ArgumentTypeError(text("--gh-extra-path-root must be an absolute path"))
-    try:
-        resolved_root = root.resolve(strict=True)
-        executable = (resolved_root / "bin" / "gh").resolve(strict=True)
-    except OSError as exc:
-        raise argparse.ArgumentTypeError(
-            text("--gh-extra-path-root must contain an executable bin/gh")
-        ) from exc
-    if (
-        not resolved_root.is_dir()
-        or not executable.is_file()
-        or not os.access(executable, os.X_OK)
-        or not executable.is_relative_to(resolved_root)
-    ):
-        raise argparse.ArgumentTypeError(
-            text("--gh-extra-path-root must contain an executable bin/gh without symlink escapes")
-        )
-    return resolved_root
+    from hephaestus.github.remote_git import validate_gh_extra_path_root
+
+    return validate_gh_extra_path_root(value)
 
 
 def add_gh_extra_path_root_arg(parser: argparse.ArgumentParser) -> None:
     """Add the explicit, narrowly validated ``gh`` root argument to ``parser``."""
+    from hephaestus.github.remote_git import gh_extra_path_root_type
+
     parser.add_argument(
         "--gh-extra-path-root",
-        type=_parse_gh_extra_path_root,
+        type=gh_extra_path_root_type,
         default=None,
         metavar="ROOT",
         help=text(

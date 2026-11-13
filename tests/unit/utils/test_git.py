@@ -217,3 +217,60 @@ def test_git_ls_remote_contains_threads_explicit_timeout() -> None:
 def test_run_git_is_available_from_utils_package() -> None:
     """The package-level utils surface exposes the shared git runner."""
     assert utils_pkg.run_git is shared_git.run_git
+
+
+class TestRunGitPreLaunch:
+    """The run_git pre-launch seam stops the launch without retrying."""
+
+    def test_pre_launch_failure_wraps_in_git_pre_launch_error_without_starting_git(self) -> None:
+        """A validator failure stops the launch and is never retried."""
+
+        def validate() -> None:
+            raise ValueError("worktree head moved")
+
+        with patch("hephaestus.utils.git.run_subprocess") as run:
+            with pytest.raises(shared_git.GitPreLaunchError, match=r"worktree head moved") as info:
+                shared_git.run_git(
+                    ["push", "--force-with-lease=refs/heads/b:abc", "origin", "b"],
+                    pre_launch=validate,
+                )
+
+        run.assert_not_called()
+        assert isinstance(info.value.__cause__, ValueError)
+
+    def test_pre_launch_runs_once_per_retry_attempt(self) -> None:
+        """Each retry attempt revalidates immediately before its Git launch."""
+        failure = subprocess.CalledProcessError(128, ["git", "push"], stderr="network timeout")
+        completed = subprocess.CompletedProcess(["git"], 0, stdout="", stderr="")
+        launches: list[int] = []
+
+        def validate() -> None:
+            launches.append(len(launches))
+
+        with (
+            patch("hephaestus.utils.git.run_subprocess", side_effect=[failure, completed]) as run,
+            patch("hephaestus.utils.retry.time.sleep"),
+        ):
+            assert shared_git.run_git(["push", "origin", "feature"], pre_launch=validate) is (
+                completed
+            )
+
+        assert launches == [0, 1]
+        assert run.call_count == 2
+
+    def test_pre_launch_runs_immediately_before_the_git_process(self) -> None:
+        """The validator finishes before the Git subprocess boundary is entered."""
+        order: list[str] = []
+
+        def validate() -> None:
+            order.append("validate")
+
+        def tracked_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess:
+            order.append("git")
+            return subprocess.CompletedProcess(cmd, 0)
+
+        with patch("hephaestus.utils.git.run_subprocess", side_effect=tracked_run) as run:
+            shared_git.run_git(["status"], pre_launch=validate)
+
+        assert order == ["validate", "git"]
+        assert "pre_launch" not in run.call_args.kwargs

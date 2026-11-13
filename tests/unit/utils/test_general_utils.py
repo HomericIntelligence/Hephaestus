@@ -9,6 +9,7 @@ import threading
 import time
 from contextlib import suppress
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -1059,3 +1060,78 @@ class TestTrackedProcessRealChildCleanup:
         finally:
             _terminate_owned(child_pid, descendant_pid)
             worker.join(timeout=10)
+
+
+class TestRunSubprocessPreLaunch:
+    """The run_subprocess pre-launch seam runs only when a child starts."""
+
+    def test_pre_launch_runs_before_the_child_process(self) -> None:
+        """The validator completes before the child process is created."""
+        order: list[str] = []
+        real_run = subprocess.run
+
+        def tracked_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess:
+            order.append("child")
+            return real_run(cmd, **kwargs)
+
+        with patch(f"{helpers.__name__}.subprocess.run", side_effect=tracked_run):
+            result = helpers.run_subprocess(
+                ["true"],
+                env={},
+                pre_launch=lambda: order.append("validate"),
+            )
+
+        assert result.returncode == 0
+        assert order == ["validate", "child"]
+
+    def test_pre_launch_failure_starts_no_child(self) -> None:
+        """A validator exception propagates and no child process starts."""
+
+        def validate() -> None:
+            raise RuntimeError("local state changed")
+
+        with patch(f"{helpers.__name__}.subprocess.run") as run:
+            with pytest.raises(RuntimeError, match=r"local state changed"):
+                helpers.run_subprocess(["true"], env={}, pre_launch=validate)
+
+        run.assert_not_called()
+
+    def test_dry_run_skips_the_pre_launch_validator(self) -> None:
+        """A dry-run never starts a child, so validation never runs."""
+        launches: list[int] = []
+
+        helpers.run_subprocess(
+            ["true"], env={}, dry_run=True, pre_launch=lambda: launches.append(1)
+        )
+
+        assert launches == []
+
+    def test_pre_launch_runs_on_the_tracked_process_path(self) -> None:
+        """Tracked process groups revalidate before the child starts."""
+        order: list[str] = []
+        completed: subprocess.CompletedProcess[str] = subprocess.CompletedProcess(["true"], 0)
+
+        def tracked_group(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess:
+            order.append("child")
+            return completed
+
+        with (
+            patch(
+                f"{helpers.__name__}._run_tracked_process_group",
+                side_effect=tracked_group,
+            ) as tracked,
+            patch(
+                f"{helpers.__name__}.subprocess.run",
+                side_effect=AssertionError("tracked groups must not use plain run"),
+            ),
+        ):
+            result = helpers.run_subprocess(
+                ["true"],
+                env={},
+                track_process_group=True,
+                pre_launch=lambda: order.append("validate"),
+            )
+
+        assert result.returncode == 0
+        assert order == ["validate", "child"]
+        tracked.assert_called_once()
