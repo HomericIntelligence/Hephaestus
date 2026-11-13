@@ -357,8 +357,8 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
             self._fatal = True
         finally:
             try:
-                # Reap both lanes before final records and reports. The intake
-                # lease remains held while those consumers use its fixed paths.
+                # Reap both lanes before final records and reports. The launch
+                # intake remains owned while those consumers use its paths.
                 self._shutdown_pool()
                 self._finalize_resumable()
                 exit_code = self._exit_code()
@@ -401,8 +401,32 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
                     if self._metrics_server is not None:
                         self._metrics_server.stop()
             finally:
-                self.pool.release_repo_intake_leases()
+                self._cleanup_repo_intakes()
         return exit_code
+
+    def _cleanup_repo_intakes(self) -> None:
+        """Remove launch-owned intakes after both worker lanes stop.
+
+        Each preserved failure is reported with its retained path and the
+        corrupted-worktree runbook name. Cleanup failures never change the
+        computed run exit code.
+        """
+        try:
+            failures = self.pool.cleanup_repo_intakes()
+        except Exception:
+            logger.exception("repository-intake cleanup boundary failed")
+            return
+        for failure in failures:
+            logger.warning(
+                "repository-intake launch cleanup preserved %s; recover with "
+                "docs/runbooks/corrupted-worktree.md: %s",
+                failure.path,
+                failure.error,
+            )
+            self._record_event(
+                "repo_intake_cleanup_preserved",
+                {"path": failure.path, "error": failure.error},
+            )
 
     def _effective_items(self) -> list[ct.WorkItem]:
         """Return latest logical items, collapsing superseded re-seed attempts."""

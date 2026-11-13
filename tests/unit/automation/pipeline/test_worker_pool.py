@@ -11211,7 +11211,7 @@ class TestGitOps:
         source_manager = SourceWorkspaceManager(
             intake.path,
             repository="acme/repo",
-            base_dir=intake.state_root / "build" / ".worktrees",
+            base_dir=intake.state_root.parent.parent / "build" / ".worktrees",
         )
         predecessor = source_manager.prepare(
             602, SourceLane.IMPLEMENTATION, expected_head, branch="602-auto"
@@ -11293,7 +11293,7 @@ class TestGitOps:
         assert result.value["failure_kind"] == "adopted_head_fetch"
         assert result.value["source_workspace_creation_failure"] == "remote_refresh"
         authorize.assert_not_called()
-        writer = intake.state_root / "build" / ".worktrees" / "auto-602-impl"
+        writer = intake.state_root.parent.parent / "build" / ".worktrees" / "auto-602-impl"
         assert not writer.exists()
         state = caller / ".git" / "hephaestus-source-workspaces"
         assert not list(state.glob("*.json"))
@@ -11384,7 +11384,7 @@ class TestGitOps:
 
         caller, remote = _make_repository(tmp_path)
         intake = _manager(caller, remote).prepare()
-        writer = intake.state_root / "build" / ".worktrees" / "auto-602-impl"
+        writer = intake.state_root.parent.parent / "build" / ".worktrees" / "auto-602-impl"
         _run_git(intake.path, "worktree", "add", "-b", "602-auto", str(writer), intake.revision)
         (writer / "tracked.txt").write_text("changed\n", encoding="utf-8")
         kwargs: dict[str, Any] = {
@@ -18741,19 +18741,19 @@ class TestGitLocking:
         events: list[str] = []
 
         @contextmanager
-        def run_lease() -> Iterator[None]:
-            events.append("lease_enter")
+        def owner() -> Iterator[None]:
+            events.append("owner_enter")
             try:
                 yield
             finally:
-                events.append("lease_exit")
+                events.append("owner_exit")
 
         receipt = MagicMock()
         receipt.to_dict.return_value = {"revision": "a" * 40}
         manager = MagicMock()
         manager.common_dir = caller / ".git"
         manager.caller_root = caller
-        manager.run_lease.side_effect = run_lease
+        manager.owner.side_effect = owner
 
         def validate(**_kwargs: object) -> tuple[Path, ...]:
             assert events == ["manager"]
@@ -18764,7 +18764,7 @@ class TestGitLocking:
         manager.validate.side_effect = validate
 
         def prepare(**_kwargs: object) -> MagicMock:
-            assert events == ["manager", "validate", "lease_enter"]
+            assert events == ["manager", "validate", "owner_enter"]
             assert caller_state.is_dir()
             events.append("prepare")
             return receipt
@@ -18800,11 +18800,17 @@ class TestGitLocking:
             ):
                 result = pool._run_git(job)
         finally:
-            pool.release_repo_intake_leases()
+            pool.cleanup_repo_intakes()
             pool.shutdown()
 
         assert result.ok is True
-        assert events == ["manager", "validate", "lease_enter", "prepare", "lease_exit"]
+        assert events == [
+            "manager",
+            "validate",
+            "owner_enter",
+            "prepare",
+            "owner_exit",
+        ]
         assert caller_state.is_dir()
 
     def test_intake_and_fetch_share_the_git_common_directory_lock(
@@ -18879,7 +18885,7 @@ class TestGitLocking:
                     linked
                 ).parent
                 manager_type.return_value.caller_root = linked
-                manager_type.return_value.run_lease.return_value = nullcontext()
+                manager_type.return_value.owner.return_value = nullcontext()
                 manager_type.return_value.prepare.side_effect = enter_intake
                 holder = threading.Thread(target=run_holder)
                 intake = threading.Thread(target=run_intake)
@@ -19201,7 +19207,7 @@ class TestGitLocking:
         finally:
             pool.shutdown()
 
-        manager.run_lease.assert_not_called()
+        manager.owner.assert_not_called()
         manager.prepare.assert_not_called()
         assert result.error == "repository-intake Git metadata path is unavailable"
 
@@ -19348,7 +19354,7 @@ class TestGitLocking:
                 result = pool._run_git(job)
         finally:
             pool.shutdown()
-        manager.run_lease.assert_not_called()
+        manager.owner.assert_not_called()
         manager.prepare.assert_not_called()
         assert result.error == "Git common directory changed before lock admission"
 
@@ -19511,7 +19517,7 @@ class TestGitLocking:
         finally:
             pool.shutdown()
         dispatch.assert_not_called()
-        manager.run_lease.assert_not_called()
+        manager.owner.assert_not_called()
         assert result.ok is False
         assert result.error is not None
 
@@ -19806,7 +19812,7 @@ class TestGitLocking:
         manager = MagicMock()
         manager.common_dir = common_dir
         manager.caller_root = caller
-        manager.run_lease.return_value = nullcontext()
+        manager.owner.return_value = nullcontext()
         manager.prepare.side_effect = RepoIntakeError("lock_timeout")
         job = GitJob(
             repo="test/repo",
@@ -21649,14 +21655,14 @@ def test_worker_pool_retains_explicit_pyxis_placement(tmp_path: Path) -> None:
         pool.shutdown()
 
 
-def test_intake_lease_is_reused_until_explicit_idempotent_release(
+def test_intake_owner_lock_is_reused_until_explicit_idempotent_cleanup(
     pool: WorkerPool, tmp_path: Path
 ) -> None:
-    """One pool keeps one run lease across repeated intake preparation."""
+    """One pool keeps one launch owner lock across repeated intake preparation."""
     events: list[str] = []
 
     @contextmanager
-    def lease() -> Iterator[None]:
+    def owner() -> Iterator[None]:
         events.append("enter")
         try:
             yield
@@ -21668,7 +21674,8 @@ def test_intake_lease_is_reused_until_explicit_idempotent_release(
     managers = [MagicMock(), MagicMock()]
     for manager in managers:
         manager.common_dir = tmp_path / ".git"
-        manager.run_lease.side_effect = lease
+        manager.launch_identity = "run-1"
+        manager.owner.side_effect = owner
         manager.prepare.return_value = receipt
     job = GitJob(
         repo="acme/repo",
@@ -21687,23 +21694,25 @@ def test_intake_lease_is_reused_until_explicit_idempotent_release(
         assert pool._git_prepare_intake(job).ok
 
     assert events == ["enter"]
-    managers[0].run_lease.assert_called_once_with()
-    managers[1].run_lease.assert_not_called()
+    managers[0].owner.assert_called_once_with()
+    managers[0].prepare.assert_called_once_with()
+    managers[1].owner.assert_not_called()
+    managers[1].prepare.assert_not_called()
     pool.shutdown(mark_interrupted=False)
     assert events == ["enter"]
-    pool.release_repo_intake_leases()
-    pool.release_repo_intake_leases()
+    assert pool.cleanup_repo_intakes() == []
+    assert pool.cleanup_repo_intakes() == []
     assert events == ["enter", "exit"]
 
 
-def test_failed_first_intake_preparation_releases_new_run_lease(
+def test_failed_first_intake_preparation_releases_new_owner_lock(
     pool: WorkerPool, tmp_path: Path
 ) -> None:
-    """A failed first preparation does not keep a run lease."""
+    """A failed first preparation does not keep a launch owner lock."""
     events: list[str] = []
 
     @contextmanager
-    def lease() -> Iterator[None]:
+    def owner() -> Iterator[None]:
         events.append("enter")
         try:
             yield
@@ -21712,7 +21721,8 @@ def test_failed_first_intake_preparation_releases_new_run_lease(
 
     manager = MagicMock()
     manager.common_dir = tmp_path / ".git"
-    manager.run_lease.side_effect = lease
+    manager.launch_identity = "run-1"
+    manager.owner.side_effect = owner
     manager.prepare.side_effect = RepoIntakeError("injected preparation failure")
     job = GitJob(
         repo="acme/repo",
@@ -21731,7 +21741,7 @@ def test_failed_first_intake_preparation_releases_new_run_lease(
 
     assert result.error == "injected preparation failure"
     assert events == ["enter", "exit"]
-    pool.release_repo_intake_leases()
+    assert pool.cleanup_repo_intakes() == []
     assert events == ["enter", "exit"]
 
 
@@ -21739,7 +21749,6 @@ def _local_intake_manager_factory(
     remote: Path,
     *,
     remote_head_override: Callable[[int, str], str] | None = None,
-    ancestry_returncode: int | None = None,
 ) -> Callable[..., RepoIntakeManager]:
     """Return a real intake-manager factory with a local fetch transport."""
     remote_reads = 0
@@ -21759,8 +21768,6 @@ def _local_intake_manager_factory(
             del log_errors
             if command[0] == "gh":
                 return subprocess.CompletedProcess(command, 0, "main\n", "")
-            if "merge-base" in command and ancestry_returncode is not None:
-                return subprocess.CompletedProcess(command, ancestry_returncode, "", "")
             adjusted = list(command)
             if "fetch" in adjusted:
                 adjusted[adjusted.index("origin")] = str(remote)
@@ -21792,6 +21799,7 @@ def _local_intake_manager_factory(
             git_runner=runner,
             git_env=kwargs["git_env"],
             remote_config=(),
+            launch_identity=kwargs["launch_identity"],
         )
 
     return factory
@@ -21840,7 +21848,7 @@ def test_linked_intake_reuses_primary_receipt_after_compatibility_lock_remains(
             assert isinstance(first.value, dict)
 
             primary_lock = _repo_lock_path("acme/repo")
-            pool.release_repo_intake_leases()
+            pool.cleanup_repo_intakes()
             assert primary_lock.is_file()
 
             monkeypatch.chdir(linked)
@@ -21852,7 +21860,7 @@ def test_linked_intake_reuses_primary_receipt_after_compatibility_lock_remains(
         assert second.value["revision"] == first.value["revision"]
         assert second.value["generation"] == first.value["generation"]
     finally:
-        pool.release_repo_intake_leases()
+        pool.cleanup_repo_intakes()
         pool.shutdown()
 
 
@@ -21902,7 +21910,7 @@ def test_linked_intake_waits_for_primary_default_compatibility_lock(
         assert result.error == "lock_timeout"
         dispatch.assert_not_called()
     finally:
-        pool.release_repo_intake_leases()
+        pool.cleanup_repo_intakes()
         pool.shutdown()
 
 
@@ -21959,7 +21967,7 @@ def test_linked_intake_rejects_hard_linked_primary_compatibility_lock(
         assert unrelated.read_bytes() == b"unchanged"
         assert unrelated.stat().st_nlink == 2
     finally:
-        pool.release_repo_intake_leases()
+        pool.cleanup_repo_intakes()
         pool.shutdown()
 
 
@@ -22012,7 +22020,7 @@ def test_intake_rejects_registered_lock_directory_replacement_after_admission(
         assert result.error == "repository-intake lock path is unavailable"
         dispatch.assert_not_called()
     finally:
-        pool.release_repo_intake_leases()
+        pool.cleanup_repo_intakes()
         pool.shutdown()
 
 
@@ -22075,7 +22083,7 @@ def test_intake_rejects_worktree_registration_drift_before_prepare(
         assert not managers[0].receipt_path.exists()
         assert not managers[0].worktree_path.exists()
     finally:
-        pool.release_repo_intake_leases()
+        pool.cleanup_repo_intakes()
         pool.shutdown()
 
 
@@ -22147,7 +22155,7 @@ def test_prepare_intake_reports_unavailable_run_lock_at_worker_entry(
     ):
         result = pool._git_prepare_intake(_intake_job(repo))
 
-    assert result.error == "exclusive repository-intake run locking is unavailable"
+    assert result.error == "exclusive repository-intake launch locking is unavailable"
 
 
 @pytest.mark.parametrize(
@@ -22186,50 +22194,18 @@ def test_prepare_intake_rejects_sha_failures_at_worker_entry(
     assert result.error == expected
 
 
-def test_prepare_intake_rejects_ancestry_ambiguity_at_worker_entry(
-    pool: WorkerPool, tmp_path: Path
-) -> None:
-    """Worker intake fails closed when Git cannot prove update ancestry."""
-    repo, _predecessor, _head = _worker_repository(tmp_path)
-    remote = tmp_path / "remote.git"
-    _git(repo, "remote", "set-url", "origin", "https://github.com/acme/repo.git")
-    normal_factory = _local_intake_manager_factory(remote)
-    ambiguous_factory = _local_intake_manager_factory(remote, ancestry_returncode=2)
-    try:
-        with (
-            patch(f"{_WP}._trusted_gh_executable", return_value="gh"),
-            patch(f"{_WP}._trusted_remote_git_config", return_value=()),
-            patch(f"{_WP}.RepoIntakeManager", side_effect=normal_factory),
-        ):
-            assert pool._git_prepare_intake(_intake_job(repo)).ok
-
-        (repo / "tracked.txt").write_text("three\n", encoding="utf-8")
-        _git(repo, "commit", "-am", "third")
-        _git(repo, "push", str(remote), "main")
-        with (
-            patch(f"{_WP}._trusted_gh_executable", return_value="gh"),
-            patch(f"{_WP}._trusted_remote_git_config", return_value=()),
-            patch(f"{_WP}.RepoIntakeManager", side_effect=ambiguous_factory),
-        ):
-            result = pool._git_prepare_intake(_intake_job(repo))
-
-        assert result.error == "repository-intake ancestry proof failed"
-    finally:
-        pool.release_repo_intake_leases()
-
-
-class _RecordingIntakeLease:
-    """Record only explicit entry and exit calls for an intake lease."""
+class _RecordingIntakeOwnerLock:
+    """Record only explicit entry and exit calls for a launch owner lock."""
 
     def __init__(self, events: list[str]) -> None:
         self._events = events
 
     def __enter__(self) -> None:
-        """Record lease acquisition."""
+        """Record owner-lock acquisition."""
         self._events.append("enter")
 
     def __exit__(self, *_args: object) -> None:
-        """Record lease release."""
+        """Record owner-lock release."""
         self._events.append("exit")
 
 
@@ -22237,18 +22213,18 @@ class _RecordingIntakeLease:
     "failure_type",
     [Exception, KeyboardInterrupt, SystemExit, BaseException],
 )
-def test_first_intake_preparation_releases_lease_before_control_flow_propagates(
+def test_first_intake_preparation_releases_owner_lock_before_control_flow_propagates(
     pool: WorkerPool,
     tmp_path: Path,
     failure_type: type[BaseException],
 ) -> None:
-    """A control-flow failure releases a new lease before it propagates."""
+    """A control-flow failure releases a new owner lock before it propagates."""
     events: list[str] = []
-    lease = _RecordingIntakeLease(events)
+    owner_lock = _RecordingIntakeOwnerLock(events)
 
     manager = MagicMock()
     manager.common_dir = tmp_path / ".git"
-    manager.run_lease.return_value = lease
+    manager.owner.return_value = owner_lock
     manager.prepare.side_effect = failure_type("injected preparation failure")
     job = GitJob(
         repo="acme/repo",
@@ -22267,30 +22243,30 @@ def test_first_intake_preparation_releases_lease_before_control_flow_propagates(
         pool._git_prepare_intake(job)
 
     assert events == ["enter", "exit"]
-    pool.release_repo_intake_leases()
+    pool.cleanup_repo_intakes()
     assert events == ["enter", "exit"]
 
 
-def test_first_intake_preparation_releases_lease_when_retention_fails(
+def test_first_intake_preparation_releases_owner_lock_when_retention_fails(
     pool: WorkerPool, tmp_path: Path
 ) -> None:
-    """A failed lease-map write releases the new lease before propagation."""
+    """A failed launch-map write releases the new owner lock before propagation."""
     events: list[str] = []
-    lease = _RecordingIntakeLease(events)
+    owner_lock = _RecordingIntakeOwnerLock(events)
 
-    class FailingLeaseStore(dict[Path, Any]):
-        """Reject a new lease to exercise the retention boundary."""
+    class FailingLaunchStore(dict[tuple[Path, str], Any]):
+        """Reject a new launch entry to exercise the retention boundary."""
 
-        def __setitem__(self, key: Path, value: Any) -> None:
-            raise RuntimeError("injected lease retention failure")
+        def __setitem__(self, key: tuple[Path, str], value: Any) -> None:
+            raise RuntimeError("injected launch retention failure")
 
     receipt = MagicMock()
     receipt.to_dict.return_value = {"revision": "a" * 40}
     manager = MagicMock()
     manager.common_dir = tmp_path / ".git"
-    manager.run_lease.return_value = lease
+    manager.owner.return_value = owner_lock
     manager.prepare.return_value = receipt
-    pool._repo_intake_leases = FailingLeaseStore()
+    pool._repo_intake_launches = FailingLaunchStore()
     job = GitJob(
         repo="acme/repo",
         op="prepare_intake",
@@ -22303,7 +22279,7 @@ def test_first_intake_preparation_releases_lease_when_retention_fails(
         patch(f"{_WP}._trusted_gh_executable", return_value="gh"),
         patch(f"{_WP}._trusted_remote_git_config", return_value=()),
         patch(f"{_WP}.RepoIntakeManager", return_value=manager),
-        pytest.raises(RuntimeError, match="injected lease retention failure"),
+        pytest.raises(RuntimeError, match="injected launch retention failure"),
     ):
         pool._git_prepare_intake(job)
 

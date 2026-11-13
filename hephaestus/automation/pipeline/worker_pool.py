@@ -172,6 +172,7 @@ from hephaestus.automation.pipeline.rebase_policy import (
     RebasePolicySelector,
     RebaseValidationPolicy,
 )
+from hephaestus.automation.pipeline.repo_intake_cleanup import RepoIntakeCleanupFailure
 from hephaestus.automation.pipeline.repository_lock import (
     LockMetadataError,
     LockTimeoutError,
@@ -350,6 +351,27 @@ def _exception_chain(exc: BaseException) -> tuple[BaseException, ...]:
 
     visit(exc)
     return tuple(ordered)
+
+
+def _cleanup_launch_intake(
+    owner_context: AbstractContextManager[None],
+    manager: RepoIntakeManager,
+) -> RepoIntakeCleanupFailure | None:
+    """Remove one launch intake once; report preserved failures."""
+    try:
+        manager.cleanup()
+    except Exception as exc:
+        logger.exception("repository-intake cleanup failed; path retained")
+        return RepoIntakeCleanupFailure(
+            path=str(manager.launch_dir),
+            error=f"{type(exc).__name__}: {exc}",
+        )
+    finally:
+        try:
+            owner_context.__exit__(None, None, None)
+        except Exception:
+            logger.exception("repository-intake owner lock release failed")
+    return None
 
 
 def _git_exception_diagnostics(
@@ -4531,8 +4553,11 @@ class WorkerPool:
         self._completion_saturation: threading.Event | None = None
         self._repo_locks: dict[str, RepositoryOperationLock] = {}
         self._repo_locks_guard = threading.Lock()
-        self._repo_intake_leases: dict[Path, AbstractContextManager[None]] = {}
-        self._repo_intake_leases_guard = threading.Lock()
+        self._repo_intake_launches: dict[
+            tuple[Path, str],
+            tuple[AbstractContextManager[None], RepoIntakeManager, dict[str, object]],
+        ] = {}
+        self._repo_intake_launches_guard = threading.Lock()
         self._lock_dir = lock_dir
         self._gh_extra_path_root = gh_extra_path_root
         self._github_job_runner = github_job_runner
@@ -4724,16 +4749,24 @@ class WorkerPool:
         # sweep above and before its thread stops.
         subprocess_registry.force_kill()
 
-    def release_repo_intake_leases(self) -> None:
-        """Release all run-lifetime repository-intake leases once."""
-        with self._repo_intake_leases_guard:
-            leases = tuple(reversed(self._repo_intake_leases.values()))
-            self._repo_intake_leases.clear()
-        for lease in leases:
-            try:
-                lease.__exit__(None, None, None)
-            except Exception:
-                logger.exception("repository-intake lease release failed")
+    def cleanup_repo_intakes(self) -> list[RepoIntakeCleanupFailure]:
+        """Remove launch-owned intakes once; report preserved failures.
+
+        The coordinator calls this after both worker lanes stop and the final
+        report is out. Each retained entry is drained in reverse, its manager
+        removes the launch worktree and tree under fresh ownership proofs,
+        and its owner context is released exactly once. A preserved failure
+        is reported with the retained path; this method never raises.
+        """
+        with self._repo_intake_launches_guard:
+            entries = tuple(reversed(self._repo_intake_launches.values()))
+            self._repo_intake_launches.clear()
+        failures: list[RepoIntakeCleanupFailure] = []
+        for owner_context, manager, _receipt in entries:
+            failure = _cleanup_launch_intake(owner_context, manager)
+            if failure is not None:
+                failures.append(failure)
+        return failures
 
     def _on_future_done(self, handle: JobHandle, future: Future[JobResult]) -> None:
         """Drain result to completion queue when a job future completes.
@@ -10597,6 +10630,7 @@ class WorkerPool:
             git_runner=git_utils.run,
             git_env=_controlled_git_env(),
             remote_config=remote_config,
+            launch_identity=self._run_identity,
         )
 
     def _git_prepare_intake(
@@ -10608,10 +10642,11 @@ class WorkerPool:
         admitted_metadata_lock: Path | None = None,
         expected_compatibility_lock_paths: Collection[Path] | None = None,
     ) -> JobResult:
-        """Prepare an isolated intake worktree without touching the caller."""
+        """Prepare one launch-owned intake worktree without touching the caller."""
         try:
             manager = manager or self._new_repo_intake_manager(job)
             common_dir = manager.common_dir
+            launch_key = (common_dir, manager.launch_identity)
             preparation_key = (
                 f"repository-intake:{hashlib.sha256(os.fsencode(common_dir)).hexdigest()}"
             )
@@ -10620,13 +10655,15 @@ class WorkerPool:
                 wait_deadline_s=job.deadline_s,
                 operation=_repository_lock_operation(job.descr, job.op),
             ):
-                with self._repo_intake_leases_guard:
-                    lease = self._repo_intake_leases.get(common_dir)
-                acquired_lease = lease is None
-                if lease is None:
-                    lease = manager.run_lease()
-                    lease.__enter__()
-                lease_retained = not acquired_lease
+                with self._repo_intake_launches_guard:
+                    retained = self._repo_intake_launches.get(launch_key)
+                if retained is not None:
+                    # One launch prepares its intake once. Re-adoption within
+                    # the same launch returns the identical verified receipt.
+                    return JobResult(ok=True, value=dict(retained[2]))
+                owner_context = manager.owner()
+                owner_context.__enter__()
+                owner_retained = False
                 try:
                     if operational_state_paths:
                         receipt = manager.prepare(
@@ -10636,18 +10673,23 @@ class WorkerPool:
                         )
                     else:
                         receipt = manager.prepare()
-                    if acquired_lease:
-                        with self._repo_intake_leases_guard:
-                            self._repo_intake_leases[common_dir] = lease
-                        lease_retained = True
+                    value = receipt.to_dict()
+                    with self._repo_intake_launches_guard:
+                        self._repo_intake_launches[launch_key] = (
+                            owner_context,
+                            manager,
+                            value,
+                        )
+                    owner_retained = True
+                    return JobResult(ok=True, value=value)
                 finally:
-                    if not lease_retained:
-                        lease.__exit__(*sys.exc_info())
+                    if not owner_retained:
+                        owner_context.__exit__(*sys.exc_info())
         except RepoIntakeError as exc:
             message = str(exc)
             error = f"repository intake failed: {message}" if message == "lock_timeout" else message
             return JobResult(ok=False, error=error)
-        return JobResult(ok=True, value=receipt.to_dict())
+        return JobResult(ok=False, error="repository intake did not produce a receipt")
 
     def _sync_checkout_locked(
         self,

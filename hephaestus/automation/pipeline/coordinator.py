@@ -222,6 +222,7 @@ class Coordinator(
                 size=work_window,
                 shutdown=self._worker_shutdown,
                 completion_q=self.completion_q,
+                **_worker_runtime_options(pool_factory, config.run_identity, None),
             )
             auxiliary_pool = auxiliary_pool_factory(
                 size=config.learning_workers,

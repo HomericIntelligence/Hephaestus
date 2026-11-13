@@ -20,9 +20,11 @@ from typing import Any
 
 import pytest
 
+from hephaestus.automation.pipeline import summary as summary_mod
 from hephaestus.automation.pipeline.coordinator import Coordinator
 from hephaestus.automation.pipeline.coordinator_types import PipelineConfig
 from hephaestus.automation.pipeline.jobs import AgentJob, JobHandle, JobResult
+from hephaestus.automation.pipeline.repo_intake_cleanup import RepoIntakeCleanupFailure
 from hephaestus.automation.pipeline.routing import PIPELINE_ORDER, StageName
 from hephaestus.automation.pipeline.seeding import IssueFacts, SeedEntry, classify_issue
 from hephaestus.automation.pipeline.stage_base import (
@@ -575,6 +577,283 @@ class TestNormalTeardownExitSemantics:
 
         assert coordinator.run() == 1
         assert not coordinator.shutdown.is_set()
+
+
+class TestRepoIntakeLaunchCleanup:
+    """Launch-intake cleanup runs once, last, and never changes the exit code."""
+
+    @staticmethod
+    def _bare_coordinator(
+        tmp_path: Path,
+        pool: FakeWorkerPool,
+        monkeypatch: pytest.MonkeyPatch,
+        seed: list[Any] | None = None,
+    ) -> Coordinator:
+        coordinator = Coordinator(
+            PipelineConfig(
+                org="org",
+                repos=["repo-a"] if seed else [],
+                loops=1,
+                projects_dir=tmp_path,
+                rate_guard_enabled=False,
+            ),
+            github=FakeStageGitHub(),
+            **fake_worker_factories(pool, None),
+            install_signals=False,
+        )
+        script_source_passes(coordinator, monkeypatch, [seed or []])
+        return coordinator
+
+    @staticmethod
+    def _recording_cleanup_pool(
+        order: list[str], base: type[FakeWorkerPool] = FakeWorkerPool
+    ) -> FakeWorkerPool:
+        class CleanupOrderingPool(base):
+            def shutdown(self, *, mark_interrupted: bool = True) -> None:
+                order.append("pool_shutdown")
+                super().shutdown(mark_interrupted=mark_interrupted)
+
+            def cleanup_repo_intakes(self) -> list[RepoIntakeCleanupFailure]:
+                order.append("intake_cleanup")
+                return super().cleanup_repo_intakes()
+
+        return CleanupOrderingPool()
+
+    @staticmethod
+    def _instrument_terminal_order(
+        coordinator: Coordinator,
+        monkeypatch: pytest.MonkeyPatch,
+        order: list[str],
+    ) -> None:
+        original_finalize = coordinator._finalize_resumable
+        original_print_summary = summary_mod.print_summary
+
+        def finalize() -> None:
+            order.append("finalize_resumable")
+            original_finalize()
+
+        def print_summary(*args: Any, **kwargs: Any) -> None:
+            order.append("print_summary")
+            original_print_summary(*args, **kwargs)
+
+        monkeypatch.setattr(coordinator, "_finalize_resumable", finalize)
+        monkeypatch.setattr(summary_mod, "print_summary", print_summary)
+
+    def test_intake_cleanup_runs_once_after_summary(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A clean run cleans up launch intakes exactly once, after the summary."""
+        order: list[str] = []
+        pool = self._recording_cleanup_pool(order)
+        coordinator = self._bare_coordinator(tmp_path, pool, monkeypatch)
+        self._instrument_terminal_order(coordinator, monkeypatch, order)
+
+        assert coordinator.run() == 0
+
+        assert order == [
+            "pool_shutdown",
+            "finalize_resumable",
+            "print_summary",
+            "intake_cleanup",
+        ]
+        assert pool.repo_intake_cleanup_calls == 1
+
+    def test_intake_cleanup_runs_once_on_fatal_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A fatal run still cleans up launch intakes exactly once, after the summary."""
+        order: list[str] = []
+        pool = self._recording_cleanup_pool(order)
+        coordinator = self._bare_coordinator(tmp_path, pool, monkeypatch)
+        self._instrument_terminal_order(coordinator, monkeypatch, order)
+
+        def boom() -> None:
+            raise RuntimeError("expected test failure")
+
+        monkeypatch.setattr(coordinator, "_seed_pass", boom)
+
+        assert coordinator.run() == 1
+
+        assert order == [
+            "pool_shutdown",
+            "finalize_resumable",
+            "print_summary",
+            "intake_cleanup",
+        ]
+        assert pool.repo_intake_cleanup_calls == 1
+
+    def test_intake_cleanup_runs_once_after_one_sigterm(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A graceful SIGTERM run cleans up launch intakes exactly once."""
+        order: list[str] = []
+        _capture_signal_handlers(monkeypatch)
+        pool = self._recording_cleanup_pool(order, GracefulSignalCompletionPool)
+        coordinator = self._bare_coordinator(
+            tmp_path,
+            pool,
+            monkeypatch,
+            seed=[SeedEntry(kind="issue", identifier=9, stage=StageName.PLANNING, reason="r")],
+        )
+        self._instrument_terminal_order(coordinator, monkeypatch, order)
+        stage = JobRequestingStage()
+        coordinator.stages[StageName.PLANNING] = stage
+        coordinator._install_signal_handlers()
+
+        assert coordinator.run() == 130
+
+        assert order == [
+            "pool_shutdown",
+            "finalize_resumable",
+            "print_summary",
+            "intake_cleanup",
+        ]
+        assert pool.repo_intake_cleanup_calls == 1
+
+    def test_intake_cleanup_runs_once_after_two_sigterms(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A forced two-SIGTERM run cleans up launch intakes exactly once."""
+        order: list[str] = []
+        _capture_signal_handlers(monkeypatch)
+        pool = self._recording_cleanup_pool(order, SecondSignalPool)
+        coordinator = self._bare_coordinator(
+            tmp_path,
+            pool,
+            monkeypatch,
+            seed=[SeedEntry(kind="issue", identifier=10, stage=StageName.PLANNING, reason="r")],
+        )
+        self._instrument_terminal_order(coordinator, monkeypatch, order)
+        stage = JobRequestingStage()
+        coordinator.stages[StageName.PLANNING] = stage
+        coordinator._install_signal_handlers()
+
+        assert coordinator.run() == 130
+
+        assert order == [
+            "pool_shutdown",
+            "finalize_resumable",
+            "print_summary",
+            "intake_cleanup",
+        ]
+        assert pool.repo_intake_cleanup_calls == 1
+
+    def test_intake_cleanup_runs_once_with_auxiliary_learning_active(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A SIGTERM with an auxiliary learning claim cleans up launch intakes once."""
+        order: list[str] = []
+        _capture_signal_handlers(monkeypatch)
+        main_pool = self._recording_cleanup_pool(order)
+        auxiliary_pool = self._recording_cleanup_pool(order, GracefulAuxiliarySignalPool)
+        coordinator = Coordinator(
+            PipelineConfig(org="org", repos=[], projects_dir=tmp_path, rate_guard_enabled=False),
+            github=FakeStageGitHub(),
+            **fake_worker_factories(main_pool, auxiliary_pool),
+            install_signals=False,
+        )
+        self._instrument_terminal_order(coordinator, monkeypatch, order)
+        intent = LearningIntent.post_merge(repo="repo-a", issue=83, pr=183)
+        item = WorkItem(
+            repo="repo-a",
+            kind=ItemKind.ISSUE,
+            issue=83,
+            pr=183,
+            stage=StageName.LEARNING,
+        )
+        item.learning_intents.append(intent)
+        item.compact_for_post_processing(
+            ItemResult(passed=True, reason="merged", final_stage=StageName.MERGE_WAIT)
+        )
+        item.payload["_synced_default_branch_sha"] = "a" * 40
+        ctx = coordinator._ctx_for_repo("repo-a")
+        ctx.paths.source_workspaces = FakeSourceWorkspaceManager(tmp_path / "repo-a", "repo-a")
+        journal = ctx.learning_journal
+        journal.ensure_pending(
+            intent.key,
+            kind=intent.kind.value,
+            identity=item.learning_journal_identity(intent),
+        )
+        assert coordinator._push_item(item, StageName.LEARNING, enter=True)
+        coordinator._install_signal_handlers()
+
+        assert coordinator.run() == 130
+
+        # Both lanes shut down before the summary; only the main lane owns
+        # launch intakes, so cleanup runs once, after the summary.
+        assert order == [
+            "pool_shutdown",
+            "pool_shutdown",
+            "finalize_resumable",
+            "print_summary",
+            "intake_cleanup",
+        ]
+        assert main_pool.repo_intake_cleanup_calls == 1
+        assert auxiliary_pool.repo_intake_cleanup_calls == 0
+
+    def test_cleanup_failure_preserves_exit_code_and_reports_retained_path(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A preserved launch intake keeps the exit code and carries the runbook."""
+        pool = FakeWorkerPool()
+        pool.repo_intake_cleanup_failures.append(
+            RepoIntakeCleanupFailure(
+                path=str(tmp_path / "launches" / "launch-a"),
+                error="checkout is dirty",
+            )
+        )
+        coordinator = self._bare_coordinator(tmp_path, pool, monkeypatch)
+
+        with caplog.at_level("WARNING"):
+            assert coordinator.run() == 0
+
+        assert pool.repo_intake_cleanup_calls == 1
+        retained_warnings = [m for m in caplog.messages if "launch-a" in m]
+        assert len(retained_warnings) == 1
+        assert "docs/runbooks/corrupted-worktree.md" in retained_warnings[0]
+        assert "checkout is dirty" in retained_warnings[0]
+        preserved = [
+            entry for entry in coordinator.event_log if entry[0] == "repo_intake_cleanup_preserved"
+        ]
+        assert preserved == [
+            (
+                "repo_intake_cleanup_preserved",
+                {
+                    "path": str(tmp_path / "launches" / "launch-a"),
+                    "error": "checkout is dirty",
+                },
+            )
+        ]
+
+    def test_cleanup_failure_does_not_mask_fatal_exit_code(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A preserved launch intake on a fatal path keeps the domain exit code."""
+        pool = FakeWorkerPool()
+        pool.repo_intake_cleanup_failures.append(
+            RepoIntakeCleanupFailure(
+                path=str(tmp_path / "launches" / "launch-a"),
+                error="launch tree is preserved",
+            )
+        )
+        coordinator = self._bare_coordinator(tmp_path, pool, monkeypatch)
+
+        def boom() -> None:
+            raise RuntimeError("expected test failure")
+
+        monkeypatch.setattr(coordinator, "_seed_pass", boom)
+
+        with caplog.at_level("WARNING"):
+            assert coordinator.run() == 1
+
+        assert pool.repo_intake_cleanup_calls == 1
+        assert any("launch-a" in m for m in caplog.messages)
 
 
 def _classify_from_fake(
