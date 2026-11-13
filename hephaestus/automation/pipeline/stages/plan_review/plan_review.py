@@ -53,8 +53,10 @@ import hashlib
 import logging
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from pathlib import Path
 from subprocess import SubprocessError
+from typing import Final
 
 from hephaestus.agents.execution_policy import (
     AgentOperation,
@@ -91,10 +93,12 @@ from hephaestus.automation.protocol import (
     PLAN_REVIEW_CANONICAL_MARKER,
 )
 from hephaestus.automation.review_journal import (
+    MAX_CURRENT_REVISION_CONTEXT_CHARS,
     CommentJournalReadError,
     IssueComment,
     JournalSnapshot,
     PlanDiscoveryStatus,
+    complete_current_plan_context,
     current_plan_context,
     is_pending_review,
     journal_snapshot,
@@ -116,7 +120,15 @@ from hephaestus.prompts import PromptCatalog
 from ...admission import parse_publication_scope_files
 from ...coordinator_sessions import agent_session_lifecycle
 from ...diagnostics import redact_diagnostic_text
-from ...plan_journal import publish_plan_revision, reconcile_plan_journal
+from ...plan_journal import (
+    PlanNogoRecord,
+    plan_nogo_count,
+    plan_nogo_digest,
+    publish_plan_nogo,
+    publish_plan_revision,
+    reconcile_plan_journal,
+    requirements_epoch,
+)
 from ...stage_base import (
     AgentJob,
     Continue,
@@ -190,6 +202,10 @@ AMEND_WAIT = "AMEND_WAIT"
 #: Bounds the in-stage ERROR retry loop without burning ``plan_review_iter``
 #: or stamping labels (#911). Reset whenever a real verdict arrives.
 REVIEW_ERROR_RETRY_CAP = 2
+
+#: The convergence trigger: decomposition starts after this many confirmed
+#: real NOGO records in one requirements epoch (issue #2982).
+NOGO_DECOMPOSITION_THRESHOLD: Final[int] = 5
 
 _PLAN_SCOPE_INVALID = "plan_scope_invalid"
 _REVIEWED_PLAN_COMMENT_BODY = "reviewed_plan_comment_body"
@@ -296,6 +312,61 @@ _PLAN_REVIEW_LABELS = {
     STATE_PLAN_GO: "GO",
     STATE_PLAN_NO_GO: "NOGO",
 }
+
+
+def _plan_is_oversized(comments: Sequence[IssueComment]) -> bool:
+    """Return whether the complete current plan cannot fit the amendment budget.
+
+    The lossless-size trigger renders the complete normalized plan without the
+    amendment truncation and compares it with
+    ``MAX_CURRENT_REVISION_CONTEXT_CHARS`` (issue #2982).
+    """
+    return len(complete_current_plan_context(comments)) > MAX_CURRENT_REVISION_CONTEXT_CHARS
+
+
+def _issue_body(item: WorkItem) -> str:
+    """Return the authoritative issue body carried by the work item."""
+    body = item.payload.get("issue_body")
+    return body if isinstance(body, str) else ""
+
+
+def _nogo_findings(item: WorkItem) -> tuple[str, ...]:
+    """Return the bounded unresolved findings carried by the prior review."""
+    review = item.payload.get("prior_review")
+    if not isinstance(review, str) or not review.strip():
+        return ()
+    return (review.strip()[:500],)
+
+
+def recorded_at() -> str:
+    """Return the durable record timestamp for one publication."""
+    return datetime.now(UTC).isoformat()
+
+
+def decomposition_required(
+    item: WorkItem,
+    comments: Sequence[IssueComment],
+    *,
+    epoch: str | None = None,
+) -> str | None:
+    """Return the decomposition trigger name, or None when the plan still amends.
+
+    Triggers (issue #2982):
+
+    - ``lossless-size``: the complete plan cannot fit the amendment context
+      budget and at least one real NOGO is confirmed for the epoch (a first
+      review can still approve the large plan).
+    - ``convergence``: five confirmed real NOGO records exist for the epoch.
+
+    Infrastructure failures never persist a record, so they never count.
+    """
+    epoch = epoch or requirements_epoch(_issue_body(item))
+    count = plan_nogo_count(comments, epoch)
+    if count >= NOGO_DECOMPOSITION_THRESHOLD:
+        return "convergence"
+    if count >= 1 and _plan_is_oversized(comments):
+        return "lossless-size"
+    return None
 
 
 def _safe_agent_failure_diagnostic(stderr_tail: str) -> str | None:
@@ -1144,6 +1215,48 @@ class PlanReviewStage(Stage):
             return StageOutcome(Disposition.RETRY, "plan-no-go label was not confirmed")
         if identity_outcome := self._review_identity_outcome(item, ctx, review):
             return identity_outcome
+
+        # Every real NOGO verdict is durable control state bound to its review
+        # identity. The record never persists for infrastructure failures, so
+        # the convergence count only reads real judgements (#2982).
+        epoch = requirements_epoch(_issue_body(item))
+        record = PlanNogoRecord(
+            repository=item.repo,
+            issue=item.issue,
+            requirements_epoch=epoch,
+            plan_revision=review.revision,
+            review_cycle=item.attempts.get("plan_cycles", 0),
+            review_round=review.charged_round or 0,
+            review_digest=plan_nogo_digest(
+                plan_revision=review.revision,
+                review_cycle=item.attempts.get("plan_cycles", 0),
+                review_round=review.charged_round or 0,
+                review_raw=verdict.raw,
+            ),
+            findings=_nogo_findings(item),
+            recorded_at=recorded_at(),
+        )
+        publish_plan_nogo(item.issue, record, ctx.github)
+        trigger = decomposition_required(
+            item,
+            ctx.github.issue_comments(item.issue),
+            epoch=epoch,
+        )
+        if trigger is not None:
+            # The record is durable first, so a later run or the operator
+            # keeps the confirmed convergence count. Decomposing without a
+            # validated complete safe tree is never allowed (#2982), so the
+            # trigger takes the operator-owned blocked path until the host
+            # can produce and admit one tree.
+            logger.warning(
+                "plan_review:%d: %s decomposition trigger after round %d; "
+                "blocking for operator decomposition",
+                item.issue,
+                trigger,
+                review.charged_round,
+            )
+            _complete_review_cycle(item, ctx)
+            return StageOutcome(Disposition.BLOCKED, f"plan_decomposition_{trigger}")
 
         # NOGO: amend within the cycle-relative budget.
         budget_iter = ctx.budget("plan_review_iter")

@@ -1074,6 +1074,45 @@ Architectural contract:
   sequence. Two consecutive retries are allowed; the third failure stops the
   item. Session replacement preserves logical review rounds.
 
+#### Plan decomposition triggers (issue #2982)
+
+Every real NOGO verdict publishes one durable record comment on the parent
+issue, bound to the review identity and the requirements epoch (the SHA-256
+digest of the authoritative issue body). The record publish is idempotent:
+an exact duplicate recovers, a conflicting payload fails closed, and a
+foreign or malformed comment is ignored by the count. Missing verdicts,
+provider errors, timeouts, and BLOCKED outcomes never persist a record, so
+they never increase the count. Only an issue-body change starts a new epoch;
+plan-cycle resets and process restarts keep the count.
+
+After the record is durable, two triggers route the item to the
+operator-owned blocked path instead of another amendment:
+
+- **Lossless size** — the complete normalized plan cannot fit the
+  `MAX_CURRENT_REVISION_CONTEXT_CHARS` amendment budget
+  ([`complete_current_plan_context`](../hephaestus/automation/review_journal.py)),
+  and at least one real NOGO is confirmed for the epoch. A first review can
+  still approve a large plan; the trigger prevents an amendment from a
+  truncated excerpt.
+- **Convergence** — five confirmed real NOGO records exist for the epoch
+  ([`plan_nogo_count`](../hephaestus/automation/pipeline/plan_journal.py)).
+  The fifth NOGO replaces the sixth review and any further plan cycle.
+
+The validated work-unit domain
+([`plan_decomposition`](../hephaestus/automation/plan_decomposition.py)) and
+the durable decomposition record protocol
+(intent, draft, seal, bindings, transition) support the full
+epic-of-single-PR-issues conversion; see
+[ADR-0066](../docs/adr/0066-plan-decomposition.md).
+
+```mermaid
+flowchart LR
+    NOGO["Confirmed real NOGO"] --> Record["Durable NOGO record"]
+    Record --> Trigger{"Trigger?"}
+    Trigger -->|"epoch count >= 5, or oversized plan with count >= 1"| Blocked["state:plan-blocked"]
+    Trigger -->|"no trigger"| Amend["Amendment"]
+```
+
 ### 5.4 Implementation
 
 Implementation converts an approved plan into a published pull request. It may
