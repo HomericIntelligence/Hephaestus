@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
 import shutil
@@ -60,9 +61,22 @@ def is_full_commit_sha(value: object) -> TypeGuard[str]:
     )
 
 
+_LAUNCH_IDENTITY_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,127}$")
+
+
+def is_valid_launch_identity(value: object) -> TypeGuard[str]:
+    """Return whether *value* is a safe per-launch directory token."""
+    return bool(isinstance(value, str) and _LAUNCH_IDENTITY_RE.fullmatch(value))
+
+
 @dataclass(frozen=True, slots=True)
 class RepoIntakeReceipt:
-    """Durable ownership and revision proof for one intake checkout."""
+    """Durable ownership and revision proof for one intake checkout.
+
+    A v3 receipt belongs to one coordinator launch. Its ``launch_identity``
+    selects the disposable ``launches/<identity>`` directory that holds the
+    worktree, the receipt, and the owner lock.
+    """
 
     repository: str
     repository_identity: str
@@ -73,9 +87,10 @@ class RepoIntakeReceipt:
     default_branch: str
     revision: str
     generation: int
+    launch_identity: str
     detached: bool = True
     branch: str | None = None
-    schema_version: int = 2
+    schema_version: int = 3
 
     def to_dict(self) -> dict[str, object]:
         """Return the receipt in its closed JSON representation."""
@@ -90,6 +105,7 @@ class RepoIntakeReceipt:
             "default_branch": self.default_branch,
             "revision": self.revision,
             "generation": self.generation,
+            "launch_identity": self.launch_identity,
             "detached": self.detached,
             "branch": self.branch,
         }
@@ -108,6 +124,7 @@ class RepoIntakeReceipt:
             "default_branch",
             "revision",
             "generation",
+            "launch_identity",
             "detached",
             "branch",
         }
@@ -117,7 +134,7 @@ class RepoIntakeReceipt:
             payload["schema_version"], bool
         ):
             raise RepoIntakeError("repository-intake receipt schema version is invalid")
-        if payload["schema_version"] != 2:
+        if payload["schema_version"] != 3:
             raise RepoIntakeError("repository-intake receipt schema mismatch")
         if not isinstance(payload["generation"], int) or isinstance(payload["generation"], bool):
             raise RepoIntakeError("repository-intake receipt generation is invalid")
@@ -132,12 +149,15 @@ class RepoIntakeReceipt:
             "state_root",
             "default_branch",
             "revision",
+            "launch_identity",
         )
         if any(not isinstance(payload[name], str) or not payload[name] for name in string_fields):
             raise RepoIntakeError("repository-intake receipt contains an invalid value")
         branch = payload["branch"]
         if branch is not None and (not isinstance(branch, str) or not branch):
             raise RepoIntakeError("repository-intake receipt branch is invalid")
+        if not is_valid_launch_identity(payload["launch_identity"]):
+            raise RepoIntakeError("repository-intake receipt launch identity is invalid")
         try:
             receipt = cls(
                 schema_version=payload["schema_version"],
@@ -150,6 +170,7 @@ class RepoIntakeReceipt:
                 default_branch=payload["default_branch"],
                 revision=payload["revision"],
                 generation=payload["generation"],
+                launch_identity=payload["launch_identity"],
                 detached=payload["detached"],
                 branch=branch,
             )
@@ -177,6 +198,7 @@ def _validate_receipt_values(receipt: RepoIntakeReceipt) -> None:
         or receipt.branch is not None
         or not is_full_commit_sha(receipt.revision)
         or not _is_valid_branch(receipt.default_branch)
+        or not is_valid_launch_identity(receipt.launch_identity)
     ):
         raise RepoIntakeError("repository-intake receipt values are unsafe")
     if receipt.state_root != receipt.path.parent:
@@ -188,23 +210,137 @@ def _validate_receipt_values(receipt: RepoIntakeReceipt) -> None:
         raise RepoIntakeError("repository-intake receipt state root is unsafe")
 
 
+_REGISTRATION_FIELDS = frozenset(
+    {
+        "schema_version",
+        "repository",
+        "repository_identity",
+        "common_dir",
+        "digest",
+        "state_root",
+        "default_branch",
+        "active_launch_identity",
+        "active_revision",
+        "ownership_key",
+    }
+)
+
+
+def _read_worker_registration(
+    path: Path, *, common_dir: Path, state_root: Path | None = None
+) -> dict[str, Any]:
+    """Read one intake registration with bounded no-follow file checks."""
+    digest = hashlib.sha256(str(common_dir).encode()).hexdigest()[:16]
+    try:
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+        with os.fdopen(os.open(path, flags), "rb") as stream:
+            metadata = os.fstat(stream.fileno())
+            if not stat.S_ISREG(metadata.st_mode):
+                raise RepoIntakeError("repository-intake worker registration is unsafe")
+            encoded = stream.read(65537)
+        if len(encoded) > 65536:
+            raise RepoIntakeError("repository-intake worker registration is too large")
+        payload = json.loads(encoded)
+    except (OSError, ValueError) as exc:
+        raise RepoIntakeError(
+            "repository-intake worker registration is unavailable or invalid"
+        ) from exc
+    if not isinstance(payload, dict) or set(payload) != _REGISTRATION_FIELDS:
+        raise RepoIntakeError("repository-intake worker registration schema mismatch")
+    if payload.get("schema_version") != 3 or isinstance(payload.get("schema_version"), bool):
+        raise RepoIntakeError("repository-intake worker registration schema mismatch")
+    string_fields = _REGISTRATION_FIELDS - {"schema_version"}
+    if any(not isinstance(payload[name], str) or not payload[name] for name in string_fields):
+        raise RepoIntakeError("repository-intake worker registration contains an invalid value")
+    repository = str(payload["repository"])
+    if "/" not in repository:
+        raise RepoIntakeError("repository-intake worker registration identity is invalid")
+    identity = f"{repository}:{digest}"
+    derived_state_root = Path(str(payload["state_root"]))
+    if (
+        payload["common_dir"] != str(common_dir)
+        or payload["digest"] != digest
+        or payload["repository_identity"] != identity
+        or payload["ownership_key"] != f"{identity}:intake"
+        or (state_root is not None and derived_state_root != state_root)
+        or not is_valid_launch_identity(payload["active_launch_identity"])
+        or not is_full_commit_sha(payload["active_revision"])
+        or not _is_valid_branch(payload["default_branch"])
+    ):
+        raise RepoIntakeError("repository-intake worker registration ownership does not match")
+    return payload
+
+
 def intake_worker_base(
     repo_root: Path, common_dir: Path, *, repository: str | None = None
 ) -> Path | None:
-    """Return the external worker base for a receipt-bound intake checkout."""
+    """Return the external worker base for a registration-bound intake state root.
+
+    The durable ``intake-registration.json`` outlives every launch, so the
+    answer survives the owning launch's cleanup. While the active launch
+    receipt is still present, it must also agree with the registration and
+    the requested checkout root exactly as the launch receipt did before.
+    """
     digest = hashlib.sha256(str(common_dir).encode()).hexdigest()[:16]
     state_parent = common_dir.parent.parent / ".hephaestus-repo-intake"
     state_root = state_parent / digest
-    expected_root = state_root / "worktree"
-    if repo_root != expected_root:
+    # Fail quiet before any state read: only a root inside the launch state
+    # is a candidate intake checkout, and the state checks stay lexical until
+    # that candidate gate passes.
+    if not repo_root.is_relative_to(state_root / "launches"):
         return None
     for path in (state_parent, state_root):
         if path.is_symlink() or path.resolve(strict=True) != path:
             raise RepoIntakeError("repository-intake worker state path is unsafe")
-    receipt_path = state_root / "receipt.json"
+    registration = _read_worker_registration(
+        state_root / "intake-registration.json",
+        common_dir=common_dir,
+        state_root=state_root,
+    )
+    if repository is not None and repository not in {
+        registration["repository"],
+        str(registration["repository"]).rsplit("/", 1)[-1],
+    }:
+        raise RepoIntakeError("repository-intake worker repository does not match")
+    active = str(registration["active_launch_identity"])
+    launch_root = state_root / "launches" / active
+    expected_root = launch_root / "worktree"
+    if repo_root != expected_root:
+        return None
+    launch_receipt_path = launch_root / "receipt.json"
+    if launch_receipt_path.exists():
+        _assert_launch_receipt_agrees_with_registration(
+            launch_receipt_path,
+            common_dir=common_dir,
+            repository_identity=f"{registration['repository']}:{digest}",
+            active_launch_identity=active,
+            expected_root=expected_root,
+            launch_root=launch_root,
+        )
+    base = state_root / "build" / ".worktrees"
+    if base.resolve(strict=False) != base:
+        raise RepoIntakeError("repository-intake worker base is unsafe")
+    return base
+
+
+def _assert_launch_receipt_agrees_with_registration(
+    launch_receipt_path: Path,
+    *,
+    common_dir: Path,
+    repository_identity: str,
+    active_launch_identity: str,
+    expected_root: Path,
+    launch_root: Path,
+) -> None:
+    """Raise when a live launch receipt disagrees with the durable registration.
+
+    A post-cleanup launch tree is absent, so this proof only runs while the
+    active launch still owns its intake. The receipt must then agree with
+    the registration exactly as a launch receipt did before.
+    """
     try:
         flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
-        with os.fdopen(os.open(receipt_path, flags), "rb") as stream:
+        with os.fdopen(os.open(launch_receipt_path, flags), "rb") as stream:
             metadata = os.fstat(stream.fileno())
             if not stat.S_ISREG(metadata.st_mode):
                 raise RepoIntakeError("repository-intake worker receipt is unsafe")
@@ -217,24 +353,15 @@ def intake_worker_base(
         receipt = RepoIntakeReceipt.from_dict(payload)
     except (OSError, ValueError) as exc:
         raise RepoIntakeError("repository-intake worker receipt is unavailable or invalid") from exc
-    if repository is not None and repository not in {
-        receipt.repository,
-        receipt.repository.rsplit("/", 1)[-1],
-    }:
-        raise RepoIntakeError("repository-intake worker repository does not match")
-    identity = f"{receipt.repository}:{digest}"
     if (
-        receipt.common_dir != common_dir
+        receipt.launch_identity != active_launch_identity
+        or receipt.common_dir != common_dir
         or receipt.path != expected_root
-        or receipt.state_root != state_root
-        or receipt.repository_identity != identity
-        or receipt.ownership_key != f"{identity}:intake"
+        or receipt.state_root != launch_root
+        or receipt.repository_identity != repository_identity
+        or receipt.ownership_key != f"{repository_identity}:intake:{active_launch_identity}"
     ):
         raise RepoIntakeError("repository-intake worker receipt ownership does not match")
-    base = state_root / "build" / ".worktrees"
-    if base.resolve(strict=False) != base:
-        raise RepoIntakeError("repository-intake worker base is unsafe")
-    return base
 
 
 def checkout_intake_worker_base(repo_root: Path, *, repository: str | None = None) -> Path | None:
@@ -352,7 +479,7 @@ class _WorktreeRecord:
 
 
 class RepoIntakeManager:
-    """Create, validate, reuse, and safely rebind one intake worktree."""
+    """Create and remove one launch-owned ephemeral intake worktree."""
 
     def __init__(
         self,
@@ -364,12 +491,17 @@ class RepoIntakeManager:
         git_runner: Callable[..., subprocess.CompletedProcess[str]],
         git_env: dict[str, str],
         remote_config: tuple[str, ...],
+        launch_identity: str,
     ) -> None:
-        """Initialize an intake manager for a caller-selected checkout."""
+        """Initialize one launch-owned intake manager for a caller checkout."""
         if not repository or "/" not in repository:
             raise RepoIntakeError("repository identity is invalid")
         if timeout_s <= 0:
             raise RepoIntakeError("repository-intake timeout is invalid")
+        if not is_valid_launch_identity(launch_identity):
+            raise RepoIntakeError(
+                f"repository-intake launch identity is invalid: {launch_identity!r}"
+            )
         if caller_root.is_symlink():
             raise RepoIntakeError(f"caller checkout is symlinked: {caller_root}")
         try:
@@ -384,53 +516,67 @@ class RepoIntakeManager:
         self._run_command = git_runner
         self._git_env = dict(git_env)
         self._remote_config = tuple(remote_config)
+        self.launch_identity = launch_identity
         self.common_dir = self._resolve_common_dir()
         digest = hashlib.sha256(str(self.common_dir).encode()).hexdigest()[:16]
         self.repository_identity = f"{repository}:{digest}"
-        # Keep both the receipt and worktree outside the caller root.  The
-        # common directory is shared by linked worktrees, so this path remains
-        # stable when the caller is detached or linked elsewhere.
+        # Keep the launch tree outside the caller root.  The common directory
+        # is shared by linked worktrees, so this path remains stable when the
+        # caller is detached or linked elsewhere.
         state_parent = self.common_dir.parent.parent / ".hephaestus-repo-intake"
         self.state_parent = state_parent
         # Keep this path lexical.  Resolving it here would follow an attacker-
         # supplied symlink before validation and make the ownership check
         # inspect a different path than the one selected by the manager.
         self.state_dir = state_parent / digest
-        self.worktree_path = self.state_dir / "worktree"
-        self.receipt_path = self.state_dir / "receipt.json"
+        self.launch_dir = self.state_dir / "launches" / launch_identity
+        self.worktree_path = self.launch_dir / "worktree"
+        self.receipt_path = self.launch_dir / "receipt.json"
+        self.owner_lock_path = self.launch_dir / "owner.lock"
+        # The durable registration outlives any single launch.  Only the v3
+        # launch receipt extends the ownership key with the launch identity.
+        self.registration_path = self.state_dir / "intake-registration.json"
         self.ownership_key = f"{self.repository_identity}:intake"
-
-    @property
-    def run_lease_path(self) -> Path:
-        """Return the stable run-lease path for this Git common directory."""
-        return self.common_dir / "hephaestus-repository-intake.run.lock"
+        self.launch_ownership_key = f"{self.ownership_key}:{launch_identity}"
 
     @contextmanager
-    def run_lease(self) -> Iterator[None]:
-        """Hold exclusive intake ownership until the automation run is complete."""
-        lease = file_lock(
-            self.run_lease_path,
-            blocking=False,
-            require_exclusive=True,
-        )
+    def owner(self) -> Iterator[None]:
+        """Hold exclusive per-launch intake ownership for this launch identity."""
+        with self._owner_file_lock():
+            self._owner_lock_held = True
+            try:
+                yield
+            finally:
+                self._owner_lock_held = False
+
+    @contextmanager
+    def _owner_file_lock(self) -> Iterator[None]:
+        """Hold the launch owner lock, reentrant for this manager instance."""
+        if getattr(self, "_owner_lock_held", False):
+            yield
+            return
         try:
-            lease.__enter__()
+            with file_lock(self.owner_lock_path, blocking=False, require_exclusive=True):
+                self._owner_lock_held = True
+                try:
+                    yield
+                finally:
+                    self._owner_lock_held = False
         except ExclusiveLockUnavailableError as exc:
-            raise RepoIntakeError("exclusive repository-intake run locking is unavailable") from exc
+            raise RepoIntakeError(
+                "exclusive repository-intake launch locking is unavailable"
+            ) from exc
         except LockUnavailableError as exc:
-            raise RepoIntakeInUseError(
-                "repository_intake_in_use: another automation run holds the "
-                "repository-intake lease; wait for the active automation run to "
-                "finish and retry"
+            raise RepoIntakeError(
+                "repository_intake_launch_in_use: a duplicate launch identity owns the "
+                "repository-intake owner lock; use a unique launch identity and retry"
             ) from exc
         except InterruptedError:
             raise
+        except RepoIntakeError:
+            raise
         except (OSError, RuntimeError) as exc:
-            raise RepoIntakeError("repository-intake run lease is unavailable") from exc
-        try:
-            yield
-        finally:
-            lease.__exit__(None, None, None)
+            raise RepoIntakeError("repository-intake launch owner lock is unavailable") from exc
 
     def prepare(
         self,
@@ -439,7 +585,7 @@ class RepoIntakeManager:
         admitted_metadata_lock: Path | None = None,
         expected_compatibility_lock_paths: Collection[Path] | None = None,
     ) -> RepoIntakeReceipt:
-        """Return a verified intake receipt, creating or rebinding as needed."""
+        """Return a verified launch intake receipt, creating the intake once."""
         try:
             started_s = time.monotonic()
             remaining_s = remaining_operation_timeout(self.timeout_s)
@@ -460,6 +606,7 @@ class RepoIntakeManager:
         try:
             with (
                 operation_deadline(deadline_s, shutdown=current_operation_shutdown()),
+                self._owner_file_lock(),
                 operation_file_lock(metadata_lock, require_exclusive=True),
             ):
                 return self._prepare_locked(
@@ -481,7 +628,7 @@ class RepoIntakeManager:
         operational_state_paths: Collection[Path] = (),
     ) -> tuple[Path, ...]:
         """Validate state and return registered primary compatibility locks."""
-        _records, _old, _record, allowed_paths = self._validated_state(
+        _records, allowed_paths = self._validated_state(
             operational_state_paths=operational_state_paths
         )
         return self._primary_compatibility_lock_paths(allowed_paths)
@@ -490,12 +637,7 @@ class RepoIntakeManager:
         self,
         *,
         operational_state_paths: Collection[Path] = (),
-    ) -> tuple[
-        tuple[_WorktreeRecord, ...],
-        RepoIntakeReceipt | None,
-        _WorktreeRecord | None,
-        frozenset[Path],
-    ]:
+    ) -> tuple[tuple[_WorktreeRecord, ...], frozenset[Path]]:
         """Return validated preparation state without a Git mutation."""
         self._require_safe_common_dir()
         self._validate_origin()
@@ -505,11 +647,7 @@ class RepoIntakeManager:
             records,
             operational_state_paths=operational_state_paths,
         )
-        old = self._read_receipt()
-        record = self._validate_existing(old, records)
-        if old is not None:
-            self._validate_intake_checkout()
-        return records, old, record, allowed_paths
+        return records, allowed_paths
 
     def _prepare_locked(
         self,
@@ -517,8 +655,8 @@ class RepoIntakeManager:
         operational_state_paths: Collection[Path] = (),
         expected_compatibility_lock_paths: Collection[Path] | None = None,
     ) -> RepoIntakeReceipt:
-        """Prepare the intake worktree while the common metadata lock is held."""
-        records, old, record, allowed_paths = self._validated_state(
+        """Prepare the launch intake worktree while the common metadata lock is held."""
+        records, allowed_paths = self._validated_state(
             operational_state_paths=operational_state_paths
         )
         if expected_compatibility_lock_paths is not None:
@@ -530,60 +668,156 @@ class RepoIntakeManager:
                 raise RepoIntakeError(
                     "repository-intake worktree registration changed before preparation"
                 )
+        # Recovery first. Abandoned launches and the legacy permanent intake
+        # are removed under their lock proofs before this launch creates its
+        # own intake. A launch directory whose owner lock is held stays live.
+        self._recover_abandoned_intakes_locked(records)
+        records = self._worktree_records()
+        record = self._record_for_path(records)
+        if record is not None or self.worktree_path.exists():
+            # Launch names are unique and the sweep just proved its entries,
+            # so a registration at this launch path is foreign state.
+            raise RepoIntakeError("unowned repository-intake worktree is preserved")
         default_branch = self._read_default_branch()
-        if old is None:
-            if record is not None:
-                raise RepoIntakeError("unowned repository-intake worktree is preserved")
-            self._fetch(default_branch, checkout=self.caller_root)
-            target = self._remote_head(default_branch, checkout=self.caller_root)
-            self._add_worktree(target)
-            records = self._worktree_records()
-            record = self._record_for_path(records)
-        else:
-            self._validate_intake_checkout()
-            self._fetch(default_branch, checkout=self.worktree_path)
-            target = self._remote_head(default_branch, checkout=self.worktree_path)
-        physical_head = self._head(self.worktree_path)
-        if physical_head != target:
+        self._fetch(default_branch, checkout=self.caller_root)
+        target = self._remote_head(default_branch, checkout=self.caller_root)
+        self._add_worktree(target)
+        try:
             records = self._worktree_records()
             record = self._record_for_path(records)
             self._assert_no_registered_descendants(records)
             self._validate_intake_checkout()
             self._assert_clean_detached(record)
-            current_head = self._head(self.worktree_path)
-            if record is None or record.head != current_head or current_head != physical_head:
-                raise RepoIntakeError("repository-intake worktree HEAD changed before rebind")
-            self._assert_fast_forward(current_head, target)
+            final_head = self._head(self.worktree_path)
+            remote_head = self._remote_head(default_branch, checkout=self.worktree_path)
+            if final_head != target or final_head != remote_head:
+                raise RepoIntakeError("repository-intake SHA changed during preparation")
+            receipt = RepoIntakeReceipt(
+                repository=self.repository,
+                repository_identity=self.repository_identity,
+                ownership_key=self.launch_ownership_key,
+                common_dir=self.common_dir,
+                path=self.worktree_path.resolve(),
+                state_root=self.launch_dir.resolve(),
+                default_branch=default_branch,
+                revision=final_head,
+                generation=1,
+                launch_identity=self.launch_identity,
+            )
+            self._write_registration(default_branch=default_branch, revision=final_head)
+            self._write_receipt(receipt)
+            return receipt
+        except BaseException as error:
+            rollback_failure = self._rollback_launch_preparation()
+            if rollback_failure is not None:
+                raise RepoIntakeError(
+                    "repository-intake launch preparation rollback failed; the launch "
+                    f"tree is preserved at {self.launch_dir}; original error: {error}"
+                ) from rollback_failure
+            raise
+
+    def _rollback_launch_preparation(self) -> BaseException | None:
+        """Remove a just-added launch intake after a preparation failure.
+
+        The metadata lock is still held. The rollback re-proves clean,
+        detached, descendant-free state before the Git removal. Any rollback
+        failure preserves the launch tree untouched and is returned so the
+        caller can re-raise the original error with the retained path.
+        """
+        try:
+            records = self._worktree_records()
+            record = self._record_for_path(records)
+            if record is not None:
+                self._assert_no_registered_descendants(records)
+                self._validate_intake_checkout()
+                self._assert_clean_detached(record)
+                self._remove_worktree()
+            self._remove_launch_tree()
+        except BaseException as rollback_error:
+            return rollback_error
+        return None
+
+    def cleanup(self) -> None:
+        """Remove this launch intake after its consumers stop.
+
+        The cleanup proves fresh ownership facts under the shared metadata
+        lock, removes the Git worktree registration and the launch tree, and
+        preserves any dirty, foreign, or symlinked state as a structured
+        failure that carries the retained path.
+        """
+        metadata_lock = self._resolve_metadata_lock()
+        try:
+            with (
+                operation_deadline(
+                    time.monotonic() + float(remaining_operation_timeout(self.timeout_s) or 0),
+                    shutdown=current_operation_shutdown(),
+                ),
+                operation_file_lock(metadata_lock, require_exclusive=True),
+            ):
+                self._cleanup_locked()
+        except (subprocess.TimeoutExpired, InterruptedError):
+            raise
+        except ExclusiveLockUnavailableError as exc:
+            raise RepoIntakeError("exclusive Git metadata locking is unavailable") from exc
+        except RepoIntakeError:
+            raise
+        except (OSError, RuntimeError) as exc:
+            raise RepoIntakeError("repository-intake cleanup failed safely") from exc
+
+    def _resolve_metadata_lock(self) -> Path:
+        """Return the resolved Git metadata lock path for this caller."""
+        try:
+            metadata_lock = git_metadata_lock_path(self.caller_root)
+            return metadata_lock.parent.resolve(strict=True) / metadata_lock.name
+        except (OSError, RuntimeError, UnicodeError) as exc:
+            raise RepoIntakeError("Git metadata lock is unavailable") from exc
+
+    def _cleanup_locked(self) -> None:
+        """Remove the launch worktree and tree while the metadata lock is held."""
+        records = self._worktree_records()
+        record = self._record_for_path(records)
+        receipt = self._read_receipt()
+        if record is not None:
+            if receipt is None:
+                raise RepoIntakeError(
+                    f"repository-intake launch receipt is missing and preserved: {self.launch_dir}"
+                )
+            self._assert_no_registered_descendants(records)
+            self._validate_intake_checkout()
+            self._assert_clean_detached(record)
+            if record.head != receipt.revision:
+                raise RepoIntakeError("repository-intake receipt and worktree HEAD do not match")
+            self._require_registration_agreement(receipt)
             self._remove_worktree()
-            self._add_worktree(target)
-        self._validate_intake_checkout()
-        self._assert_clean_detached(self._record_for_path(self._worktree_records()))
-        final_head = self._head(self.worktree_path)
-        remote_head = self._remote_head(default_branch, checkout=self.worktree_path)
-        if final_head != target or final_head != remote_head:
-            raise RepoIntakeError("repository-intake SHA changed during preparation")
-        generation = (
-            old.generation
-            if old is not None
-            and old.revision == final_head
-            and old.default_branch == default_branch
-            else old.generation + 1
-            if old is not None
-            else 1
-        )
-        receipt = RepoIntakeReceipt(
-            repository=self.repository,
-            repository_identity=self.repository_identity,
-            ownership_key=self.ownership_key,
-            common_dir=self.common_dir,
-            path=self.worktree_path.resolve(),
-            state_root=self.state_dir.resolve(),
-            default_branch=default_branch,
-            revision=final_head,
-            generation=generation,
-        )
-        self._write_receipt(receipt)
-        return receipt
+        elif self.worktree_path.exists():
+            raise RepoIntakeError(
+                "repository-intake launch worktree is unregistered and preserved: "
+                f"{self.worktree_path}"
+            )
+        self._remove_launch_tree()
+
+    def _require_registration_agreement(self, receipt: RepoIntakeReceipt) -> None:
+        """Require the durable registration to agree with this launch receipt."""
+        registration = self._read_registration()
+        if registration is None:
+            return
+        if registration["active_launch_identity"] != self.launch_identity:
+            # A later launch already owns the registration's active pointer.
+            return
+        if registration["active_revision"] != receipt.revision:
+            raise RepoIntakeError("repository-intake registration does not match the receipt")
+
+    def _remove_launch_tree(self) -> None:
+        """Remove the launch tree lexically without following symlinks."""
+        try:
+            self.launch_dir.lstat()
+        except FileNotFoundError:
+            return
+        _remove_tree_lexically(self.launch_dir)
+
+    def _recover_abandoned_intakes_locked(self, records: tuple[_WorktreeRecord, ...]) -> None:
+        """Remove abandoned launch intakes while the metadata lock is held."""
+        recover_abandoned_intakes(self, records)
 
     @staticmethod
     def _canonical_compatibility_lock_paths(
@@ -695,20 +929,37 @@ class RepoIntakeManager:
 
     def _validate_state_paths(self, records: tuple[_WorktreeRecord, ...]) -> None:
         """Reject symlinked or non-directory intake state containers."""
-        if self.state_parent.is_symlink() or (
-            self.state_parent.exists() and not self.state_parent.is_dir()
+        for path, label, is_expected_kind in (
+            (self.state_parent, "state parent", lambda candidate: candidate.is_dir()),
+            (self.state_dir, "state path", lambda candidate: candidate.is_dir()),
+            (
+                self.state_dir / "launches",
+                "launch root",
+                lambda candidate: candidate.is_dir(),
+            ),
+            (self.launch_dir, "launch path", lambda candidate: candidate.is_dir()),
+            (self.receipt_path, "receipt path", lambda candidate: candidate.is_file()),
+            (
+                self.registration_path,
+                "registration path",
+                lambda candidate: candidate.is_file(),
+            ),
+            (self.owner_lock_path, "owner lock path", lambda candidate: candidate.is_file()),
         ):
-            raise RepoIntakeError(f"repository-intake state parent is unsafe: {self.state_parent}")
-        if self.state_dir.is_symlink() or (self.state_dir.exists() and not self.state_dir.is_dir()):
-            raise RepoIntakeError(f"repository-intake state path is unsafe: {self.state_dir}")
-        if self.receipt_path.is_symlink() or (
-            self.receipt_path.exists() and not self.receipt_path.is_file()
-        ):
-            raise RepoIntakeError(f"repository-intake receipt path is unsafe: {self.receipt_path}")
+            if path.is_symlink() or (path.exists() and not is_expected_kind(path)):
+                raise RepoIntakeError(f"repository-intake {label} is unsafe: {path}")
         if self.worktree_path.is_symlink():
             raise RepoIntakeError(f"repository-intake worktree is symlinked: {self.worktree_path}")
         protected_roots = (self.caller_root, *(record.path for record in records))
-        state_paths = (self.state_parent, self.state_dir, self.receipt_path, self.worktree_path)
+        state_paths = (
+            self.state_parent,
+            self.state_dir,
+            self.launch_dir,
+            self.receipt_path,
+            self.registration_path,
+            self.owner_lock_path,
+            self.worktree_path,
+        )
         for state_path in state_paths:
             for protected_root in protected_roots:
                 if self._same_path(protected_root, self.worktree_path):
@@ -721,9 +972,11 @@ class RepoIntakeManager:
                     )
         self.state_parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.state_dir.mkdir(mode=0o700, exist_ok=True)
+        (self.state_dir / "launches").mkdir(mode=0o700, exist_ok=True)
+        self.launch_dir.mkdir(mode=0o700, exist_ok=True)
 
     def _read_receipt(self) -> RepoIntakeReceipt | None:
-        """Read the owned receipt, if one exists."""
+        """Read the owned launch receipt, if one exists."""
         if not self.receipt_path.exists():
             return None
         try:
@@ -740,13 +993,43 @@ class RepoIntakeManager:
         if (
             receipt.repository != self.repository
             or receipt.repository_identity != self.repository_identity
-            or receipt.ownership_key != self.ownership_key
+            or receipt.ownership_key != self.launch_ownership_key
+            or receipt.launch_identity != self.launch_identity
             or receipt.common_dir != self.common_dir
             or receipt.path != self.worktree_path.resolve()
-            or receipt.state_root != self.state_dir.resolve()
+            or receipt.state_root != self.launch_dir.resolve()
         ):
             raise RepoIntakeError("repository-intake receipt ownership does not match")
         return receipt
+
+    def _read_registration(self) -> dict[str, Any] | None:
+        """Read the durable intake registration, if one exists."""
+        if not self.registration_path.exists():
+            return None
+        return _read_worker_registration(
+            self.registration_path,
+            common_dir=self.common_dir,
+            state_root=self.state_dir,
+        )
+
+    def _write_registration(self, *, default_branch: str, revision: str) -> None:
+        """Write the durable cross-launch intake registration atomically."""
+        registration = {
+            "schema_version": 3,
+            "repository": self.repository,
+            "repository_identity": self.repository_identity,
+            "common_dir": str(self.common_dir),
+            "digest": hashlib.sha256(str(self.common_dir).encode()).hexdigest()[:16],
+            "state_root": str(self.state_dir),
+            "default_branch": default_branch,
+            "active_launch_identity": self.launch_identity,
+            "active_revision": revision,
+            "ownership_key": self.ownership_key,
+        }
+        write_secure(
+            self.registration_path,
+            json.dumps(registration, sort_keys=True, indent=2) + "\n",
+        )
 
     def _migrate_durable_state(self, source: Path, destination_root: Path) -> None:
         """Copy one durable state directory into the canonical state root."""
@@ -1085,30 +1368,6 @@ class RepoIntakeManager:
         except (OSError, RuntimeError) as exc:
             raise RepoIntakeError("repository-intake path containment is unavailable") from exc
 
-    def _validate_existing(
-        self,
-        receipt: RepoIntakeReceipt | None,
-        records: tuple[_WorktreeRecord, ...],
-    ) -> _WorktreeRecord | None:
-        """Validate the receipt and physical registration before reuse."""
-        record = self._record_for_path(records)
-        exists = self.worktree_path.exists()
-        if receipt is None:
-            if exists or record is not None:
-                raise RepoIntakeError("unowned repository-intake worktree is preserved")
-            return None
-        if not exists or record is None:
-            raise RepoIntakeError(
-                "repository-intake receipt and worktree registration do not match"
-            )
-        if record.branch is not None or not receipt.detached or receipt.branch is not None:
-            raise RepoIntakeError("repository-intake worktree is branch-backed")
-        if not is_full_commit_sha(record.head):
-            raise RepoIntakeError("repository-intake worktree has a malformed HEAD")
-        if record.head != receipt.revision:
-            raise RepoIntakeError("repository-intake receipt and worktree HEAD do not match")
-        return record
-
     @staticmethod
     def _directory_open_flags() -> int:
         """Return flags that open one directory without following its final link."""
@@ -1209,14 +1468,17 @@ class RepoIntakeManager:
         if unsafe_local_git_config_key(result.stdout) is not None:
             raise RepoIntakeError("repository-intake Git configuration is unsafe")
 
-    def _validate_intake_git_pointer(self) -> tuple[str, str | None]:
+    def _validate_intake_git_pointer(
+        self, worktree_path: Path | None = None
+    ) -> tuple[str, str | None]:
         """Verify the intake gitfile and capture its local configuration.
 
         The configuration is read without following symlinks.
         """
+        worktree_path = worktree_path or self.worktree_path
         worktree_fd = common_fd = worktrees_fd = admin_fd = -1
         try:
-            worktree_fd = os.open(self.worktree_path, self._directory_open_flags())
+            worktree_fd = os.open(worktree_path, self._directory_open_flags())
             gitfile = self._read_metadata_text(worktree_fd, ".git")
             gitfile_line = self._metadata_line(gitfile)
             if not gitfile_line.startswith("gitdir: "):
@@ -1226,7 +1488,7 @@ class RepoIntakeManager:
                 raise RepoIntakeError("repository-intake Git pointer is malformed")
             admin_path = self._normalized_metadata_path(
                 gitdir_value,
-                relative_to=self.worktree_path,
+                relative_to=worktree_path,
             )
             worktrees_path = self.common_dir / "worktrees"
             if admin_path.parent != worktrees_path or admin_path.name in {"", ".", ".."}:
@@ -1240,7 +1502,7 @@ class RepoIntakeManager:
             backlink = self._metadata_line(self._read_metadata_text(admin_fd, "gitdir"))
             commondir = self._metadata_line(self._read_metadata_text(admin_fd, "commondir"))
             backlink_path = self._normalized_metadata_path(backlink, relative_to=admin_path)
-            if backlink_path != self.worktree_path / ".git":
+            if backlink_path != worktree_path / ".git":
                 raise RepoIntakeError("repository-intake Git pointer is not bound to its worktree")
             common_path = self._normalized_metadata_path(commondir, relative_to=admin_path)
             try:
@@ -1273,9 +1535,9 @@ class RepoIntakeManager:
                 if file_descriptor >= 0:
                     os.close(file_descriptor)
 
-    def _validate_intake_checkout(self) -> None:
+    def _validate_intake_checkout(self, worktree_path: Path | None = None) -> None:
         """Verify the intake pointer and the exact captured local configs."""
-        common_config, worktree_config = self._validate_intake_git_pointer()
+        common_config, worktree_config = self._validate_intake_git_pointer(worktree_path)
         self._validate_local_git_config(common_config)
         if worktree_config is not None:
             self._validate_local_git_config(worktree_config)
@@ -1283,9 +1545,10 @@ class RepoIntakeManager:
     def _assert_no_registered_descendants(
         self,
         records: tuple[_WorktreeRecord, ...],
+        root: Path | None = None,
     ) -> None:
-        """Reject a rebind when a registered descendant exists."""
-        intake_path = Path(os.path.abspath(self.worktree_path))
+        """Reject removal when a registered descendant worktree exists."""
+        intake_path = Path(os.path.abspath(root or self.worktree_path))
         for record in records:
             registered_path = Path(os.path.abspath(record.path))
             if registered_path != intake_path and registered_path.is_relative_to(intake_path):
@@ -1294,25 +1557,26 @@ class RepoIntakeManager:
                     f"preserve and relocate or remove it before retry: {record.path}"
                 )
 
-    def _assert_clean_detached(self, record: _WorktreeRecord | None) -> None:
+    def _assert_clean_detached(
+        self, record: _WorktreeRecord | None, checkout: Path | None = None
+    ) -> None:
         """Require the owned intake worktree to be clean and detached."""
+        checkout = checkout or self.worktree_path
         if record is None:
             raise RepoIntakeError("repository-intake worktree is not registered")
         status = self._run(
             ["git", "-c", "core.fsmonitor=false", "status", "--porcelain", "--untracked-files=all"],
-            cwd=self.worktree_path,
+            cwd=checkout,
         ).stdout.strip()
         if status:
-            raise RepoIntakeError(
-                f"repository-intake worktree is dirty and preserved: {self.worktree_path}"
-            )
+            raise RepoIntakeError(f"repository-intake worktree is dirty and preserved: {checkout}")
         branch = self._run(
             ["git", "symbolic-ref", "--quiet", "--short", "HEAD"],
-            cwd=self.worktree_path,
+            cwd=checkout,
             check=False,
         )
         if branch.returncode == 0 and branch.stdout.strip():
-            raise RepoIntakeError(f"repository-intake worktree is attached: {self.worktree_path}")
+            raise RepoIntakeError(f"repository-intake worktree is attached: {checkout}")
         if branch.returncode != 1:
             raise RepoIntakeError("repository-intake detached-head proof failed")
 
@@ -1335,10 +1599,10 @@ class RepoIntakeManager:
         return head
 
     def _add_worktree(self, revision: str) -> None:
-        """Add a detached worktree at an exact full revision."""
+        """Add a detached launch worktree at an exact full revision."""
         if not is_full_commit_sha(revision):
             raise RepoIntakeError("repository-intake worktree revision is malformed")
-        self.state_dir.mkdir(parents=True, exist_ok=True)
+        self.launch_dir.mkdir(parents=True, exist_ok=True)
         self._run(
             [
                 "git",
@@ -1353,9 +1617,10 @@ class RepoIntakeManager:
             cwd=self.caller_root,
         )
 
-    def _remove_worktree(self) -> None:
+    def _remove_worktree(self, worktree: Path | None = None) -> None:
         """Remove only the clean, registered intake worktree."""
-        self._run(["git", "worktree", "remove", str(self.worktree_path)], cwd=self.caller_root)
+        target = worktree or self.worktree_path
+        self._run(["git", "worktree", "remove", str(target)], cwd=self.caller_root)
 
     def _fetch(self, default_branch: str, *, checkout: Path) -> None:
         """Fetch only the validated remote default branch in controlled mode."""
@@ -1382,18 +1647,6 @@ class RepoIntakeManager:
             raise RepoIntakeError("fetched default branch has a malformed SHA")
         return head
 
-    def _assert_fast_forward(self, current: str, target: str) -> None:
-        """Require the fetched target to descend from the current intake HEAD."""
-        result = self._run(
-            ["git", "merge-base", "--is-ancestor", current, target],
-            cwd=self.worktree_path,
-            check=False,
-        )
-        if result.returncode == 1:
-            raise RepoIntakeError("repository-intake remote update is non-fast-forward")
-        if result.returncode != 0:
-            raise RepoIntakeError("repository-intake ancestry proof failed")
-
     def _write_receipt(self, receipt: RepoIntakeReceipt) -> None:
         """Write the verified receipt atomically with owner-only permissions."""
         write_secure(
@@ -1402,10 +1655,250 @@ class RepoIntakeManager:
         )
 
 
+_LOGGER = logging.getLogger(__name__)
+
+
+def _remove_tree_lexically(root: Path) -> None:
+    """Remove one tree without following a symlink at any level.
+
+    Every entry is removed by lstat-checked name, so a hostile symlink or
+    rename swap cannot redirect the removal to foreign state.
+    """
+    try:
+        metadata = root.lstat()
+    except FileNotFoundError:
+        return
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+        root.unlink(missing_ok=True)
+        return
+    stack: list[Path] = [root]
+    while stack:
+        current = stack.pop()
+        entries = list(os.scandir(current))
+        child_directories: list[Path] = []
+        for entry in entries:
+            child = current / entry.name
+            try:
+                child_metadata = child.lstat()
+            except FileNotFoundError:
+                continue
+            if stat.S_ISLNK(child_metadata.st_mode):
+                child.unlink(missing_ok=True)
+            elif stat.S_ISDIR(child_metadata.st_mode):
+                child_directories.append(child)
+            else:
+                child.unlink(missing_ok=True)
+        if child_directories:
+            stack.append(current)
+            stack.extend(child_directories)
+            continue
+        os.rmdir(current)
+
+
+def _same_worktree_path(left: Path, right: Path) -> bool:
+    """Compare two worktree paths without requiring both paths to exist."""
+    try:
+        return left.resolve() == right.resolve()
+    except (OSError, RuntimeError):
+        return left.absolute() == right.absolute()
+
+
+def _records_for_path(
+    records: tuple[_WorktreeRecord, ...], worktree: Path
+) -> tuple[_WorktreeRecord, ...]:
+    """Return every registration that names one worktree path."""
+    return tuple(record for record in records if _same_worktree_path(record.path, worktree))
+
+
+def _warn_preserved(reason: str, path: Path) -> None:
+    """Report one preserved intake path with its recovery proof failure."""
+    _LOGGER.warning(
+        "repository-intake recovery preserved %s: %s; see "
+        "docs/runbooks/corrupted-worktree.md for retained-path recovery",
+        path,
+        reason,
+    )
+
+
+def recover_abandoned_intakes(
+    manager: RepoIntakeManager,
+    records: tuple[_WorktreeRecord, ...],
+) -> None:
+    """Remove abandoned launch intakes that no live launch owns.
+
+    This is the explicit SIGKILL and host-failure recovery path. Immediate
+    cleanup is impossible after an abrupt stop, so a later launch proves for
+    each candidate that no live launch owns it before removal. A held
+    nonblocking owner lock is the liveness proof; a live launch and any
+    dirty, damaged, or foreign state are always preserved with a warning.
+    """
+    launches_root = manager.state_dir / "launches"
+    try:
+        candidates = tuple(launches_root.iterdir())
+    except FileNotFoundError:
+        candidates = ()
+    except OSError as exc:
+        _warn_preserved(f"launch directory scan failed: {exc}", launches_root)
+        return
+    for candidate in candidates:
+        if candidate.is_symlink() or not candidate.is_dir():
+            _warn_preserved("not an ordinary launch directory", candidate)
+            continue
+        if not is_valid_launch_identity(candidate.name):
+            _warn_preserved("launch identity is invalid", candidate)
+            continue
+        if candidate == manager.launch_dir:
+            continue
+        owner_lock_path = candidate / "owner.lock"
+        try:
+            proof = file_lock(owner_lock_path, blocking=False, require_exclusive=True)
+            proof.__enter__()
+        except (LockUnavailableError, OSError, RuntimeError):
+            # A live launch owns this directory. Never remove it.
+            continue
+        try:
+            _recover_one_abandoned_intake(manager, records, candidate)
+        finally:
+            proof.__exit__(None, None, None)
+    _recover_legacy_intake(manager, records)
+
+
+def _recover_one_abandoned_intake(
+    manager: RepoIntakeManager,
+    records: tuple[_WorktreeRecord, ...],
+    candidate: Path,
+) -> None:
+    """Remove one lock-proved abandoned launch intake, or preserve it."""
+    receipt_path = candidate / "receipt.json"
+    try:
+        receipt = _read_launch_receipt(receipt_path)
+    except RepoIntakeError as exc:
+        _warn_preserved(f"launch receipt is unreadable: {exc}", candidate)
+        return
+    worktree = candidate / "worktree"
+    if receipt is None:
+        if worktree.exists():
+            _warn_preserved("abandoned launch has no receipt", candidate)
+            return
+        # An empty launch directory holds no work and no registration.
+        _remove_tree_lexically(candidate)
+        return
+    if (
+        receipt.repository != manager.repository
+        or receipt.repository_identity != manager.repository_identity
+        or receipt.common_dir != manager.common_dir
+        or receipt.ownership_key != f"{manager.ownership_key}:{candidate.name}"
+        or not _same_worktree_path(receipt.path, worktree)
+        or receipt.state_root != candidate.resolve()
+    ):
+        _warn_preserved("abandoned launch receipt ownership does not match", candidate)
+        return
+    matches = _records_for_path(records, worktree)
+    if len(matches) > 1:
+        _warn_preserved("worktree registration is ambiguous", candidate)
+        return
+    try:
+        if matches:
+            record = matches[0]
+            if record.branch is not None:
+                _warn_preserved("abandoned intake worktree is branch-backed", candidate)
+                return
+            # The descriptor-based pointer and config proofs run first so no
+            # Git command touches the damaged checkout before it is proven.
+            manager._validate_intake_checkout(worktree)
+            manager._assert_no_registered_descendants(records, root=worktree)
+            manager._assert_clean_detached(record, checkout=worktree)
+            if record.head != receipt.revision:
+                _warn_preserved(
+                    "abandoned intake worktree HEAD does not match its receipt", candidate
+                )
+                return
+            manager._remove_worktree(worktree)
+        elif worktree.exists():
+            _warn_preserved("abandoned intake worktree is unregistered", candidate)
+            return
+        _remove_tree_lexically(candidate)
+    except RepoIntakeError as exc:
+        _warn_preserved(f"abandoned intake proof failed: {exc}", candidate)
+
+
+def _read_launch_receipt(path: Path) -> RepoIntakeReceipt | None:
+    """Read one launch receipt without ownership assumptions."""
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RepoIntakeError(f"cannot read repository-intake receipt: {path}") from exc
+    if not isinstance(payload, dict):
+        raise RepoIntakeError("repository-intake receipt must be an object")
+    return RepoIntakeReceipt.from_dict(payload)
+
+
+def _recover_legacy_intake(
+    manager: RepoIntakeManager,
+    records: tuple[_WorktreeRecord, ...],
+) -> None:
+    """Remove the legacy permanent intake once safe removal is established.
+
+    The legacy intake at ``state_dir/worktree`` has no launch directory. Its
+    run lock proves that no legacy run holds it, and the clean, detached,
+    descendant-free proof proves that no unfinished work remains. Durable
+    state below its ``build`` directory was already migrated by the state
+    authority step before this sweep runs.
+    """
+    legacy_worktree = manager.state_dir / "worktree"
+    if not legacy_worktree.exists() or legacy_worktree.is_symlink():
+        return
+    legacy_lock_path = manager.common_dir / "hephaestus-repository-intake.run.lock"
+    try:
+        proof = file_lock(legacy_lock_path, blocking=False, require_exclusive=True)
+        proof.__enter__()
+    except (LockUnavailableError, OSError, RuntimeError):
+        return
+    try:
+        matches = _records_for_path(records, legacy_worktree)
+        if len(matches) > 1:
+            _warn_preserved("legacy intake registration is ambiguous", legacy_worktree)
+            return
+        if not matches:
+            _warn_preserved("legacy intake worktree is unregistered", legacy_worktree)
+            return
+        record = matches[0]
+        if record.branch is not None:
+            _warn_preserved("legacy intake worktree is branch-backed", legacy_worktree)
+            return
+        # The descriptor-based pointer and config proofs run first so no Git
+        # command touches the legacy checkout before it is proven.
+        manager._validate_intake_checkout(legacy_worktree)
+        manager._assert_no_registered_descendants(records, root=legacy_worktree)
+        manager._assert_clean_detached(record, checkout=legacy_worktree)
+        legacy_receipt_path = manager.state_dir / "receipt.json"
+        if legacy_receipt_path.exists():
+            payload = json.loads(legacy_receipt_path.read_text(encoding="utf-8"))
+            if (
+                is_full_commit_sha(payload.get("revision"))
+                and payload.get("revision") != record.head
+            ):
+                _warn_preserved(
+                    "legacy intake receipt does not match its worktree HEAD",
+                    legacy_worktree,
+                )
+                return
+        manager._remove_worktree(legacy_worktree)
+        _LOGGER.warning("removed abandoned legacy repository intake %s", legacy_worktree)
+    except (RepoIntakeError, OSError, ValueError) as exc:
+        _warn_preserved(f"legacy intake proof failed: {exc}", legacy_worktree)
+    finally:
+        proof.__exit__(None, None, None)
+
+
 __all__ = [
     "RepoIntakeError",
     "RepoIntakeInUseError",
     "RepoIntakeManager",
     "RepoIntakeReceipt",
     "is_full_commit_sha",
+    "is_valid_launch_identity",
+    "recover_abandoned_intakes",
 ]

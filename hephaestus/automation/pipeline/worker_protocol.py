@@ -7,6 +7,7 @@ from .athena_skill_jobs import AthenaSkillJob
 from .github_jobs import GitHubJob
 from .jobs import AgentJob, BuildTestJob, CompactJob, GitJob, JobHandle, JobResult
 from .queues import CompletionQueue
+from .repo_intake_cleanup import RepoIntakeCleanupFailure
 from .routing import StageName
 
 
@@ -40,8 +41,8 @@ class MainWorker(WorkerLane, Protocol):
         """Run one allowlisted cleanup operation in the auxiliary lane."""
         ...
 
-    def release_repo_intake_leases(self) -> None:
-        """Release run-lifetime repository-intake leases."""
+    def cleanup_repo_intakes(self) -> list[RepoIntakeCleanupFailure]:
+        """Remove launch-owned intakes and report preserved failures."""
         raise NotImplementedError
 
 
