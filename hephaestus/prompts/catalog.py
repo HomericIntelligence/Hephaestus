@@ -40,6 +40,8 @@ _AGENT_DIRECTION_TEMPLATES = frozenset(
         "implementation/resume_feedback.j2",
         "planning/context.j2",
         "planning/plan.j2",
+        "planning/plan_decomposition.j2",
+        "planning/plan_decomposition_review.j2",
         "planning/plan_loop_review.j2",
         "planning/plan_review.j2",
         "planning/requirements_recovery.j2",

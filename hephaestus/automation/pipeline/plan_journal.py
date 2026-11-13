@@ -296,6 +296,7 @@ RECORD_SCHEMA_VERSION: Final[int] = 1
 
 NOGO_MARKER_PREFIX: Final[str] = "<!-- hephaestus-plan-nogo:v1:"
 INTENT_MARKER_PREFIX: Final[str] = "<!-- hephaestus-plan-decomposition-intent:v1:"
+RECEIPT_MARKER_PREFIX: Final[str] = "<!-- hephaestus-plan-decomposition-review:v1:"
 SEAL_MARKER_PREFIX: Final[str] = "<!-- hephaestus-plan-decomposition-seal:v1:"
 BINDINGS_MARKER_PREFIX: Final[str] = "<!-- hephaestus-plan-decomposition-bindings:v1:"
 PARENT_MARKER_PREFIX: Final[str] = "<!-- hephaestus-plan-decomposition-parent:v1:"
@@ -692,6 +693,78 @@ def recover_decomposition_intent(
             requirement_manifest=requirements,
             finding_manifest=findings,
             created_at=payload["created_at"],
+        )
+    return None
+
+
+@dataclass(frozen=True, slots=True)
+class DecompositionReviewReceipt:
+    """One independent-review receipt bound to the complete draft digest."""
+
+    requirements_epoch: str
+    draft_digest: str
+    verdict: str
+    recorded_at: str
+
+    def payload(self) -> dict[str, Any]:
+        """Return the canonical record payload."""
+        return {
+            "schema_version": RECORD_SCHEMA_VERSION,
+            "requirements_epoch": self.requirements_epoch,
+            "draft_digest": self.draft_digest,
+            "verdict": self.verdict,
+            "recorded_at": self.recorded_at,
+        }
+
+
+def publish_decomposition_review_receipt(
+    issue_number: int,
+    receipt: DecompositionReviewReceipt,
+    github: PlanJournalGitHub,
+) -> DecompositionReviewReceipt:
+    """Publish or recover the one review receipt for this epoch and draft."""
+    _upsert_record(
+        issue_number,
+        RECEIPT_MARKER_PREFIX,
+        receipt.requirements_epoch,
+        receipt.payload(),
+        github,
+    )
+    return receipt
+
+
+def recover_decomposition_review_receipt(
+    comments: Sequence[IssueComment],
+    epoch: str,
+    *,
+    draft_digest: str | None = None,
+) -> DecompositionReviewReceipt | None:
+    """Recover the independent-review receipt for one epoch, or None."""
+    for key, raw in _parse_records(comments, RECEIPT_MARKER_PREFIX):
+        if key != epoch:
+            continue
+        payload = _decode_payload(key, raw)
+        if payload is None:
+            return None
+        payload.pop("_key", None)
+        bound = payload.get("draft_digest")
+        verdict = payload.get("verdict")
+        recorded_at = payload.get("recorded_at")
+        if (
+            payload.get("schema_version") != RECORD_SCHEMA_VERSION
+            or not isinstance(bound, str)
+            or len(bound) != 64
+            or (draft_digest is not None and bound != draft_digest)
+            or verdict != "GO"
+            or not isinstance(recorded_at, str)
+            or not recorded_at
+        ):
+            return None
+        return DecompositionReviewReceipt(
+            requirements_epoch=key,
+            draft_digest=bound,
+            verdict=verdict,
+            recorded_at=recorded_at,
         )
     return None
 
