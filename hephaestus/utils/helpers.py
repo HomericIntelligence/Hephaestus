@@ -622,6 +622,7 @@ def run_subprocess(
     input_text: str | None = None,
     remaining_timeout: Callable[[], int | float] | None = None,
     max_output_bytes: int | None = None,
+    pre_launch: Callable[[], None] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run subprocess command with proper error handling.
 
@@ -641,12 +642,18 @@ def run_subprocess(
         remaining_timeout: Optional operation budget callback. It is checked
             directly before and after tracked process creation.
         max_output_bytes: Optional combined standard-output byte limit.
+        pre_launch: Optional callback invoked after dry-run handling and
+            immediately before the child process starts. Dry-run returns
+            without a child, so the callback does not run there. The callback
+            must revalidate local state and raise to stop the launch; its
+            exception propagates and no child process is created.
 
     Returns:
         Completed process object
 
     Raises:
         subprocess.CalledProcessError: If command fails and check=True
+        Exception: Whatever ``pre_launch`` raises; no child starts in that case.
 
     """
     if max_output_bytes is not None and (
@@ -673,6 +680,8 @@ def run_subprocess(
             or remaining_timeout is not None
             or max_output_bytes is not None
         ):
+            if pre_launch is not None:
+                pre_launch()
             result = _run_tracked_process_group(
                 cmd,
                 cwd=cwd,
@@ -685,6 +694,8 @@ def run_subprocess(
                 max_output_bytes=max_output_bytes,
             )
         else:
+            if pre_launch is not None:
+                pre_launch()
             result = subprocess.run(
                 cmd,
                 cwd=cwd,
@@ -697,30 +708,62 @@ def run_subprocess(
             )
         return result
     except subprocess.TimeoutExpired:
-        if log_on_error:
-            logger.error(
-                "Command timed out after %ds: %s",
-                timeout,
-                _format_cmd_for_log(cmd),
-            )
+        _log_failed_subprocess(
+            cmd,
+            error_type="timeout",
+            timeout=timeout,
+            max_output_bytes=max_output_bytes,
+            log_on_error=log_on_error,
+        )
         raise
     except SubprocessOutputLimitExceeded:
-        if log_on_error:
-            logger.error(
-                "Command output exceeded %d bytes: %s",
-                max_output_bytes,
-                _format_cmd_for_log(cmd),
-            )
+        _log_failed_subprocess(
+            cmd,
+            error_type="output",
+            timeout=timeout,
+            max_output_bytes=max_output_bytes,
+            log_on_error=log_on_error,
+        )
         raise
     except subprocess.CalledProcessError as e:
-        if log_on_error:
-            logger.error("Command failed: %s", _format_cmd_for_log(cmd))
-            stdout = e.stdout or ""
-            if stdout:
-                logger.error("stdout: %s", _tail_for_log(stdout))
-            stderr = e.stderr or ""
-            logger.error("stderr: %s", _tail_for_log(stderr))
+        _log_failed_subprocess(
+            cmd,
+            error_type="failed",
+            timeout=timeout,
+            max_output_bytes=max_output_bytes,
+            log_on_error=log_on_error,
+            stdout=e.stdout,
+            stderr=e.stderr,
+        )
         raise
+
+
+def _log_failed_subprocess(
+    cmd: list[str],
+    *,
+    error_type: str,
+    timeout: float | None,
+    max_output_bytes: int | None,
+    log_on_error: bool,
+    stdout: str | None = None,
+    stderr: str | None = None,
+) -> None:
+    """Log one failed subprocess with bounded, redacted diagnostics."""
+    if not log_on_error:
+        return
+    if error_type == "timeout":
+        logger.error("Command timed out after %ds: %s", timeout, _format_cmd_for_log(cmd))
+        return
+    if error_type == "output":
+        logger.error(
+            "Command output exceeded %d bytes: %s", max_output_bytes, _format_cmd_for_log(cmd)
+        )
+        return
+    logger.error("Command failed: %s", _format_cmd_for_log(cmd))
+    if stdout:
+        logger.error("stdout: %s", _tail_for_log(stdout))
+    if stderr:
+        logger.error("stderr: %s", _tail_for_log(stderr))
 
 
 def install_package(package_name: str, upgrade: bool = False) -> bool:

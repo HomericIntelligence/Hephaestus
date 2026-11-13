@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import subprocess
 import threading
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, TypeGuard
 
@@ -14,6 +15,11 @@ from hephaestus.utils.helpers import METADATA_TIMEOUT, NETWORK_TIMEOUT, run_subp
 from hephaestus.utils.retry import is_network_error, retry_with_backoff
 
 logger = logging.getLogger(__name__)
+
+
+class GitPreLaunchError(RuntimeError):
+    """A Git pre-launch validator stopped the launch; the failure is not retried."""
+
 
 _NETWORK_GIT_COMMANDS = frozenset({"clone", "fetch", "ls-remote", "pull", "push"})
 _GIT_GLOBAL_OPTIONS_WITH_VALUE = frozenset(
@@ -191,8 +197,39 @@ def run_git(
     input_text: str | None = None,
     retries: int | None = None,
     shutdown: threading.Event | None = None,
+    pre_launch: Callable[[], None] | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    """Run git through the repository's standard subprocess helper."""
+    """Run git through the repository's standard subprocess helper.
+
+    Args:
+        args: Git arguments, with or without the leading ``git``.
+        cwd: Working directory for the Git process.
+        timeout: Per-attempt timeout in seconds.
+        capture_output: Always True; output is captured as text.
+        text: Always True; output is captured as text.
+        check: Whether to raise on non-zero exit code.
+        dry_run: If True, log the command but do not execute it.
+        log_on_error: If False, suppress ERROR logging on failure.
+        env: Exact environment dict. Defaults to the signing-safe Git env.
+        input_text: Optional text sent to the child's standard input.
+        retries: Retry budget for transient network-command failures.
+            Defaults to 2 for network commands and 0 for the rest.
+        shutdown: Optional cancellation event that stops the child.
+        pre_launch: Optional callback that revalidates local state. It runs
+            once for each actual Git attempt, immediately before the Git
+            process starts, and never during a dry-run. A validator failure
+            is not a network failure: its exception is wrapped in
+            :class:`GitPreLaunchError`, which propagates without retry.
+
+    Returns:
+        Completed process object
+
+    Raises:
+        GitPreLaunchError: When ``pre_launch`` raises; the original exception
+            is chained and no Git process starts for that attempt.
+        subprocess.CalledProcessError: If the Git command fails and check=True.
+
+    """
     if not capture_output or not text:
         raise ValueError("run_git always captures text output through run_subprocess")
 
@@ -213,6 +250,11 @@ def run_git(
         if shutdown is not None:
             kwargs["shutdown"] = shutdown
             kwargs["track_process_group"] = True
+        if pre_launch is not None:
+            try:
+                pre_launch()
+            except Exception as error:
+                raise GitPreLaunchError(f"git pre-launch validation failed: {error}") from error
         return run_subprocess(
             ["git", *normalized_args],
             env=env if env is not None else build_git_signing_env(),
@@ -439,6 +481,7 @@ def repo_root() -> Path:
 
 
 __all__ = [
+    "GitPreLaunchError",
     "git_branch_exists",
     "git_config_get",
     "git_ls_remote_contains",
