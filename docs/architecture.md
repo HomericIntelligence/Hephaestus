@@ -784,49 +784,55 @@ never falls through to an ambient or stale checkout.
 Repo intake has three separate worktree layers:
 
 - The user checkout is the caller-selected repository identity input.
-- The per-repository intake worktree is an automation-owned detached checkout
-  outside the user checkout. Its receipt records the common directory, exact
-  fetched SHA, default branch, and ownership generation.
+- The per-launch intake worktree is an automation-owned detached checkout
+  outside the user checkout. Each launch prepares its own worktree at
+  `launches/<launch-identity>/worktree` below the durable intake state root.
+  Its receipt records the common directory, exact fetched SHA, default branch,
+  launch identity, and ownership generation.
 - The per-item implementation and review worktrees are created from the
   verified intake worktree. Their files use `build/.worktrees` below the
-  receipt-bound intake state root, outside the intake checkout. They retain
+  durable intake state root, outside the disposable launch tree. They retain
   their existing strict dirty-state and cleanup checks.
 
-Before intake preparation starts, the main worker pool takes an exclusive
-nonblocking run lease for the Git common directory. The lease path is stable
-for the common directory. The pool holds the lease across all loop passes.
-Thus, a second process cannot remove or rebind the fixed intake path
-while the first coordinator uses it. The second process fails immediately with
-`repository_intake_in_use` and tells the operator to wait for the active run.
+Each launch prepares its intake once. The durable `intake-registration.json`
+file records the repository identity, digest, state root, and the active
+launch. A second process that prepares the same launch identity contends on
+that launch's `owner.lock` and fails closed. Two concurrent launches prepare
+distinct intake worktrees under the same metadata-lock order.
+
+Intake preparation is create-only and runs under the separate shared Git
+metadata lock. It first runs the abandoned-intake recovery sweep. For each
+other `launches` entry, a nonblocking `owner.lock` acquisition proves that no
+live launch owns it. A matched receipt, a clean detached checkout, and a
+registry without registered descendants let the sweep remove the leftover
+worktree and launch tree. A held owner lock or damaged state is preserved.
+The sweep also removes the legacy permanent intake only after the same proof.
+A foreign pre-existing worktree at the new launch path fails closed and stays
+preserved. Each new intake checkout proves three checkout properties before
+any write. The properties are the regular no-follow `.git` pointer format,
+the clean detached state at the fetched head, and a registry without
+registered descendants.
 
 Compatibility-lock discovery skips registered worktrees whose directories no
 longer exist. It does not prune their Git registrations. Missing directories
 cannot supply an allowed lock path. Other path-resolution errors still stop
 intake, and the existing state and symlink checks remain in force.
 
-The intake worktree is created or rebound only under the separate shared Git
-metadata lock. Before a Git command uses an existing intake, a filesystem-only
-check verifies that its regular no-follow `.git` pointer identifies one direct
-child of the selected common directory's `worktrees` directory. The check also
-verifies that the admin directory's `gitdir` back-pointer identifies the intake
-and its `commondir` pointer identifies the selected common directory. A valid
-clean receipt is reused. A dirty, symlinked, special, malformed, unregistered,
-foreign, or mismatched path is preserved and fails closed. Intake never
-attaches the default branch a second time.
+A failure after `worktree add --detach` and before the atomic registration
+and receipt writes rolls back the new launch tree. The rollback re-runs the
+proofs, Git removes the worktree, and a lexical no-symlink traversal removes
+the launch tree. A rollback failure preserves the launch tree and reports the
+retained path. The next launch's sweep recovers it.
 
-Before intake replaces an outdated checkout, it reads the shared worktree
-registry again. If another registered worktree is below the intake path, the
-operation stops and preserves both worktrees and the receipt. The operator must
-relocate or remove the descendant through the verified worktree recovery
-process before a later run can rebind the intake. Intake does not use a path
-name to decide ownership, and it does not delete the descendant.
-
-The coordinator releases all intake run leases after both worker lanes stop,
-completion results drain, resumable records are complete, and the final summary
-finishes. A nested finalization path releases the leases if final reporting
-fails. `WorkerPool.shutdown()` does not release them. A hard process exit lets
-the kernel release the file locks. The receipt, worktree, and lease sentinel
-stay on disk for the next verified run.
+The coordinator removes all launch intakes after both worker lanes stop,
+completion results drain, resumable records are complete, and the final
+summary finishes. A nested finalization path still removes them if final
+reporting fails. `WorkerPool.shutdown()` does not remove them. Each removal
+re-proves the registered, clean, detached, descendant-free state before Git
+removes the worktree. A preserved failure logs the retained path and the
+runbook name; it never changes the run exit code. A hard process exit lets
+the kernel release the file locks. The next launch's sweep then performs the
+cleanup with the same proof set.
 
 #### Boundary diagram
 
@@ -2101,10 +2107,10 @@ worktree-management control plane. For each issue or linked PR, planning and
 reviewer source reads reuse the detached
 `build/.worktrees/auto-<#>-review` source at the captured default-branch
 revision. Implementation, remediation, and writer recovery source reads reuse
-`build/.worktrees/auto-<#>-impl`. For a verified intake checkout, these paths
-start at its receipt-bound state root. An ordinary checkout keeps its existing
-local path convention. A missing or invalid intake receipt cannot select the
-ordinary path convention. Changed revisions rebind the same path and
+`build/.worktrees/auto-<#>-impl`. For a verified launch intake checkout, these
+paths start at the durable intake state root. An ordinary checkout keeps its
+existing local path convention. A missing or invalid intake receipt cannot
+select the ordinary path convention. Changed revisions rebind the same path and
 increment its receipt generation. Review never creates a review branch. The
 stable `auto-<#>-guard` ref is a CAS-protected ownership record only and never
 owns a third worktree. Dirty lanes and lanes with durable learning or cleanup
@@ -2157,8 +2163,9 @@ The exhaustive classification is maintained in the
 - [`GitJob`](../hephaestus/automation/pipeline/jobs.py) — `op` is one operation
  in the canonical [`GIT_OPS`](../hephaestus/automation/pipeline/git_jobs.py)
  inventory. `__post_init__` validates the operation. `prepare_intake` creates
- or reuses the detached per-repository intake worktree and returns its typed
- exact-SHA receipt. Before a PR-review
+ the detached per-launch intake worktree once per launch and returns its
+ typed exact-SHA launch receipt. A repeated request in the same launch
+ returns the identical retained receipt. Before a PR-review
  agent job, `verify_pr_review_checkout` receives the worktree path, branch,
  expected snapshot SHA, and PR number. The worker rejects a dirty checkout,
  synchronizes the branch, requires `git rev-parse HEAD` to equal that SHA, and
@@ -2353,13 +2360,18 @@ record in each registered worktree root. It continues to reject all other
 caller state. It recomputes the registered lock set and stops before mutation
 if the set changed.
 
-The intake job then takes a nonblocking run-lifetime lease at
-`<git-common-dir>/hephaestus-repository-intake.run.lock`. The main worker pool
-holds one lease for each Git common directory. A repeated preparation in the
-same pool uses that lease and does not take a nested file lock. If the first
-preparation fails, the pool releases the new lease. The coordinator releases
-retained leases after its final run report. A separate process that owns the
-lease causes an immediate `repository_intake_in_use` result.
+The intake job then takes one nonblocking exclusive launch owner lock at
+`launches/<launch-identity>/owner.lock` below the durable intake state root.
+The launch identity is the run identity. The pool keeps the owner context for
+the whole run. A duplicate process with the same launch identity cannot
+acquire the lock. It fails closed and tells the operator to wait for the
+active run. If the first preparation fails, the pool releases the owner
+context. The coordinator releases each owner context during terminal intake
+cleanup after the final run report. The preparation nests the Git-metadata
+lock inside the owner lock. It first runs the abandoned-intake recovery sweep
+while the metadata lock is held. The sweep removes an earlier launch's intake
+only when a nonblocking owner-lock acquisition, the receipt match, and the
+clean detached descendant-free proofs all pass.
 
 `prepare_intake` and `sync_checkout` also take the status-safe Git-metadata
 lock resolved by

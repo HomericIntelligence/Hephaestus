@@ -79,3 +79,4 @@ confirm all three.
 | [0063](0063-harness-model-transport-catalog.md) | Harness and model-transport catalog | Proposed |
 | [0064](0064-documentation-path-reference-maintenance.md) | Living documents follow the paths they name | Proposed |
 | [0065](0065-fleet-git-are-library-members.md) | hephaestus.fleet and hephaestus.git are library members | Accepted |
+| [0066](0066-ephemeral-launch-intake.md) | The repository intake is one ephemeral worktree per launch | Proposed |

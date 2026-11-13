@@ -4,7 +4,7 @@ import queue
 import threading
 import time
 from collections.abc import Iterator
-from contextlib import contextmanager, nullcontext
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import MagicMock, Mock
 
@@ -106,7 +106,6 @@ def test_intake_common_dir_lock_uses_configured_lock_budget(
     receipt = MagicMock()
     receipt.to_dict.return_value = {"revision": "a" * 40}
     first_manager = MagicMock(caller_root=caller, common_dir=common_dir, repository="acme/repo")
-    first_manager.run_lease.return_value = nullcontext()
 
     def first_prepare(**_kwargs: object) -> object:
         first_entered.set()
@@ -115,7 +114,6 @@ def test_intake_common_dir_lock_uses_configured_lock_budget(
 
     first_manager.prepare.side_effect = first_prepare
     second_manager = MagicMock(caller_root=caller, common_dir=common_dir, repository="acme/repo")
-    second_manager.run_lease.return_value = nullcontext()
     second_manager.prepare.return_value = receipt
     managers = iter((first_manager, second_manager))
 
