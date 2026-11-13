@@ -4744,15 +4744,29 @@ class TestTestsAndFix:
             "`bash scripts/run_ci_local.sh all --rebuild` — passed"
         )
 
-    def test_linux_exact_handoff_finishes_runner_unavailable(
+    def test_linux_exact_handoff_skips_pre_pr_checks_and_relies_on_ci(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """A valid Linux signal fails closed without a test-fix run."""
+        """A valid Linux signal skips the local checks and lets CI verify.
+
+        The container runner is absent on this host, and Linux has no native
+        fallback. Failing the item would discard completed implementation
+        work; the required CI checks on the pull request verify it instead
+        (#3629).
+        """
         stage = ImplementationStage()
         ctx = make_ctx(org="HomericIntelligence")
         item = make_work_item(issue=1, repo="Hephaestus", state="TEST_WAIT")
+        item.payload["test_command"] = "bash scripts/run_ci_local.sh all --rebuild"
         stage.step(item, ctx)
-        with patch(_IMPLEMENTATION_PLATFORM, "linux"):
+        with (
+            patch(_IMPLEMENTATION_PLATFORM, "linux"),
+            patch(
+                "hephaestus.automation.pipeline.stages.implementation"
+                ".implementation._commit_push_request",
+                return_value="proceeded",
+            ) as push,
+        ):
             stage.on_job_done(
                 item,
                 JobResult(
@@ -4763,12 +4777,13 @@ class TestTestsAndFix:
                 ctx,
             )
 
-        item.state = "COMMIT_PUSH_WAIT"
+            item.state = "COMMIT_PUSH_WAIT"
+            result = stage.step(item, ctx)
 
-        assert stage.step(item, ctx) == StageOutcome(
-            Disposition.FINISH_FAIL,
-            "pre_pr_runner_unavailable",
-        )
+        assert result == "proceeded"
+        push.assert_called_once()
+        assert "pre_pr_runner_unavailable" not in item.payload
+        assert "test_command" not in item.payload
         assert "tests_failed" not in item.payload
         assert item.payload["pre_pr_runner_mode"] == "container"
 
