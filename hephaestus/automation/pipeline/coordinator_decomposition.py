@@ -68,6 +68,11 @@ class DecompositionCoordinator(_CoordinatorHost):
         assert item.issue is not None  # noqa: S101 - stage work items carry an issue
         repo = item.repo
         parent = item.issue
+        if self.config.dry_run:
+            # Dry-run never published the durable transaction, so admission is
+            # a no-op: no readback, no queue push, no GitHub mutation (#2982).
+            logger.info("decomposition %s#%d: dry-run skips child admission", repo, parent)
+            return
         ctx = self._ctx_for_repo(repo)
         epoch = plan_journal_mod.requirements_epoch(str(item.payload.get("issue_body") or ""))
         comments = ctx.github.issue_comments(parent)

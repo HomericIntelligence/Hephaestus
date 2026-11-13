@@ -48,6 +48,28 @@ issues. The pipeline topology keeps eight stages.
   role markers and canonical JSON payloads. Recovery re-reads GitHub and
   matches the role marker. A foreign marker is kept, and the host writes no
   duplicate.
+- **Transaction.** After a trigger holds, the plan-review stage runs one
+  durable transaction before any mutation: a one-shot generation session
+  produces a complete normalized draft manifest; a separate one-shot
+  independent review session, bound to the complete draft digest, must return
+  a `GO` verdict before the host seals the tree. The host then creates or
+  recovers every child issue by its deterministic marker, verifies one exact
+  readback per child against the seal, adds the confirmed child labels,
+  transitions the parent to the exclusive epic state with a summary comment,
+  and only then publishes the child bindings and finishes the parent with the
+  complete child manifest.
+- **Same-run recursion rule.** A generated child issue never decomposes in
+  the same run. When a work item's issue number is in the coordinator-owned
+  current-run generated set, the stage persists its NOGO record, confirms
+  `state:plan-no-go`, creates no decomposition artifacts, and defers the item
+  to a later run.
+- **Fail-closed recovery.** Restart reconciliation resumes at the
+  independent-review step and fast-forwards through recovered records. A
+  corrupt draft blocks the item as `plan_decomposition_draft_unreadable`.
+  Provider failures and GitHub write failures retry within the bounded
+  budget and then block the item; no partial tree is admitted. An ambiguous
+  child create or readback fails closed, and the stage never guesses a
+  binding.
 
 ## Alternatives considered
 
@@ -71,6 +93,7 @@ issues. The pipeline topology keeps eight stages.
   `hephaestus.automation.pipeline.plan_journal`.
 - Model output stays untrusted: only the host validates trees, publishes
   records, creates issues, writes labels, and queues work.
-- The decomposition agent session, child-issue creation and readback, the
-  parent epic transition, and topological child admission remain future work
-  tracked by the issue; the trigger, counters, and record protocol land first.
+- The coordinator owns child admission: it re-reads the durable records,
+  verifies each child issue against the sealed specification and its
+  confirmed labels, and queues ready children one topological layer at a
+  time. Dry-run publishes no decomposition mutation and queues no child.

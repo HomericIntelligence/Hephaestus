@@ -743,3 +743,47 @@ def test_flat_reexport_guard_detects_a_missing_name(tmp_path: Path) -> None:
     (stages / "repo.py").write_text("VALUE = 1\n", encoding="utf-8")
 
     assert _flat_reexport_identity_offenders(stages) == ["repo: flat re-export misses ['VALUE']"]
+
+
+def test_decomposition_admission_performs_no_durable_github_mutation() -> None:
+    """The coordinator's decomposition admission only reads durable state.
+
+    The stage and the GitHub workers own every decomposition mutation. The
+    coordinator mixin verifies records and children and queues ready work.
+    """
+    module_path = _PIPELINE / "coordinator_decomposition.py"
+    assert module_path.exists()
+    tree = ast.parse(module_path.read_text(encoding="utf-8"))
+    mutators = {
+        "edit_labels",
+        "upsert_issue_comment",
+        "append_issue_comment",
+        "create_issue",
+        "gh_issue_add_labels",
+        "gh_issue_remove_labels",
+        "gh_issue_upsert_comment",
+        "gh_issue_create",
+        "remove_labels",
+        "add_labels",
+        "mark_pr_implementation_no_go",
+    }
+    offenders = [
+        node.attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute) and node.attr in mutators
+    ]
+    assert offenders == []
+
+
+def test_decomposition_transaction_lives_in_the_plan_review_stage() -> None:
+    """No stage package other than plan_review runs the decomposition transaction."""
+    stages = _PIPELINE / "stages"
+    markers = ("DECOMP_", "decomposition_children", "_decomposition_step")
+    offenders = [
+        str(path.relative_to(_PIPELINE))
+        for stage_dir in sorted(stages.iterdir())
+        if stage_dir.is_dir() and stage_dir.name != "plan_review"
+        for path in stage_dir.rglob("*.py")
+        if any(marker in path.read_text(encoding="utf-8") for marker in markers)
+    ]
+    assert offenders == []

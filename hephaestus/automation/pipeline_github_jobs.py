@@ -529,7 +529,9 @@ def _create_decomposition_children(
         matches = [
             payload
             for number, payload in open_issues.items()
-            if str(payload.get("body") or "").lstrip().startswith(marker)
+            # The rendered child body carries the marker at its end; the
+            # marker identity, not its byte offset, is the recovery key.
+            if marker in str(payload.get("body") or "")
         ]
         issue_number: int | None = None
         if len(matches) > 1:
