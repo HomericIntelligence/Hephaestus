@@ -585,6 +585,23 @@ def current_plan_context(
     return _bounded_excerpt(plan, max_chars)
 
 
+def complete_current_plan_context(comments: Sequence[IssueComment]) -> str:
+    """Return the complete normalized current plan without a size budget.
+
+    The decomposition trigger compares the complete plan with the amendment
+    context budget, so this renderer applies no truncation. The bounded
+    :func:`current_plan_context` renderer stays the amendment-prompt source.
+    """
+    snapshot = journal_snapshot(comments)
+    if not snapshot.current_plan:
+        return ""
+    return render_current_plan(
+        snapshot.current_plan,
+        revision=snapshot.revision,
+        forced_planning_epoch=snapshot.forced_planning_epoch,
+    )
+
+
 def current_revision_context(
     comments: Sequence[IssueComment],
     *,
