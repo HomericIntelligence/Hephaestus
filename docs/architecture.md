@@ -141,8 +141,8 @@ Repository and direct intake use the same row boundary. Intake does not write
  behind a uniform `--agent` flag.
 - **POLA. Least privilege, least astonishment.** Per-call
  `--allowedTools`, scoped worktrees, fenced untrusted GitHub content
- via `_fence_untrusted` in
- [`prompts/_shared.py`](../hephaestus/automation/prompts/_shared.py) and
+ via `fence_untrusted` in
+ [`prompts/fencing.py`](../hephaestus/prompts/fencing.py) and
  admin-free CI/CD-gated merge.
 
 ---

@@ -57,7 +57,6 @@ from hephaestus.automation.agent_config import (
 )
 from hephaestus.automation.commit_runtime import CommitIssueMetadata
 from hephaestus.automation.host_capabilities import ValidatedSigningProvider
-from hephaestus.automation.implementation_writer import ImplementationWriterHandoff
 from hephaestus.automation.models import DEFAULT_STATE_DIR
 from hephaestus.automation.pipeline import worker_pool as worker_pool_module
 from hephaestus.automation.pipeline.codex_worktree_boundary import (
@@ -155,6 +154,7 @@ from hephaestus.config.child_environments import (
 )
 from hephaestus.git.runtime import operation_file_lock
 from hephaestus.git.snapshot import _terminate_bounded_process_tree
+from hephaestus.git.writer import ImplementationWriterHandoff
 from hephaestus.prompts import PromptCatalog
 from hephaestus.resilience import CircuitBreakerOpenError, get_circuit_breaker
 from hephaestus.utils.file_lock import LockUnavailableError, file_lock, file_lock_at
