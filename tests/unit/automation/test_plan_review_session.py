@@ -12,6 +12,8 @@ from hephaestus.agents.pi_session import create_pi_binding
 from hephaestus.automation.plan_review_session import (
     PlanReviewSessionLostError,
     PlanReviewSessionStore,
+    decomposition_generation_session_key,
+    decomposition_review_session_key,
 )
 
 
@@ -378,3 +380,30 @@ def test_existing_cycle_requires_reset_for_new_selection(
             plan_revision=2,
             plan_fingerprint="new-plan",
         )
+
+
+def test_decomposition_session_roles_are_separate_one_shot_identities() -> None:
+    """Generation and review one-shot keys never collide with the review cycle."""
+    epoch = "a" * 64
+    digest = "b" * 64
+
+    generation = decomposition_generation_session_key(epoch)
+    review = decomposition_review_session_key(epoch, digest)
+
+    assert generation.startswith("plan-decomposition-generator:")
+    assert review.startswith("plan-decomposition-reviewer:")
+    assert generation != review
+    assert epoch in generation
+    assert digest in review
+
+
+def test_decomposition_session_keys_reject_malformed_identities() -> None:
+    """A malformed epoch or digest cannot forge a session identity."""
+    with pytest.raises(ValueError):
+        decomposition_generation_session_key("short")
+    with pytest.raises(ValueError):
+        decomposition_generation_session_key("Z" * 64)
+    with pytest.raises(ValueError):
+        decomposition_review_session_key("a" * 64, "nope")
+    with pytest.raises(ValueError):
+        decomposition_review_session_key("a" * 64, "B" * 64)

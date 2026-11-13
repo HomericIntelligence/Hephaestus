@@ -1,0 +1,92 @@
+Convert the PLAN for GitHub issue #{{ issue_number }} into a complete
+dependency-ordered tree of single-pull-request work units.
+
+Decomposition rules:
+
+- Cover every requirement identifier in the manifest. Each unit names the
+  requirement or finding identifiers that it owns. The complete tree must
+  cover every identifier in the manifest, and no unit may name an unknown
+  identifier.
+- Give every unit a lowercase kebab-case node_id of at most 64 characters.
+- List every direct prerequisite node_id. A prerequisite must appear in the
+  tree. Do not name a unit as its own prerequisite.
+- Keep each unit small enough for one pull request. One unit owns one
+  behavior. Two units that change the same files must connect through a
+  prerequisite edge, or the host rejects the overlap.
+- Give every unit at least one repository path and at least one acceptance
+  criterion. Name failure behavior and the expected evidence for the checks.
+- Verification commands accept only focused checks in this form:
+  `uv run pytest <test-file>`, `uv run ruff check <path>`,
+  `uv run ruff format --check <path>`, `uv run mypy <path>`, or a named
+  `just <recipe>`. Reject shell operators, redirections, substitutions,
+  environment assignments, control characters, absolute paths, parent
+  traversal, network tools, and inline interpreter code.
+- Set single_pr to true for every unit.
+
+{{ terse_output_directive }}
+
+---
+
+{{ untrusted_notice }}
+
+**Source Issue Title (untrusted):**
+{{ issue_title_block }}
+
+**Source Issue Body (untrusted):**
+{{ issue_body_block }}
+
+**Complete Plan (untrusted):**
+{{ plan_text_block }}
+
+**Requirement Manifest (host-owned):**
+{{ requirement_manifest_block }}
+
+**Finding Manifest (host-owned):**
+{{ finding_manifest_block }}
+
+**Source Plan Revision:** {{ source_plan_revision }}
+**Source Plan Fingerprint:** {{ source_plan_fingerprint }}
+**Requirements Epoch:** {{ requirements_epoch }}
+{% if rejected_draft_digest %}
+**Rejected Draft Digest:** {{ rejected_draft_digest }}
+Your previous draft was rejected. Return a complete replacement tree that
+fixes every error below. Do not return a partial tree.
+{% endif %}
+{% if validation_errors %}
+**Validation Errors From The Rejected Draft:**
+{% for error in validation_errors %}
+- {{ error }}
+{% endfor %}
+{% endif %}
+{% if review_findings %}
+**Independent Review Findings To Address:**
+{{ review_findings_block }}
+{% endif %}
+
+---
+
+Answer with one fenced ```json block and nothing else in the block. The block
+holds one JSON array. Each array element is one object with exactly these
+keys and no others:
+
+```json
+[
+  {
+    "node_id": "kebab-case-id",
+    "title": "Imperative title of at most 120 characters",
+    "owned_behavior": "The one behavior this unit owns",
+    "repository_paths": ["repo/relative/path.py"],
+    "acceptance_criteria": ["One testable criterion"],
+    "failure_behavior": "What happens when this unit fails",
+    "verification_commands": ["uv run pytest tests/unit/test_example.py"],
+    "expected_evidence": "The evidence the checks produce",
+    "prerequisites": ["prerequisite-node-id"],
+    "requirement_ids": ["req-0123456789ab"],
+    "finding_ids": ["find-0123456789ab"],
+    "single_pr": true
+  }
+]
+```
+
+The host validates the complete tree and rejects the whole draft on any
+schema, coverage, overlap, command, or dependency error.
