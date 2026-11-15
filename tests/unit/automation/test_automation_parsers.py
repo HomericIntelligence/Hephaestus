@@ -22,7 +22,8 @@ AGENT_HELP = (
 JSON_HELP = "Emit machine-readable JSON output instead of human-readable text"
 NO_UI_HELP = "Disable curses UI (use plain logging instead)"
 THROTTLE_RATE_HELP = (
-    "Global gh token-bucket refill rate in calls/sec (default: 10.0). "
+    "Global gh token-bucket refill rate in calls/sec "
+    "(default: half the 5,000/hour account quota, about 0.69). "
     "Pass 0 to disable the global throttle."
 )
 THROTTLE_BURST_HELP = "Global gh token-bucket burst size (default: 30.0)."
@@ -152,7 +153,7 @@ def _github_throttle_specs() -> tuple[ActionSpec, ActionSpec]:
             ("--gh-global-rate",),
             "gh_global_rate",
             "_StoreAction",
-            10.0,
+            None,
             help_text=THROTTLE_RATE_HELP,
         ),
         _action_spec(
