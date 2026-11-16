@@ -57,6 +57,17 @@ jobs:
               exit 1
               ;;
           esac
+          # A reopened (or reusable-call) issue can already carry a higher-ranked
+          # state label (plan-go, plan-no-go, implementation-*, skip). Re-adding
+          # needs-plan then corrupts the exclusive state invariant the pipeline
+          # asserts (plan_review "exclusive needs-plan label was not confirmed"),
+          # so skip when any state:* label is present. POST is idempotent, so an
+          # issue carrying only stale needs-plan is a harmless no-op either way.
+          if gh api "repos/$REPO/issues/$ISSUE_NUMBER" --jq '.labels[].name' \
+              | grep -q '^state:'; then
+            echo "::notice::Issue already carries a state:* label; leaving it unchanged"
+            exit 0
+          fi
           # ``gh api`` POST against the labels endpoint is idempotent — adding
           # a label the issue already carries is a no-op — so re-runs (e.g.
           # via ``reopened``) are safe.
