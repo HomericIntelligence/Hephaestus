@@ -14,12 +14,13 @@ import logging
 from typing import Any
 
 import hephaestus.automation.pipeline.coordinator_types as ct
-import hephaestus.automation.pipeline.plan_journal as plan_journal_mod
 from hephaestus.automation.dependency_parser import parse_issue_dependencies
 from hephaestus.automation.pipeline.plan_journal import (
     recover_decomposition_bindings,
+    recover_decomposition_intent,
     recover_decomposition_seal,
     recover_decomposition_transition,
+    requirements_epoch,
 )
 from hephaestus.automation.pipeline.routing import StageName
 from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
@@ -74,7 +75,7 @@ class DecompositionCoordinator(_CoordinatorHost):
             logger.info("decomposition %s#%d: dry-run skips child admission", repo, parent)
             return
         ctx = self._ctx_for_repo(repo)
-        epoch = plan_journal_mod.requirements_epoch(str(item.payload.get("issue_body") or ""))
+        epoch = requirements_epoch(str(item.payload.get("issue_body") or ""))
         comments = ctx.github.issue_comments(parent)
         seal = recover_decomposition_seal(comments, epoch)
         bindings = recover_decomposition_bindings(comments, epoch)
@@ -99,7 +100,7 @@ class DecompositionCoordinator(_CoordinatorHost):
             self._finish(item, passed=False, reason="sealed tree is unreadable")
             return
         layer_of = {node_id: layer for layer, nodes in enumerate(layers) for node_id in nodes}
-        intent = plan_journal_mod.recover_decomposition_intent(comments, epoch)
+        intent = recover_decomposition_intent(comments, epoch)
         source_revision = intent.source_plan_revision if intent is not None else 1
         bound_issues = dict(bindings.bindings)
         parent_labels = _label_names(ctx, parent)
