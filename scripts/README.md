@@ -40,6 +40,12 @@ through installed `hephaestus-*` console scripts.
 - **`compact_issue_timelines.py`** — Dry-run-first migration that reduces open
   and closed issue timelines to the latest actor-owned plan and plan review.
   See `../docs/runbooks/compact-issue-timelines.md`.
+- **`consolidate_plan_records.py`** — Dry-run-first operator command that
+  consolidates one duplicate canonical plan/review pair on one issue. The
+  operator names the keep and supersede comment IDs and supplies the merged
+  content; the command archives each superseded comment, deletes it,
+  upgrades the keep pair in place, and forces a fresh plan review.
+  See `../docs/runbooks/consolidate-plan-records.md`.
 - **`compare_benchmarks.py`** — Compare benchmark result JSON files, with an
   explicit optional command-execution mode for collecting a fresh result.
 

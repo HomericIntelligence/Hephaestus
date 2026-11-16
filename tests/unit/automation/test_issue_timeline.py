@@ -299,3 +299,46 @@ def test_compaction_leaves_recovery_and_keeps_one_obsolete_role_per_issue() -> N
 
     assert result.delete_comment_ids == (3,)
     assert OBSOLETE_EXPLANATION_MARKER in comments[2].body
+
+
+def test_compaction_preserves_the_consolidation_provenance_binding() -> None:
+    """Compaction re-renders a consolidated plan without dropping its header."""
+    from hephaestus.automation.review_journal import (
+        ConsolidationSource,
+        render_consolidation_provenance,
+    )
+
+    line = render_consolidation_provenance(
+        issue_owner="LLM360",
+        issue_name="comet",
+        issue_number=705,
+        requirements_digest="c" * 64,
+        epoch=4,
+        sources=(
+            ConsolidationSource(
+                role="plan",
+                comment_id=5446247620,
+                login="mvillmow",
+                alias_tag="shared",
+                digest="b" * 64,
+            ),
+        ),
+    )
+    comments = [
+        _comment(
+            1,
+            render_current_plan(
+                "Merged plan\n",
+                revision=4,
+                prior_fingerprints=("b" * 64,),
+                consolidation_provenance=line,
+            ),
+        ),
+        _comment(2, render_current_review("Merged review", revision=4)),
+    ]
+
+    compaction = plan_issue_timeline_compaction(comments)
+
+    assert compaction.plan_needs_update is False
+    assert compaction.plan_body is not None and line in compaction.plan_body
+    assert compaction.delete_comment_ids == ()

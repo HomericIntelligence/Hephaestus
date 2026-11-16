@@ -51,6 +51,30 @@ FORCED_PLANNING_EPOCH_MARKER: Final[str] = "<!-- hephaestus-forced-planning-epoc
 RECOVERY_SOURCE_EPOCH_RE: Final[re.Pattern[str]] = re.compile(
     r"<!-- hephaestus-recovery-source-epoch: (?P<source>[0-9a-f]{64}) -->"
 )
+CONSOLIDATION_PROVENANCE_PREFIX: Final[str] = (
+    f"{HOMERIC_INTELLIGENCE_COMMENT_PREFIX}plan-consolidation:"
+)
+"""Prefix of the consolidation provenance header line inside a plan comment."""
+
+CONSOLIDATION_PROVENANCE_RE: Final[re.Pattern[str]] = re.compile(
+    r"<!-- HomericIntelligence:plan-consolidation:v=(?P<version>\d+)"
+    r":issue=(?P<issue>[^#:\s]+)#(?P<number>[1-9][0-9]*)"
+    r":requirements=(?P<requirements>[0-9a-f]{64})"
+    r":epoch=(?P<epoch>[1-9][0-9]*)"
+    r":sources=(?P<sources>[^:]+?) -->"
+)
+"""Exact shape of the consolidation provenance header line."""
+
+_CONSOLIDATION_SOURCE_RE: Final[re.Pattern[str]] = re.compile(
+    r"(?P<role>plan|review)\|(?P<comment_id>[1-9][0-9]*)\|(?P<login>[^|]+)"
+    r"\|(?P<alias_tag>shared|hephaestus|athena)\|(?P<digest>[0-9a-f]{64})"
+)
+"""Exact shape of one bound source record inside the provenance line."""
+
+ARCHIVE_SOURCE_RE: Final[re.Pattern[str]] = re.compile(
+    r"Superseded (?P<role>plan|review) source: (?P<spec>[^.\n]+)\."
+)
+"""Prose shape that binds one consolidation archive to its superseded source."""
 RAW_PATCH_RE: Final[re.Pattern[str]] = re.compile(
     r"(?m)^\s*```diff\s*$|^\s*diff --git\s+|^\s*@@\s+-\d+(?:,\d+)?\s+\+\d+"
 )
@@ -147,6 +171,116 @@ class PlanDiscoveryResult:
         return cls(PlanDiscoveryStatus.IDENTITY_CONFLICT, error=str(error))
 
 
+@dataclass(frozen=True, slots=True)
+class ConsolidationSource:
+    """One plan/review record bound into a plan-consolidation provenance."""
+
+    role: str
+    comment_id: int
+    login: str
+    alias_tag: str
+    digest: str
+
+    @property
+    def spec(self) -> str:
+        """Return the pipe-delimited wire form of this source record."""
+        return f"{self.role}|{self.comment_id}|{self.login}|{self.alias_tag}|{self.digest}"
+
+
+@dataclass(frozen=True, slots=True)
+class ConsolidationProvenance:
+    """Parsed ``plan-consolidation`` provenance header of one plan comment."""
+
+    issue_owner: str
+    issue_name: str
+    issue_number: int
+    requirements_digest: str
+    epoch: int
+    sources: tuple[ConsolidationSource, ...]
+
+
+def parse_consolidation_source_spec(spec: str) -> ConsolidationSource | None:
+    """Parse one pipe-delimited source record, or None when it is malformed."""
+    match = _CONSOLIDATION_SOURCE_RE.fullmatch(spec)
+    if match is None:
+        return None
+    return ConsolidationSource(
+        role=match.group("role"),
+        comment_id=int(match.group("comment_id")),
+        login=match.group("login"),
+        alias_tag=match.group("alias_tag"),
+        digest=match.group("digest"),
+    )
+
+
+def parse_consolidation_provenance(line: str) -> ConsolidationProvenance | None:
+    """Parse one consolidation provenance header line.
+
+    Args:
+        line: One candidate header line. The parser accepts no leading or
+            trailing text around the marker.
+
+    Returns:
+        The parsed provenance, or None when *line* is not a well-formed
+        provenance header.
+
+    """
+    match = CONSOLIDATION_PROVENANCE_RE.fullmatch(line.strip())
+    if match is None or match.group("version") != "1":
+        return None
+    issue = match.group("issue")
+    owner, separator, name = issue.partition("/")
+    if not separator or not owner or not name or "/" in name:
+        return None
+    sources: list[ConsolidationSource] = []
+    for spec in match.group("sources").split(","):
+        source = parse_consolidation_source_spec(spec)
+        if source is None:
+            return None
+        sources.append(source)
+    if not sources:
+        return None
+    return ConsolidationProvenance(
+        issue_owner=owner,
+        issue_name=name,
+        issue_number=int(match.group("number")),
+        requirements_digest=match.group("requirements"),
+        epoch=int(match.group("epoch")),
+        sources=tuple(sources),
+    )
+
+
+def render_consolidation_provenance(
+    *,
+    issue_owner: str,
+    issue_name: str,
+    issue_number: int,
+    requirements_digest: str,
+    epoch: int,
+    sources: Sequence[ConsolidationSource],
+) -> str:
+    """Render the single consolidation provenance header line.
+
+    Raises:
+        ValueError: If the rendered line does not parse back to the same
+            binding. The header is a sealed identity, so a malformed render
+            fails closed instead of publishing an unverifiable record.
+
+    """
+    specs = ",".join(source.spec for source in sources)
+    line = (
+        f"{CONSOLIDATION_PROVENANCE_PREFIX}v=1"
+        f":issue={issue_owner}/{issue_name}#{issue_number}"
+        f":requirements={requirements_digest}"
+        f":epoch={epoch}"
+        f":sources={specs} -->"
+    )
+    parsed = parse_consolidation_provenance(line)
+    if parsed is None or parsed.sources != tuple(sources):
+        raise ValueError("rendered consolidation provenance header is malformed")
+    return line
+
+
 @dataclass(frozen=True)
 class JournalSnapshot:
     """Current canonical comments and their bounded plan metadata."""
@@ -159,6 +293,7 @@ class JournalSnapshot:
     current_review_revision: int | None
     prior_plan_fingerprints: tuple[str, ...] = ()
     forced_planning_epoch: bool = False
+    consolidation_provenance: str | None = None
 
 
 def is_plan_comment(body: str) -> bool:
@@ -379,12 +514,14 @@ def _without_fingerprint_line(text: str) -> str:
     return stripped
 
 
-def _current_plan_parts(body: str) -> tuple[str, tuple[str, ...], bool]:
+def _current_plan_parts(
+    body: str,
+) -> tuple[str, tuple[str, ...], bool, str | None]:
     """Parse host metadata only from the canonical plan-comment header."""
     stripped = body.lstrip()
     canonical_marker = _top_level_marker(body, PLAN_CANONICAL_MARKERS)
     if canonical_marker is None and not stripped.startswith(PLAN_COMMENT_MARKER):
-        return stripped.strip(), (), False
+        return stripped.strip(), (), False, None
 
     text = (
         _without_top_level_marker_line(body, canonical_marker)
@@ -412,7 +549,17 @@ def _current_plan_parts(body: str) -> tuple[str, tuple[str, ...], bool]:
     # Older plan comments carry a recovery-source line. Drop it from the text.
     if RECOVERY_SOURCE_EPOCH_RE.fullmatch(first) is not None:
         text = _without_leading_line(text, first)
-    return text.strip(), fingerprints, forced
+    first = text.lstrip().partition("\n")[0].strip()
+    consolidation: str | None = None
+    if first.startswith(CONSOLIDATION_PROVENANCE_PREFIX):
+        if CONSOLIDATION_PROVENANCE_RE.fullmatch(first) is None:
+            raise CommentJournalReadError(
+                "malformed consolidation provenance header in plan comment; "
+                "manual recovery is required"
+            )
+        consolidation = first
+        text = _without_leading_line(text, first)
+    return text.strip(), fingerprints, forced, consolidation
 
 
 def extract_current_plan(body: str) -> str:
@@ -434,8 +581,23 @@ def render_current_plan(
     revision: int = 1,
     prior_fingerprints: Sequence[str] = (),
     forced_planning_epoch: bool = False,
+    consolidation_provenance: str | None = None,
 ) -> str:
-    """Render the editable current plan with an opaque canonical marker."""
+    """Render the editable current plan with an opaque canonical marker.
+
+    Args:
+        plan: Current or legacy plan comment body, or bare plan content.
+        revision: Epoch revision to render into the header.
+        prior_fingerprints: Bounded hidden fingerprints of superseded plans.
+        forced_planning_epoch: Render the forced-epoch marker.
+        consolidation_provenance: Optional consolidation provenance header
+            line. It is re-emitted verbatim after the other header metadata.
+
+    Raises:
+        ValueError: If ``consolidation_provenance`` is not a well-formed
+            provenance header line.
+
+    """
     payload = extract_current_plan(plan)
     fingerprints = tuple(dict.fromkeys(prior_fingerprints))[-MAX_PRIOR_PLAN_FINGERPRINTS:]
     metadata = ""
@@ -443,6 +605,10 @@ def render_current_plan(
         metadata = f"\n<!-- prior-plan-fingerprints: {','.join(fingerprints)} -->"
     if forced_planning_epoch:
         metadata += f"\n{FORCED_PLANNING_EPOCH_MARKER}"
+    if consolidation_provenance is not None:
+        if parse_consolidation_provenance(consolidation_provenance) is None:
+            raise ValueError("invalid consolidation provenance header line")
+        metadata += f"\n{consolidation_provenance}"
     return (
         f"{PLAN_CANONICAL_MARKER}\n{PLAN_COMMENT_MARKER}\n"
         f"<!-- revision: {revision} -->{metadata}\n\n{payload}"
@@ -533,7 +699,16 @@ def journal_snapshot(comments: Sequence[IssueComment]) -> JournalSnapshot:
             current_review_body = comment.body
     revision = comment_revision(current_plan_body) if current_plan_body else None
     review_revision = comment_revision(current_review_body) if current_review_body else None
-    current_plan, prior_fingerprints, forced_epoch = _current_plan_parts(current_plan_body)
+    current_plan, prior_fingerprints, forced_epoch, consolidation_line = _current_plan_parts(
+        current_plan_body
+    )
+    if (
+        consolidation_line is not None
+        and parse_consolidation_provenance(consolidation_line) is None
+    ):
+        raise CommentJournalReadError(
+            "malformed consolidation provenance header in plan comment; manual recovery is required"
+        )
     return JournalSnapshot(
         revision=revision or 1,
         current_plan=current_plan if current_plan_body else "",
@@ -543,6 +718,7 @@ def journal_snapshot(comments: Sequence[IssueComment]) -> JournalSnapshot:
         current_review_revision=review_revision,
         prior_plan_fingerprints=prior_fingerprints,
         forced_planning_epoch=forced_epoch,
+        consolidation_provenance=consolidation_line,
     )
 
 
@@ -581,6 +757,7 @@ def current_plan_context(
         snapshot.current_plan,
         revision=snapshot.revision,
         forced_planning_epoch=snapshot.forced_planning_epoch,
+        consolidation_provenance=snapshot.consolidation_provenance,
     )
     return _bounded_excerpt(plan, max_chars)
 
@@ -605,6 +782,7 @@ def current_revision_context(
             snapshot.current_plan,
             revision=snapshot.revision,
             forced_planning_epoch=snapshot.forced_planning_epoch,
+            consolidation_provenance=snapshot.consolidation_provenance,
         )
         if snapshot.current_plan
         else ""

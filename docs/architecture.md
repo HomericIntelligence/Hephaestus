@@ -959,6 +959,17 @@ Architectural contract:
   its ownership and its source digest matches the current issue body. GitHub
   exposes no atomic issue-body compare-and-swap, so automation never replaces
   the body and cannot overwrite a concurrent human edit.
+- Duplicate canonical plan/review pairs are reconciled only by the
+  operator-authorized consolidation command. No code path selects a winner
+  by age, tool name, label, or a historical GO. Pre-delete validation reads
+  the journal only through the pure planning-role inventory (foreign claims,
+  coverage, digest drift); the duplicate-rejecting validator applies only
+  after consolidation deletes, inside the guarded actor-owned upsert. Each
+  superseded record survives as a fenced history archive at its own revision
+  before any delete, the consolidated epoch forces a fresh independent plan
+  review, and a historical GO label is never transferred. Unknown
+  `HomericIntelligence:`-namespaced header lines inside a plan or review
+  comment are inert metadata.
 - Tracker and obsolete dispositions require matching planner and independent
   reviewer decisions. Both apply `state:skip`; tracker confirmation also adds
   `epic`. An obsolete outcome retains exactly one actor-owned explanation
@@ -1043,6 +1054,10 @@ Architectural contract:
   only when its opaque marker is the exact first raw line and updated only by
   its owning GitHub actor. The human-readable `## 🔍 Plan Review` heading is
   display text only; heading-only history cannot be reconstructed or mutated.
+- A consolidated plan/review epoch always runs a fresh independent plan
+  review: the consolidated review carries no terminal state token, and the
+  consolidation moves a historical `state:plan-go` to `state:plan-no-go`
+  before the round.
 - Marker collisions authored by other actors are inert. They cannot become
   canonical artifacts, establish replay identity, or stop an owned write.
 - Canonical comments are replaced in place. On restart, a stale or missing
