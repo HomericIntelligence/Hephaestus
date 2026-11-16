@@ -5305,7 +5305,10 @@ def test_run_cleans_up_intakes_after_shutdown_and_reporting(
 
     pools: list[_OrderedWorkerPool] = []
 
-    def main_factory(*, run_identity: str, **kwargs: Any) -> _OrderedWorkerPool:
+    # ``run_identity`` keeps a default so the factory satisfies the
+    # ``WorkerFactory`` protocol; the coordinator introspects the signature
+    # and passes the run identity when the parameter exists.
+    def main_factory(*, run_identity: str = "unknown", **kwargs: Any) -> _OrderedWorkerPool:
         pool = _OrderedWorkerPool(
             events=events,
             lock_dir=tmp_path / "locks",

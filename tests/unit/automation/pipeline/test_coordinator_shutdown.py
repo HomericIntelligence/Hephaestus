@@ -608,16 +608,29 @@ class TestRepoIntakeLaunchCleanup:
     def _recording_cleanup_pool(
         order: list[str], base: type[FakeWorkerPool] = FakeWorkerPool
     ) -> FakeWorkerPool:
-        class CleanupOrderingPool(base):
-            def shutdown(self, *, mark_interrupted: bool = True) -> None:
-                order.append("pool_shutdown")
-                super().shutdown(mark_interrupted=mark_interrupted)
+        base_shutdown = base.shutdown
+        base_cleanup = base.cleanup_repo_intakes
 
-            def cleanup_repo_intakes(self) -> list[RepoIntakeCleanupFailure]:
-                order.append("intake_cleanup")
-                return super().cleanup_repo_intakes()
+        def shutdown(pool: FakeWorkerPool, *, mark_interrupted: bool = True) -> None:
+            order.append("pool_shutdown")
+            base_shutdown(pool, mark_interrupted=mark_interrupted)
 
-        return CleanupOrderingPool()
+        def cleanup_repo_intakes(
+            pool: FakeWorkerPool,
+        ) -> list[RepoIntakeCleanupFailure]:
+            order.append("intake_cleanup")
+            return base_cleanup(pool)
+
+        # Built via ``type()`` because mypy rejects a variable base class in a
+        # ``class`` statement; the bound methods keep the original MRO calls.
+        return type(
+            "CleanupOrderingPool",
+            (base,),
+            {
+                "shutdown": shutdown,
+                "cleanup_repo_intakes": cleanup_repo_intakes,
+            },
+        )()
 
     @staticmethod
     def _instrument_terminal_order(
