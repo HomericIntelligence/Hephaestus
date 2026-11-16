@@ -64,7 +64,7 @@ def test_plan_review_documents_the_dry_run_and_fail_closed_behavior() -> None:
     assert "dry-run publishes no decomposition mutation" in text
     assert "queues no" in text
     assert "a partial tree is never" in text
-    assert "ADR-0066" in text
+    assert "ADR-0067" in text
 
 
 def test_architecture_doc_links_resolve() -> None:
@@ -75,4 +75,4 @@ def test_architecture_doc_links_resolve() -> None:
         "../hephaestus/automation/plan_decomposition.py",
     ):
         assert (_DOCS / target).resolve().exists(), target
-    assert (_DOCS / "adr" / "0066-plan-decomposition.md").exists()
+    assert (_DOCS / "adr" / "0067-plan-decomposition.md").exists()

@@ -1,4 +1,4 @@
-"""The enumerable ADR contract stays complete (ADR-0066 included)."""
+"""The enumerable ADR contract stays complete (ADR-0067 included)."""
 
 from __future__ import annotations
 
@@ -30,20 +30,20 @@ def test_adr_numbers_are_contiguous_and_unique() -> None:
     assert sorted(files) == list(range(1, max(files) + 1))
 
 
-def test_adr_0066_plan_decomposition_is_in_the_index() -> None:
-    """ADR-0066 is enumerable in the ADR index with its decision title."""
+def test_adr_0067_plan_decomposition_is_in_the_index() -> None:
+    """ADR-0067 is enumerable in the ADR index with its decision title."""
     files = _adr_files()
-    assert 66 in files
-    adr = files[66].read_text(encoding="utf-8")
+    assert 67 in files
+    adr = files[67].read_text(encoding="utf-8")
     index = (_ADR_DIR / "README.md").read_text(encoding="utf-8")
-    assert adr.startswith("# ADR-0066: Plan decomposition into single-PR epics")
-    assert "[0066](0066-plan-decomposition.md)" in index
+    assert adr.startswith("# ADR-0067: Plan decomposition into single-PR epics")
+    assert "[0067](0067-plan-decomposition.md)" in index
     assert "Plan decomposition into single-PR epics" in index
 
 
-def test_adr_0066_records_the_required_decomposition_decisions() -> None:
+def test_adr_0067_records_the_required_decomposition_decisions() -> None:
     """The ADR records every decision the issue plan requires."""
-    adr = _adr_files()[66].read_text(encoding="utf-8")
+    adr = _adr_files()[67].read_text(encoding="utf-8")
     for decision in (
         "Requirements epoch",
         "Record protocol",

@@ -1160,7 +1160,7 @@ through recovered records. Provider and GitHub write failures retry within
 the bounded budget and then block the item; a partial tree is never
 admitted. The same-run recursion guard defers a generated child issue to a
 later run, and dry-run publishes no decomposition mutation and queues no
-child. See [ADR-0066](adr/0066-plan-decomposition.md).
+child. See [ADR-0067](adr/0067-plan-decomposition.md).
 
 ### 5.4 Implementation
 
