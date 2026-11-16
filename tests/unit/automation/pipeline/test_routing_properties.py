@@ -54,6 +54,10 @@ _REASON_BUDGET: dict[str, str | None] = {
     "plan_missing": None,
     "plan_cycles_exhausted": "plan_cycles",
     "plan_not_go": None,
+    # stale_plan_recheck (implementation -> plan_review) is a fail-back exit
+    # like plan_not_go: it leaves the stage rather than retrying it, so it
+    # consumes no retry budget.
+    "stale_plan_recheck": None,
     "already_implementation_go_pr": None,
     "review_retained_after_rebase": None,
     "head_changed": None,

@@ -1315,6 +1315,8 @@ class PlanReviewStage(Stage):
         The receipt keys on the plan fingerprint, so a later plan edit re-arms
         the staleness gate while an untouched plan rechecks only once.
         """
+        if item.issue is None:  # the caller only arms a recheck on issue items
+            return
         plan_sha256 = ""
         if isinstance(recheck, dict):
             value = recheck.get("plan_sha256")
