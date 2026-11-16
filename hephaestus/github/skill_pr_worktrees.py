@@ -15,7 +15,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import logging
 import os
 import re
 import secrets
@@ -49,8 +48,6 @@ from hephaestus.github.remote_git import (
 from hephaestus.github.skill_pr_review import repository_from_pr_url, validate_pr_identifier
 from hephaestus.github.skill_worktrees import reject_symlinks_below
 from hephaestus.utils.git import GitPreLaunchError, run_git
-
-logger = logging.getLogger(__name__)
 
 #: The receipt schema owned by this module. Field sets are exact.
 RECEIPT_SCHEMA_VERSION = 1
@@ -617,9 +614,9 @@ def _config_digest(entries: Sequence[tuple[str, str]]) -> str:
 def _is_ancestor(namespace: Path, ancestor: str, descendant: str) -> bool:
     """Return whether one namespace object is an ancestor of another."""
     result = _git_quiet(namespace, ["merge-base", "--is-ancestor", ancestor, descendant])
-    if result.returncode in (0, 1):
-        return result.returncode == 0
-    _rejected(result.stderr.strip() or "merge-base ancestry check failed")
+    if result.returncode not in (0, 1):
+        _rejected(result.stderr.strip() or "merge-base ancestry check failed")
+    return result.returncode == 0
 
 
 # ---------------------------------------------------------------------------
@@ -746,9 +743,10 @@ def _read_protected_file(directory: Path, name: str) -> Any:
             with os.fdopen(fd, "r", encoding="utf-8") as handle:
                 fd = -1
                 try:
-                    return json.load(handle)
+                    payload = json.load(handle)
                 except json.JSONDecodeError as error:
                     _rejected(f"{directory / name} is not valid JSON: {error}")
+                return payload
         finally:
             if fd >= 0:
                 os.close(fd)

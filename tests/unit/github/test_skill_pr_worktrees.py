@@ -18,10 +18,6 @@ from typing import Any
 import pytest
 
 import hephaestus.github.skill_pr_worktrees as module
-from hephaestus.github.skill_pr_worktrees import (
-    prepare_pr_worktree_main,
-    publish_pr_worktree_main,
-)
 
 _BASE_REPOSITORY = "octo/example"
 _BASE_URL = f"https://github.com/{_BASE_REPOSITORY}.git"
@@ -244,13 +240,13 @@ class Environment:
         ]
         if dependency is not None:
             arguments.extend(["--dependency-pr", str(dependency)])
-        code = prepare_pr_worktree_main(arguments)
+        code = module.prepare_pr_worktree_main(arguments)
         return code, self._payload(capsys)
 
     def publish(
         self, capsys: pytest.CaptureFixture[str], *, number: int, receipt: str
     ) -> tuple[int, dict[str, Any]]:
-        code = publish_pr_worktree_main(
+        code = module.publish_pr_worktree_main(
             [
                 str(number),
                 "--target-host",
@@ -1047,7 +1043,7 @@ class TestArgumentGrammar:
     def test_missing_required_option_reports_argument_error_with_exit_2(
         self, tmp_path: Path, capsys
     ) -> None:
-        code = prepare_pr_worktree_main(["514", "--json"])
+        code = module.prepare_pr_worktree_main(["514", "--json"])
 
         assert code == 2
         payload = json.loads(capsys.readouterr().out)
@@ -1058,7 +1054,7 @@ class TestArgumentGrammar:
     def test_argument_error_without_the_flag_reports_human_output(
         self, tmp_path: Path, capsys
     ) -> None:
-        code = prepare_pr_worktree_main([])
+        code = module.prepare_pr_worktree_main([])
 
         assert code == 2
         captured = capsys.readouterr()
