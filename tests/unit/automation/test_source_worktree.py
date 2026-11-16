@@ -24,7 +24,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from hephaestus.agents.workspace import SourceLane, WorkspaceBinding
-from hephaestus.automation import implementation_writer, source_worktree, worktree_manager
+from hephaestus.automation import source_worktree, worktree_manager
 from hephaestus.automation.pipeline.coordinator_types import PipelineConfig
 from hephaestus.automation.pipeline.git_cleanup import run_cleanup_job
 from hephaestus.automation.pipeline.git_jobs import GitJob
@@ -53,6 +53,7 @@ from hephaestus.automation.worktree_manager import (
     WorktreeManager,
 )
 from hephaestus.config.child_environments import build_git_child_env
+from hephaestus.git import writer as implementation_writer
 from hephaestus.utils.file_lock import LockUnavailableError, file_lock
 
 
@@ -2200,7 +2201,7 @@ def test_claim_does_not_reacquire_the_active_lane_lock(tmp_path: Path) -> None:
         with file_lock(path, **kwargs):
             yield
 
-    with patch("hephaestus.automation.implementation_writer.file_lock", side_effect=tracked_lock):
+    with patch("hephaestus.git.writer.file_lock", side_effect=tracked_lock):
         with manager.implementation_writer_handoff(9) as handoff:
             writer = worktree_manager.create_worktree(
                 9,

@@ -13,7 +13,7 @@ from unittest.mock import Mock, create_autospec
 import pytest
 
 from hephaestus.agents.workspace import SourceLane
-from hephaestus.automation import git_utils, implementation_writer
+from hephaestus.automation import git_utils
 from hephaestus.automation.pipeline import worker_pool
 from hephaestus.automation.pipeline.git_jobs import GitJob
 from hephaestus.automation.pipeline.host_capabilities import (
@@ -22,6 +22,7 @@ from hephaestus.automation.pipeline.host_capabilities import (
 )
 from hephaestus.automation.pipeline.job_results import JobResult
 from hephaestus.automation.source_worktree import SourceWorkspaceManager
+from hephaestus.git import writer as implementation_writer
 from hephaestus.utils.file_lock import file_lock
 from tests.unit.automation.pipeline.conftest import FakeSigningProvider
 from tests.unit.automation.test_source_worktree import _git, _repository

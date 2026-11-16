@@ -23,8 +23,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NoReturn, Self, TypeGuard
 
-from hephaestus.automation.models import DEFAULT_STATE_DIR
 from hephaestus.git.config_safety import unsafe_local_git_config_key
+from hephaestus.git.constants import DEFAULT_STATE_DIR
 from hephaestus.git.runtime import (
     current_operation_shutdown,
     git_metadata_lock_path,

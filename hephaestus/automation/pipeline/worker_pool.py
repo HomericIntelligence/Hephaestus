@@ -96,7 +96,6 @@ from hephaestus.automation.host_capabilities import (
     hdiutil_create_argv,
     quota_backed_volume,
 )
-from hephaestus.automation.implementation_writer import ImplementationWriterHandoff
 from hephaestus.automation.learn import compact_agent_session
 from hephaestus.automation.models import DEFAULT_STATE_DIR
 from hephaestus.automation.pipeline.athena_skill_jobs import (
@@ -293,6 +292,7 @@ from hephaestus.git.snapshot import (
     _trusted_git_executable as _trusted_git_executable,
     _valid_dirty_content_snapshot as _valid_dirty_content_snapshot,
 )
+from hephaestus.git.writer import ImplementationWriterHandoff
 from hephaestus.io.utils import write_secure
 from hephaestus.resilience import (
     CircuitBreakerOpenError,

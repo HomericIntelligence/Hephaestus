@@ -29,10 +29,6 @@ from hephaestus.agents.workspace import (
     validate_workspace_binding,
 )
 from hephaestus.automation.commit_paths import parse_porcelain_status
-from hephaestus.automation.implementation_writer import (
-    ImplementationWriterHandoff,
-    implementation_writer_handoff,
-)
 from hephaestus.automation.worktree_manager import (
     ImplementationWriterAuthority,
     WorktreeManager,
@@ -48,6 +44,10 @@ from hephaestus.git.runtime import (
 from hephaestus.git.snapshot import (
     _dirty_worktree_content_snapshot,
     _dirty_worktree_snapshot_evidence,
+)
+from hephaestus.git.writer import (
+    ImplementationWriterHandoff,
+    implementation_writer_handoff,
 )
 from hephaestus.io.utils import write_secure
 from hephaestus.utils.directory_mode import (
@@ -2360,7 +2360,7 @@ class SourceWorkspaceManager:
 
     @staticmethod
     def _is_dirty(path: Path, *, deadline: _PreparationDeadline | None = None) -> bool:
-        from hephaestus.automation.models import DEFAULT_STATE_DIR
+        from hephaestus.git.constants import DEFAULT_STATE_DIR
 
         result = _git(
             path,
