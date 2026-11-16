@@ -52,6 +52,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -246,6 +247,23 @@ ENTER = "ENTER"
 REVIEW_WAIT = "REVIEW_WAIT"
 EVAL = "EVAL"
 AMEND_WAIT = "AMEND_WAIT"
+FEEDBACK_WAIT = "FEEDBACK_WAIT"
+
+#: Non-blocking severity findings inside one GO review (comet#5394 shape:
+#: "Verdict: GO (with the two medium changes above)"). The review rubric
+#: forces state:plan-no-go for critical/major findings, so severity-tagged
+#: findings under a GO are exactly the accepted-with-feedback signal that
+#: drives the one bounded final planner integration pass (#3643).
+_GO_FEEDBACK_RE = re.compile(r"(?im)^(?:[-*]\s*)?(?:critical|major|medium|low|minor):\s")
+
+#: Payload key that records the accepted review's findings for the
+#: implementation prompt (non-blocking block) and the integration pass.
+_PLAN_REVIEW_FINDINGS = "plan_review_findings"
+
+#: Payload guard: the final planner integration pass runs at most once per
+#: item lifetime. Set before the pass is requested so a restart cannot
+#: mint a second pass.
+_PLAN_FEEDBACK_INTEGRATED = "plan_feedback_integrated"
 
 #: Max CONSECUTIVE reviewer-infrastructure failures (ERROR verdicts or
 #: failed/valueless review jobs) tolerated before the item FINISH_FAILs.
@@ -940,6 +958,47 @@ def _record_amendment_value(item: WorkItem, plan_text: str, ctx: StageContext) -
     item.payload.pop("no_progress_reason", None)
 
 
+def _record_feedback_value(item: WorkItem, plan_text: str, ctx: StageContext) -> None:
+    """Keep the planner's final integration output for the implementer.
+
+    The final planner pass is advisory and non-blocking (#3643). The plan
+    journal supersedes a revision only under an authoritative exclusive
+    ``state:plan-no-go`` label, so the GO-approved plan artifact stays
+    exactly as reviewed: the integration output travels in the payload to
+    the implementation prompt beside the review findings. A planner that
+    kept the plan (fingerprint unchanged) adds nothing and is skipped.
+
+    Args:
+        item: The work item carrying the accepted plan identity.
+        plan_text: The planner's candidate plan text.
+        ctx: The stage context.
+
+    """
+    assert item.issue is not None  # noqa: S101 - the stage validates the issue
+    current = str(item.payload.get("plan_text") or "")
+    if plan_fingerprint(plan_text) == plan_fingerprint(current):
+        logger.info(
+            "plan_review:%d: planner kept the plan (no feedback integration needed)",
+            item.issue,
+        )
+        return
+    item.payload["plan_feedback_integration"] = plan_text
+    logger.info(
+        "plan_review:%d: captured the final feedback integration for the implementer",
+        item.issue,
+    )
+    cycle_id = str(item.payload.get("plan_review_cycle_id") or "")
+    if ctx.plan_review_sessions is not None and cycle_id:
+        ctx.plan_review_sessions.append_artifact(
+            cycle_id,
+            kind="feedback-integration",
+            content=plan_text,
+            round_index=int(item.payload.get("review_round") or 0),
+            plan_revision=int(item.payload.get("plan_revision") or 1),
+            plan_fingerprint=plan_fingerprint(plan_text),
+        )
+
+
 def build_amend_prompt(
     issue_number: int,
     prior_review: str,
@@ -981,6 +1040,46 @@ def build_amend_prompt(
     return prompt + feedback
 
 
+def build_feedback_integrate_prompt(
+    issue_number: int,
+    prior_review: str,
+    issue_title: str = "",
+    issue_body: str = "",
+    advise_findings: str = "",
+    plan_history: str = "",
+) -> str:
+    """Compose the GO-feedback prompt: plan prompt + accepted-review findings.
+
+    Module-level composed builder (NOT a closure): :class:`AgentJob` is
+    frozen and prompt builders run in-worker, so the builder must be a
+    top-level function receiving everything via ``prompt_kwargs``.
+
+    The reviewer accepted the plan (GO) and added non-blocking findings.
+    The planner integrates each finding that improves the plan and keeps
+    the plan unchanged otherwise; the stage tolerates either outcome.
+
+    Args:
+        issue_number: GitHub issue number being refined.
+        prior_review: The accepted review's findings text.
+        issue_title: Source issue title.
+        issue_body: Source issue body.
+        advise_findings: Advise-step findings; empty string means no block.
+        plan_history: Bounded current-plan context; empty string means none.
+
+    Returns:
+        The full plan prompt with the accepted-review findings block.
+
+    """
+    prompt = build_plan_prompt(issue_number, issue_title, issue_body, advise_findings)
+    fenced = fence_content()
+    findings = PromptCatalog.current().render(
+        "planning/feedback_integrate.j2",
+        untrusted_notice=fenced.untrusted_notice,
+        findings_block=fenced.fence("REVIEW_FINDINGS", prior_review),
+    )
+    return prompt + findings
+
+
 class PlanReviewStage(Stage):
     """Stage for reviewing and iterating on a plan.
 
@@ -995,7 +1094,9 @@ class PlanReviewStage(Stage):
       the verdict is parsed in-worker by ``parse_plan_review_verdict`` and lands
       in ``item.payload["review_verdict"]``.
     - EVAL [M]: real verdicts (GO/NOGO) advance both iteration
-      counters; ERROR/missing verdicts never do. GO -> durably apply
+      counters; ERROR/missing verdicts never do. GO with non-blocking
+      severity findings -> one bounded final planner integration pass
+      (FEEDBACK_WAIT, #3643); clean GO -> durably apply
       ``state:plan-go`` (write BEFORE the advancing outcome), emit an immutable
       learning intent, then ADVANCE; NOGO within the cycle-relative iteration budget ->
       durably apply ``state:plan-no-go`` and enter AMEND_WAIT within budget,
@@ -1005,6 +1106,12 @@ class PlanReviewStage(Stage):
       ``REVIEW_ERROR_RETRY_CAP`` consecutive failures, then FINISH_FAIL).
     - AMEND_WAIT: submit the planner amend job (:func:`build_amend_prompt`
       carries the reviewer feedback block), loop to REVIEW_WAIT.
+    - FEEDBACK_WAIT: submit the one final planner integration job
+      (:func:`build_feedback_integrate_prompt` carries the accepted
+      review's findings). Non-blocking: the integrated output is captured
+      for the implementer and EVAL re-runs, whose guard routes straight to
+      the GO completion. The plan journal artifact stays exactly as
+      reviewed (#3643).
     Fail routes (ROUTES): "nogo" -> planning, "plan_cycles_exhausted" ->
     finished(fail).
     """
@@ -1163,47 +1270,10 @@ class PlanReviewStage(Stage):
             return self._publish_accepted_review(item, ctx)
 
         if item.state == "AMEND_WAIT":
-            logger.info("plan_review:%d: requesting amend job", item.issue)
-            workspace = planning_source_workspace_binding(item, ctx)
-            job = AgentJob(
-                repo=item.repo,
-                issue=item.issue,
-                agent=agent_provider(ctx, "planner"),
-                model=stage_model(ctx, "planner", planner_model),
-                prompt_builder=build_amend_prompt,
-                cwd=_review_job_cwd(item, ctx, workspace),
-                timeout_s=stage_timeout(ctx, "planner", planner_claude_timeout),
-                workspace=workspace,
-                sandbox="read-only",
-                allowed_tools="Read,Glob,Grep",
-                session_agent=AGENT_PLANNER,
-                execution_request=ExecutionRequest(
-                    AgentRole.PLANNER,
-                    (
-                        AgentOperation.AMEND
-                        if AGENT_PLANNER in item.session_bindings
-                        or AGENT_PLANNER in item.session_ids
-                        else AgentOperation.PLAN
-                    ),
-                    agent_session_lifecycle(item, AGENT_PLANNER),
-                ),
-                resume_session_id=item.session_ids.get(AGENT_PLANNER),
-                resume_binding=item.session_bindings.get(AGENT_PLANNER),
-                # build_amend_prompt composes get_plan_prompt with the
-                # reviewer feedback block in-worker (doc: "resume planner
-                # session with feedback block"). The worker resumes the planner
-                # session (#1817 wires that session setup).
-                prompt_kwargs={
-                    "issue_number": item.issue,
-                    "issue_title": item.payload.get("issue_title", ""),
-                    "issue_body": item.payload.get("issue_body", ""),
-                    "advise_findings": item.payload.get("advise_findings", ""),
-                    "prior_review": item.payload.get("prior_review", ""),
-                    "plan_history": _plan_history(ctx.github.issue_comments(item.issue)),
-                },
-                descr="amend",
-            )
-            return JobRequest(job, on_done_state="REVIEW_WAIT")
+            return self._submit_amend_job(item, ctx)
+
+        if item.state == FEEDBACK_WAIT:
+            return self._submit_feedback_integrate_job(item, ctx)
 
         if item.state.startswith("DECOMP_"):
             decomposition_outcome = self._decomposition_step(item, ctx)
@@ -1445,8 +1515,118 @@ class PlanReviewStage(Stage):
             return identity_outcome
 
         if verdict.is_go:
+            # One bounded final planner pass integrates the accepted review's
+            # findings when they can improve the plan (#3643). Either outcome
+            # (changed plan, kept plan, failed pass) completes the GO below;
+            # the guard keys the pass to at most one attempt per lifetime.
+            if not item.payload.get(_PLAN_FEEDBACK_INTEGRATED) and _GO_FEEDBACK_RE.search(
+                verdict.raw
+            ):
+                item.payload[_PLAN_FEEDBACK_INTEGRATED] = True
+                item.payload[_PLAN_REVIEW_FINDINGS] = verdict.raw
+                logger.info(
+                    "plan_review:%d: GO with findings; requesting one final "
+                    "planner integration pass",
+                    issue_number,
+                )
+                return Continue(next_state=FEEDBACK_WAIT)
             return self._complete_go(item, ctx, review)
         return self._complete_nogo(item, ctx, review)
+
+    def _submit_amend_job(self, item: WorkItem, ctx: StageContext) -> JobRequest:
+        """Submit the planner amend job with the reviewer feedback block.
+
+        Mirrors the AMEND_WAIT contract: build_amend_prompt composes
+        get_plan_prompt with the reviewer feedback block in-worker, and the
+        worker resumes the planner session (#1817 wires that setup).
+        """
+        assert item.issue is not None  # noqa: S101 - the stage validates the issue
+        logger.info("plan_review:%d: requesting amend job", item.issue)
+        workspace = planning_source_workspace_binding(item, ctx)
+        job = AgentJob(
+            repo=item.repo,
+            issue=item.issue,
+            agent=agent_provider(ctx, "planner"),
+            model=stage_model(ctx, "planner", planner_model),
+            prompt_builder=build_amend_prompt,
+            cwd=_review_job_cwd(item, ctx, workspace),
+            timeout_s=stage_timeout(ctx, "planner", planner_claude_timeout),
+            workspace=workspace,
+            sandbox="read-only",
+            allowed_tools="Read,Glob,Grep",
+            session_agent=AGENT_PLANNER,
+            execution_request=ExecutionRequest(
+                AgentRole.PLANNER,
+                (
+                    AgentOperation.AMEND
+                    if AGENT_PLANNER in item.session_bindings or AGENT_PLANNER in item.session_ids
+                    else AgentOperation.PLAN
+                ),
+                agent_session_lifecycle(item, AGENT_PLANNER),
+            ),
+            resume_session_id=item.session_ids.get(AGENT_PLANNER),
+            resume_binding=item.session_bindings.get(AGENT_PLANNER),
+            prompt_kwargs={
+                "issue_number": item.issue,
+                "issue_title": item.payload.get("issue_title", ""),
+                "issue_body": item.payload.get("issue_body", ""),
+                "advise_findings": item.payload.get("advise_findings", ""),
+                "prior_review": item.payload.get("prior_review", ""),
+                "plan_history": _plan_history(ctx.github.issue_comments(item.issue)),
+            },
+            descr="amend",
+        )
+        return JobRequest(job, on_done_state="REVIEW_WAIT")
+
+    def _submit_feedback_integrate_job(self, item: WorkItem, ctx: StageContext) -> JobRequest:
+        """Submit the one bounded final planner integration job (#3643).
+
+        The pass resumes the planner session with the accepted review's
+        findings. The stage tolerates either outcome: the integrated plan
+        text is captured for the implementer, and EVAL's guard routes a
+        second GO straight to the GO completion.
+        """
+        assert item.issue is not None  # noqa: S101 - the stage validates the issue
+        logger.info("plan_review:%d: requesting feedback-integrate job", item.issue)
+        workspace = planning_source_workspace_binding(item, ctx)
+        job = AgentJob(
+            repo=item.repo,
+            issue=item.issue,
+            agent=agent_provider(ctx, "planner"),
+            model=stage_model(ctx, "planner", planner_model),
+            prompt_builder=build_feedback_integrate_prompt,
+            cwd=_review_job_cwd(item, ctx, workspace),
+            timeout_s=stage_timeout(ctx, "planner", planner_claude_timeout),
+            workspace=workspace,
+            sandbox="read-only",
+            allowed_tools="Read,Glob,Grep",
+            session_agent=AGENT_PLANNER,
+            execution_request=ExecutionRequest(
+                AgentRole.PLANNER,
+                (
+                    AgentOperation.AMEND
+                    if AGENT_PLANNER in item.session_bindings or AGENT_PLANNER in item.session_ids
+                    else AgentOperation.PLAN
+                ),
+                agent_session_lifecycle(item, AGENT_PLANNER),
+            ),
+            resume_session_id=item.session_ids.get(AGENT_PLANNER),
+            resume_binding=item.session_bindings.get(AGENT_PLANNER),
+            # build_feedback_integrate_prompt composes the plan prompt with
+            # the accepted-review findings block in-worker. The pass is
+            # non-blocking: either outcome re-enters EVAL, whose guard
+            # routes straight to the GO completion.
+            prompt_kwargs={
+                "issue_number": item.issue,
+                "issue_title": item.payload.get("issue_title", ""),
+                "issue_body": item.payload.get("issue_body", ""),
+                "advise_findings": item.payload.get("advise_findings", ""),
+                "prior_review": item.payload.get(_PLAN_REVIEW_FINDINGS, ""),
+                "plan_history": _plan_history(ctx.github.issue_comments(item.issue)),
+            },
+            descr="feedback-integrate",
+        )
+        return JobRequest(job, on_done_state="EVAL")
 
     def _complete_nogo(
         self, item: WorkItem, ctx: StageContext, review: _AcceptedPlanReview
@@ -2346,23 +2526,27 @@ class PlanReviewStage(Stage):
             return
 
         if result.value is not None:
-            if item.state == "REVIEW_WAIT":
-                _record_review_value(item, result.value, ctx)
-            elif item.state == "AMEND_WAIT" and isinstance(result.value, str):
-                _record_amendment_value(item, result.value, ctx)
-            elif item.state == DECOMP_GEN_WAIT and isinstance(result.value, str):
-                item.payload[_DECOMP_OUTPUT_KEY] = result.value
-            elif item.state == DECOMP_REVIEW_WAIT and isinstance(result.value, str):
-                item.payload[_DECOMP_REVIEW_OUTPUT_KEY] = result.value
-            elif item.state == DECOMP_CHILDREN_WAIT and isinstance(
-                result.value, DecompositionChildrenCreated
-            ):
-                item.payload[_DECOMP_CHILDREN_JOB_KEY] = result.value
-            elif item.state == DECOMP_PARENT_WAIT and isinstance(
-                result.value, DecompositionParentTransitioned
-            ):
-                item.payload[_DECOMP_PARENT_JOB_KEY] = result.value
-            elif item.state == DECOMP_LABELS_WAIT and isinstance(
-                result.value, DecompositionChildLabelsApplied
-            ):
-                item.payload[_DECOMP_LABELS_JOB_KEY] = result.value
+            self._record_job_value(item, result.value, ctx)
+
+    def _record_job_value(self, item: WorkItem, value: object, ctx: StageContext) -> None:
+        """Route one successful job value to its WAIT-state recorder."""
+        if item.state == "REVIEW_WAIT":
+            _record_review_value(item, value, ctx)
+        elif item.state == "AMEND_WAIT" and isinstance(value, str):
+            _record_amendment_value(item, value, ctx)
+        elif item.state == DECOMP_GEN_WAIT and isinstance(value, str):
+            item.payload[_DECOMP_OUTPUT_KEY] = value
+        elif item.state == DECOMP_REVIEW_WAIT and isinstance(value, str):
+            item.payload[_DECOMP_REVIEW_OUTPUT_KEY] = value
+        elif item.state == DECOMP_CHILDREN_WAIT and isinstance(value, DecompositionChildrenCreated):
+            item.payload[_DECOMP_CHILDREN_JOB_KEY] = value
+        elif item.state == DECOMP_PARENT_WAIT and isinstance(
+            value, DecompositionParentTransitioned
+        ):
+            item.payload[_DECOMP_PARENT_JOB_KEY] = value
+        elif item.state == DECOMP_LABELS_WAIT and isinstance(
+            value, DecompositionChildLabelsApplied
+        ):
+            item.payload[_DECOMP_LABELS_JOB_KEY] = value
+        elif item.state == FEEDBACK_WAIT and isinstance(value, str):
+            _record_feedback_value(item, value, ctx)
