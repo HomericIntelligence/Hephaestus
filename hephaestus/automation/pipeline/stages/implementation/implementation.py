@@ -46,6 +46,7 @@ from copy import deepcopy
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, TypedDict, cast
+from datetime import datetime, timezone
 
 from hephaestus.agents.execution_policy import (
     AgentOperation,
@@ -93,6 +94,12 @@ from hephaestus.automation.prompts.implementation import (
     get_scope_correction_directive,
 )
 from hephaestus.automation.prompts.pr_review import get_pr_description
+from hephaestus.automation.review_journal import (
+    CommentJournalReadError,
+    STALE_PLAN_RECHECK_AGE_DAYS,
+    newest_plan_comment_identity,
+    stale_plan_recheck_record_present,
+)
 from hephaestus.automation.source_worktree import (
     SourceWorkspaceError,
     SourceWorkspaceManager,
@@ -434,6 +441,70 @@ def _restore_work_item(item: WorkItem, snapshot: WorkItem) -> None:
     """Restore item data that a deferred agent request prepared locally."""
     item.__dict__.clear()
     item.__dict__.update(snapshot.__dict__)
+
+
+def _parse_comment_timestamp(value: str | None) -> datetime | None:
+    """Parse one RFC3339 comment timestamp, or ``None`` when unreadable."""
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else None
+
+
+def _stale_plan_recheck_outcome(
+    item: WorkItem,
+    ctx: StageContext,
+) -> StageOutcome | None:
+    """Route one recheck round for an accepted plan older than the stale age.
+
+    The plan itself stays valid and is never redone. The recheck round in
+    plan_review reviews the accepted plan against the current tree: its GO
+    records the durable one-recheck-per-plan-identity receipt and names the
+    tweaks; its NO-GO blocks the item for human intervention.
+
+    Every read failure stays fail-open: a journal hiccup must not stop a
+    running component, and a fresh plan carries no staleness gate at all.
+    """
+    assert item.issue is not None  # noqa: S101 - caller validates the issue
+    if item.payload.get("stale_plan_recheck"):
+        return None
+    try:
+        comments = ctx.github.issue_comments(item.issue)
+    except CommentJournalReadError:
+        return None
+    identity = newest_plan_comment_identity(comments)
+    if identity is None:
+        return None
+    created_at, updated_at, plan_sha256 = identity
+    latest = _parse_comment_timestamp(updated_at or created_at)
+    if latest is None or not plan_sha256:
+        return None
+    age_days = (datetime.now(timezone.utc) - latest).total_seconds() / 86400.0
+    if age_days <= STALE_PLAN_RECHECK_AGE_DAYS:
+        return None
+    if stale_plan_recheck_record_present(comments, plan_sha256):
+        return None
+    logger.warning(
+        "implementation:%d: accepted plan is %d days old (stale after %d); "
+        "routing to plan_review for one stale-plan recheck — the plan stays "
+        "valid and is never redone",
+        item.issue,
+        int(age_days),
+        int(STALE_PLAN_RECHECK_AGE_DAYS),
+    )
+    item.payload["stale_plan_recheck"] = {
+        "created_at": created_at or "",
+        "updated_at": updated_at or "",
+        "plan_sha256": plan_sha256,
+        "age_days": int(age_days),
+    }
+    return StageOutcome(
+        Disposition.FAIL_BACK,
+        "stale_plan_recheck",
+    )
 
 
 def _issue_number(item: WorkItem) -> int:
@@ -4131,6 +4202,17 @@ class ImplementationStage(Stage):
             item.payload.pop(_CODEX_PUBLICATION_SCOPE_KEY, None)
             logger.info("implementation:%d: plan not GO; failing back", item.issue)
             return StageOutcome(Disposition.FAIL_BACK, "plan_not_go")
+
+        # One stale-plan recheck round before implementation consumes an
+        # accepted plan that may have drifted from the current tree. The
+        # plan stays valid; the recheck names tweaks or blocks for a human.
+        if (
+            not item.payload.get("manual_rebase_required")
+            and is_plan_go(gate_labels)
+            and not is_implementation_go(gate_labels)
+            and (recheck_outcome := _stale_plan_recheck_outcome(item, ctx)) is not None
+        ):
+            return recheck_outcome
 
         codex_scope_failure = (
             None

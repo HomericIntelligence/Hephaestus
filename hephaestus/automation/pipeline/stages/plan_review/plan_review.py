@@ -53,6 +53,7 @@ import hashlib
 import logging
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from pathlib import Path
 from subprocess import SubprocessError
 
@@ -95,12 +96,17 @@ from hephaestus.automation.review_journal import (
     IssueComment,
     JournalSnapshot,
     PlanDiscoveryStatus,
+    STALE_PLAN_RECHECK_BLOCK_MARKER,
+    STALE_PLAN_RECHECK_MARKER,
     current_plan_context,
     is_pending_review,
     journal_snapshot,
+    newest_plan_comment_identity,
     parse_plan_review_state,
     plan_fingerprint,
     render_current_review,
+    render_stale_plan_recheck_block,
+    render_stale_plan_recheck_record,
 )
 from hephaestus.automation.review_types import ReviewVerdict
 from hephaestus.automation.state_labels import (
@@ -785,8 +791,19 @@ class PlanReviewStage(Stage):
                 item.payload["plan_text"] = snapshot.current_plan
                 item.payload["plan_revision"] = snapshot.revision
                 item.payload[_REVIEWED_PLAN_COMMENT_BODY] = snapshot.current_plan_body
-                logger.info("plan_review:%d: already plan-go; advancing", item.issue)
-                return StageOutcome(Disposition.ADVANCE, "plan already approved")
+                if item.payload.get("stale_plan_recheck"):
+                    # An armed stale-plan recheck runs one review round: the
+                    # plan stays valid, the reviewer names tweaks, and a
+                    # NO-GO blocks for human intervention instead of
+                    # failing back to re-planning.
+                    logger.info(
+                        "plan_review:%d: stale-plan recheck armed; running the "
+                        "recheck round against the current tree",
+                        item.issue,
+                    )
+                else:
+                    logger.info("plan_review:%d: already plan-go; advancing", item.issue)
+                    return StageOutcome(Disposition.ADVANCE, "plan already approved")
 
             item.payload["plan_text"] = snapshot.current_plan
             item.payload["plan_revision"] = snapshot.revision
@@ -1131,6 +1148,37 @@ class PlanReviewStage(Stage):
         assert round_done is not None  # noqa: S101 - EVAL charges the review
         verdict = review.verdict
 
+        # A stale-plan recheck NO-GO never re-plans: the accepted plan stays
+        # the authority, the item blocks, and a human decides.
+        if item.payload.pop("stale_plan_recheck", None) is not None:
+            reason = verdict.raw or verdict.verdict
+            logger.warning(
+                "plan_review:%d: stale-plan recheck failed (%s); blocking for "
+                "human intervention — the plan is not redone",
+                item.issue,
+                verdict.verdict,
+            )
+            try:
+                ctx.github.upsert_issue_comment(
+                    item.issue,
+                    STALE_PLAN_RECHECK_BLOCK_MARKER,
+                    render_stale_plan_recheck_block(str(reason)),
+                )
+            except RuntimeError as exc:
+                logger.warning(
+                    "plan_review:%d: stale-plan recheck block comment write "
+                    "failed: %s",
+                    item.issue,
+                    exc,
+                )
+            _complete_review_cycle(item, ctx)
+            return StageOutcome(
+                Disposition.FINISH_FAIL,
+                "stale plan recheck failed: the accepted plan no longer "
+                "applies to the current tree; human intervention required "
+                "(plan kept, not redone)",
+            )
+
         # Every NOGO is durable control state, including rounds that can still
         # amend. The replacement plan publication transitions back to
         # state:needs-plan only after both canonical comments are updated.
@@ -1253,7 +1301,62 @@ class PlanReviewStage(Stage):
         if identity_outcome := self._review_identity_outcome(item, ctx, review):
             return identity_outcome
         _complete_review_cycle(item, ctx)
+        if recheck := item.payload.pop("stale_plan_recheck", None):
+            self._record_stale_plan_recheck(item, ctx, recheck)
         return StageOutcome(Disposition.ADVANCE, "plan approved")
+
+    @staticmethod
+    def _record_stale_plan_recheck(
+        item: WorkItem,
+        ctx: StageContext,
+        recheck: object,
+    ) -> None:
+        """Publish the durable one-recheck-per-plan receipt (fail-open).
+
+        The receipt keys on the plan fingerprint, so a later plan edit re-arms
+        the staleness gate while an untouched plan rechecks only once.
+        """
+        plan_sha256 = ""
+        if isinstance(recheck, dict):
+            value = recheck.get("plan_sha256")
+            plan_sha256 = str(value) if isinstance(value, str) else ""
+        if not plan_sha256:
+            try:
+                identity = newest_plan_comment_identity(
+                    ctx.github.issue_comments(item.issue)
+                )
+            except (CommentJournalReadError, RuntimeError) as exc:
+                logger.warning(
+                    "plan_review:%d: stale-plan recheck receipt identity read "
+                    "failed: %s",
+                    item.issue,
+                    exc,
+                )
+                identity = None
+            plan_sha256 = identity[2] if identity is not None and identity[2] else ""
+            if not plan_sha256:
+                logger.warning(
+                    "plan_review:%d: stale-plan recheck GO could not record its "
+                    "receipt; the next run rechecks again",
+                    item.issue,
+                )
+                return
+        try:
+            ctx.github.upsert_issue_comment(
+                item.issue,
+                STALE_PLAN_RECHECK_MARKER,
+                render_stale_plan_recheck_record(
+                    plan_sha256,
+                    datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                ),
+            )
+        except RuntimeError as exc:
+            logger.warning(
+                "plan_review:%d: stale-plan recheck receipt write failed: %s; "
+                "the next run rechecks again",
+                item.issue,
+                exc,
+            )
 
     @staticmethod
     def _write_verdict_labels(issue_number: int, ctx: StageContext, *, is_go: bool) -> None:

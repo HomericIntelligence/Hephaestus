@@ -88,6 +88,19 @@ MAX_CURRENT_REVISION_CONTEXT_CHARS: Final[int] = 12_000
 
 _TRUSTED_ASSOCIATIONS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
 
+#: An accepted plan older than this age gets one plan_review recheck round
+#: against the current tree. The plan itself stays valid; the recheck names
+#: tweaks and never redoes the plan.
+STALE_PLAN_RECHECK_AGE_DAYS: Final[float] = 7.0
+
+#: Durable marker of one completed stale-plan recheck for one plan identity.
+STALE_PLAN_RECHECK_MARKER: Final[str] = "<!-- hephaestus-stale-plan-recheck -->"
+
+#: Durable marker of a stale-plan recheck that failed: the plan no longer
+#: applies and a human must intervene.
+STALE_PLAN_RECHECK_BLOCK_MARKER: Final[str] = "<!-- hephaestus-stale-plan-block -->"
+
+
 #: A comment that names any automation marker family can change the current
 #: plan, the current review, or a recovery claim. The host cannot quarantine
 #: such a comment, because a dropped artifact looks the same as no artifact.
@@ -479,6 +492,65 @@ def discover_plan_from_comments(
         if is_plan_comment(body):
             return PlanDiscoveryResult.found(comment.body)
     return PlanDiscoveryResult.absent()
+
+
+def newest_plan_comment_identity(
+    comments: Sequence[IssueComment],
+) -> tuple[str | None, str | None, str | None] | None:
+    """Return ``(created_at, updated_at, fingerprint)`` of the newest plan.
+
+    ``None`` names an absent plan. The fingerprint uses the same
+    :func:`plan_fingerprint` normalization as every other plan-identity
+    check, so one helper keeps the staleness probe and the recheck record
+    keyed on one exact plan identity.
+    """
+    for comment in reversed(comments):
+        body = comment.body
+        if is_plan_review_comment(body):
+            continue
+        if is_plan_comment(body):
+            return (
+                comment.created_at or None,
+                comment.updated_at or None,
+                plan_fingerprint(body),
+            )
+    return None
+
+
+def stale_plan_recheck_record_present(
+    comments: Sequence[IssueComment],
+    plan_fingerprint_value: str,
+) -> bool:
+    """Report whether the journal already records a recheck for this plan."""
+    prefix = f"{STALE_PLAN_RECHECK_MARKER}"
+    needle = f"plan_sha256: {plan_fingerprint_value}"
+    for comment in comments:
+        body = comment.body
+        if not has_exact_leading_marker(body, prefix):
+            continue
+        return needle in body
+    return False
+
+
+def render_stale_plan_recheck_record(plan_fingerprint_value: str, checked_at: str) -> str:
+    """Render the durable one-recheck-per-plan-identity record."""
+    return (
+        f"{STALE_PLAN_RECHECK_MARKER}\n\n"
+        f"plan_sha256: {plan_fingerprint_value}\n"
+        f"checked_at: {checked_at}\n"
+    )
+
+
+def render_stale_plan_recheck_block(reason: str) -> str:
+    """Render the durable human-intervention block for a failed recheck."""
+    return (
+        f"{STALE_PLAN_RECHECK_BLOCK_MARKER}\n\n"
+        "stale-plan recheck failed: the accepted plan no longer applies to "
+        "the current tree. Human intervention is required. The plan was not "
+        "redone and stays the authority; update or replace it manually, then "
+        "re-run the loop.\n\n"
+        f"reviewer reason: {reason}\n"
+    )
 
 
 def is_journal_comment(body: str) -> bool:
