@@ -1,4 +1,4 @@
-# ADR-0067: Plan decomposition into single-PR epics
+# ADR-0068: Plan decomposition into single-PR epics
 
 ## Context
 
