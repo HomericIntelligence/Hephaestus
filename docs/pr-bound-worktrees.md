@@ -244,7 +244,7 @@ several pull requests cannot reuse one receipt or one namespace to do it.
 
 ## Related documentation
 
-- [ADR-0066](adr/0066-pr-bound-repair-publication.md) records the
+- [ADR-0067](adr/0067-pr-bound-repair-publication.md) records the
   architecture decision for this boundary.
 - `hephaestus-prepare-worktree` remains the unrestricted start-point helper;
   it has no pull request publication authority.
