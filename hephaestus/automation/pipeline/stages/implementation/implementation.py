@@ -44,9 +44,9 @@ import uuid
 from collections.abc import Callable
 from copy import deepcopy
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, TypedDict, cast
-from datetime import datetime, timezone
 
 from hephaestus.agents.execution_policy import (
     AgentOperation,
@@ -95,8 +95,8 @@ from hephaestus.automation.prompts.implementation import (
 )
 from hephaestus.automation.prompts.pr_review import get_pr_description
 from hephaestus.automation.review_journal import (
-    CommentJournalReadError,
     STALE_PLAN_RECHECK_AGE_DAYS,
+    CommentJournalReadError,
     newest_plan_comment_identity,
     stale_plan_recheck_record_present,
 )
@@ -482,7 +482,7 @@ def _stale_plan_recheck_outcome(
     latest = _parse_comment_timestamp(updated_at or created_at)
     if latest is None or not plan_sha256:
         return None
-    age_days = (datetime.now(timezone.utc) - latest).total_seconds() / 86400.0
+    age_days = (datetime.now(UTC) - latest).total_seconds() / 86400.0
     if age_days <= STALE_PLAN_RECHECK_AGE_DAYS:
         return None
     if stale_plan_recheck_record_present(comments, plan_sha256):

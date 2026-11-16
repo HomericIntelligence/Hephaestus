@@ -53,7 +53,7 @@ import hashlib
 import logging
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from subprocess import SubprocessError
 
@@ -92,12 +92,12 @@ from hephaestus.automation.protocol import (
     PLAN_REVIEW_CANONICAL_MARKER,
 )
 from hephaestus.automation.review_journal import (
+    STALE_PLAN_RECHECK_BLOCK_MARKER,
+    STALE_PLAN_RECHECK_MARKER,
     CommentJournalReadError,
     IssueComment,
     JournalSnapshot,
     PlanDiscoveryStatus,
-    STALE_PLAN_RECHECK_BLOCK_MARKER,
-    STALE_PLAN_RECHECK_MARKER,
     current_plan_context,
     is_pending_review,
     journal_snapshot,
@@ -1166,8 +1166,7 @@ class PlanReviewStage(Stage):
                 )
             except RuntimeError as exc:
                 logger.warning(
-                    "plan_review:%d: stale-plan recheck block comment write "
-                    "failed: %s",
+                    "plan_review:%d: stale-plan recheck block comment write failed: %s",
                     item.issue,
                     exc,
                 )
@@ -1322,13 +1321,10 @@ class PlanReviewStage(Stage):
             plan_sha256 = str(value) if isinstance(value, str) else ""
         if not plan_sha256:
             try:
-                identity = newest_plan_comment_identity(
-                    ctx.github.issue_comments(item.issue)
-                )
+                identity = newest_plan_comment_identity(ctx.github.issue_comments(item.issue))
             except (CommentJournalReadError, RuntimeError) as exc:
                 logger.warning(
-                    "plan_review:%d: stale-plan recheck receipt identity read "
-                    "failed: %s",
+                    "plan_review:%d: stale-plan recheck receipt identity read failed: %s",
                     item.issue,
                     exc,
                 )
@@ -1347,7 +1343,7 @@ class PlanReviewStage(Stage):
                 STALE_PLAN_RECHECK_MARKER,
                 render_stale_plan_recheck_record(
                     plan_sha256,
-                    datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                    datetime.now(UTC).isoformat(timespec="seconds"),
                 ),
             )
         except RuntimeError as exc:
