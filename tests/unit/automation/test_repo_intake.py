@@ -7,6 +7,7 @@ import errno
 import json
 import logging
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -15,10 +16,11 @@ import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import suppress
+from contextlib import ExitStack, suppress
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from uuid import uuid4
 
 import pytest
 
@@ -68,8 +70,9 @@ def _make_repository(tmp_path: Path) -> tuple[Path, Path]:
     return caller, remote
 
 
-def _manager(caller: Path, remote: Path) -> RepoIntakeManager:
+def _manager(caller: Path, remote: Path, launch_identity: str | None = None) -> RepoIntakeManager:
     """Build a manager with a local transport test double."""
+    identity = uuid4().hex if launch_identity is None else launch_identity
 
     def runner(
         command: list[str],
@@ -106,6 +109,7 @@ def _manager(caller: Path, remote: Path) -> RepoIntakeManager:
         git_runner=runner,
         git_env=_controlled_git_env(),
         remote_config=(),
+        launch_identity=identity,
     )
 
 
@@ -212,18 +216,29 @@ def test_isolated_intake_is_bound_to_fetched_default_head(tmp_path: Path) -> Non
     assert _run_git(receipt.path, "rev-parse", "HEAD").stdout.strip() == fetched_head
 
 
-def test_receipt_v2_round_trips_manager_owned_state_root(tmp_path: Path) -> None:
-    """The receipt identifies its stable durable-state owner directory."""
+def test_receipt_v3_round_trips_launch_owned_state_root(tmp_path: Path) -> None:
+    """The receipt identifies its launch-owned durable-state directory."""
     caller, remote = _make_repository(tmp_path)
     manager = _manager(caller, remote)
 
     receipt = manager.prepare()
     payload = receipt.to_dict()
 
-    assert receipt.schema_version == 2
-    assert receipt.state_root == manager.state_dir.resolve()
-    assert payload["state_root"] == str(manager.state_dir.resolve())
+    assert receipt.schema_version == 3
+    assert receipt.state_root == manager.launch_dir.resolve()
+    assert payload["state_root"] == str(manager.launch_dir.resolve())
     assert RepoIntakeReceipt.from_dict(payload) == receipt
+
+
+def test_receipt_v2_fails_closed_as_a_schema_mismatch(tmp_path: Path) -> None:
+    """A permanent-intake receipt cannot adopt launch ownership."""
+    caller, remote = _make_repository(tmp_path)
+    payload = _manager(caller, remote).prepare().to_dict()
+    payload.pop("launch_identity")
+    payload["schema_version"] = 2
+
+    with pytest.raises(RepoIntakeError, match="receipt schema mismatch"):
+        RepoIntakeReceipt.from_dict(payload)
 
 
 def test_receipt_v1_fails_closed_as_a_schema_mismatch(tmp_path: Path) -> None:
@@ -246,27 +261,73 @@ def test_receipt_rejects_relative_state_root(tmp_path: Path) -> None:
         RepoIntakeReceipt.from_dict(payload)
 
 
-def test_stale_clean_owned_intake_is_rebound_under_common_dir_lock(tmp_path: Path) -> None:
-    """A clean owned intake path is reused and rebound under its lock."""
+def test_distinct_launches_prepare_distinct_clean_intakes(tmp_path: Path) -> None:
+    """Each launch identity owns its own intake bound to the fetched head."""
     caller, remote = _make_repository(tmp_path)
-    manager = _manager(caller, remote)
-    first = manager.prepare()
+    first = _manager(caller, remote, "launch-one").prepare()
     _advance_remote(tmp_path, remote)
 
-    second = _manager(caller, remote).prepare()
+    second = _manager(caller, remote, "launch-two").prepare()
+    fetched_head = _run_git(remote, "rev-parse", "refs/heads/master").stdout.strip()
 
-    assert second.path == first.path
-    assert second.revision != first.revision
-    assert second.generation == first.generation + 1
-    assert second.revision == _run_git(second.path, "rev-parse", "HEAD").stdout.strip()
+    assert first.path != second.path
+    assert first.launch_identity == "launch-one"
+    assert second.launch_identity == "launch-two"
+    assert first.revision != second.revision
+    assert second.revision == fetched_head
+    assert second.generation == 1
+    assert _run_git(second.path, "rev-parse", "HEAD").stdout.strip() == second.revision
+
+
+def test_prepare_rejects_a_duplicate_live_launch_identity(tmp_path: Path) -> None:
+    """A held owner lock fails closed instead of sharing a launch directory."""
+    caller, remote = _make_repository(tmp_path)
+    manager = _manager(caller, remote, "launch-one")
+    receipt: RepoIntakeReceipt | None = None
+
+    with manager.owner():
+        receipt = manager.prepare()
+        with pytest.raises(RepoIntakeError, match="repository_intake_launch_in_use"):
+            _manager(caller, remote, "launch-one").prepare()
+
+    assert str(receipt.path) == str(manager.worktree_path)
+    assert manager.receipt_path.exists()
+
+
+def test_prepare_fails_closed_when_another_process_owns_the_owner_lock(tmp_path: Path) -> None:
+    """A foreign owner lock fails closed before any launch preparation."""
+    caller, remote = _make_repository(tmp_path)
+    manager = _manager(caller, remote, "launch-one")
+
+    manager.state_parent.mkdir(mode=0o700, parents=True)
+    manager.launch_dir.mkdir(mode=0o700, parents=True)
+    foreign_pointer = tmp_path / "foreign-owner.lock"
+    foreign_pointer.write_text("", encoding="utf-8")
+    foreign_pointer.chmod(0o600)
+    with file_lock(foreign_pointer, blocking=False, require_exclusive=True):
+        foreign_pointer.rename(manager.owner_lock_path)
+        with pytest.raises(RepoIntakeError, match="repository_intake_launch_in_use"):
+            manager.prepare()
+
+    assert not manager.worktree_path.exists()
+    assert not manager.receipt_path.exists()
+
+
+@pytest.mark.parametrize("invalid", ["", "UPPER", "with/slash", "with space", "a" * 129])
+def test_launch_identity_rejects_unsafe_tokens(tmp_path: Path, invalid: str) -> None:
+    """A launch identity cannot carry path separators or oversized tokens."""
+    caller, remote = _make_repository(tmp_path)
+
+    with pytest.raises(RepoIntakeError, match="launch identity is invalid"):
+        _manager(caller, remote, invalid)
 
 
 @pytest.mark.parametrize("descendant_is_dirty", [False, True])
-def test_rebind_preserves_registered_descendant_worktree(
+def test_cleanup_preserves_a_registered_descendant_worktree(
     tmp_path: Path,
     descendant_is_dirty: bool,
 ) -> None:
-    """A rebind stops and keeps a registered worktree below the intake path."""
+    """Cleanup stops and keeps a registered worktree below the launch path."""
     caller, remote = _make_repository(tmp_path)
     manager = _manager(caller, remote)
     first = manager.prepare()
@@ -279,11 +340,9 @@ def test_rebind_preserves_registered_descendant_worktree(
     receipt_content = manager.receipt_path.read_bytes()
     registrations = _run_git(caller, "worktree", "list", "--porcelain").stdout
     caller_state = _caller_state(caller)
-    _advance_remote(tmp_path, remote)
 
-    # A registered descendant stops the rebind whether it is clean or dirty.
     with pytest.raises(RepoIntakeError, match="registered descendant worktree"):
-        _manager(caller, remote).prepare()
+        manager.cleanup()
 
     assert child.is_dir()
     assert (child / "tracked.txt").read_bytes() == child_content
@@ -294,12 +353,29 @@ def test_rebind_preserves_registered_descendant_worktree(
     assert _caller_state(caller) == caller_state
 
 
+def test_prepare_rejects_a_foreign_preexisting_launch_worktree(tmp_path: Path) -> None:
+    """A foreign worktree at the launch path is preserved and fails closed."""
+    caller, remote = _make_repository(tmp_path)
+    manager = _manager(caller, remote)
+    manager.state_parent.mkdir(mode=0o700, parents=True)
+    manager.state_dir.mkdir(mode=0o700)
+    manager.launch_dir.mkdir(mode=0o700, parents=True)
+    marker = manager.worktree_path / "manual-recovery.txt"
+    marker.parent.mkdir()
+    marker.write_text("preserve\n", encoding="utf-8")
+
+    with pytest.raises(RepoIntakeError, match=r"unsafe|unowned"):
+        manager.prepare()
+
+    assert marker.read_text(encoding="utf-8") == "preserve\n"
+
+
 @pytest.mark.parametrize("pointer_kind", ["symlink", "foreign_admin"])
-def test_existing_intake_rejects_unbound_git_pointer_before_checkout_git(
+def test_abandoned_intake_rejects_unbound_git_pointer_in_the_sweep(
     tmp_path: Path,
     pointer_kind: str,
 ) -> None:
-    """An unsafe intake gitfile fails before a command uses that checkout."""
+    """A damaged abandoned launch tree is preserved, never swept away."""
     caller, remote = _make_repository(tmp_path)
     first_manager = _manager(caller, remote)
     receipt = first_manager.prepare()
@@ -320,26 +396,25 @@ def test_existing_intake_rejects_unbound_git_pointer_before_checkout_git(
         foreign_pointer_content = (foreign_worktree / ".git").read_text(encoding="utf-8")
         gitfile.write_text(foreign_pointer_content, encoding="utf-8")
         expected_pointer = foreign_pointer_content
-    registrations = _run_git(caller, "worktree", "list", "--porcelain").stdout
-
-    manager = _manager(caller, remote)
+    manager = _manager(caller, remote, "sweep-launch")
     original_runner = manager._run_command
-    intake_git_calls: list[list[str]] = []
+    damaged_checkout_commands: list[tuple[str, ...]] = []
 
     def record_intake_git(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         if kwargs.get("cwd") == receipt.path:
-            intake_git_calls.append(command)
+            damaged_checkout_commands.append(tuple(command))
         return original_runner(command, **kwargs)
 
     manager._run_command = record_intake_git
 
-    with pytest.raises(RepoIntakeError, match=r"Git (metadata|pointer)"):
-        manager.prepare()
+    second_receipt = manager.prepare()
 
-    assert intake_git_calls == []
+    assert damaged_checkout_commands == []
+    assert second_receipt.path != receipt.path
     assert first_manager.receipt_path.read_bytes() == receipt_content
     assert (receipt.path / "tracked.txt").read_bytes() == tracked_content
-    assert _run_git(caller, "worktree", "list", "--porcelain").stdout == registrations
+    remaining = _run_git(caller, "worktree", "list", "--porcelain").stdout.split("worktree ")[1:]
+    assert any(entry.startswith(str(receipt.path)) for entry in remaining)
     if pointer_kind == "symlink":
         assert gitfile.is_symlink()
         assert gitfile.readlink() == expected_pointer
@@ -376,12 +451,12 @@ def test_existing_intake_rejects_unbound_git_pointer_before_checkout_git(
         ),
     ],
 )
-def test_existing_intake_rejects_unsafe_or_malformed_worktree_config_before_external_action(
+def test_abandoned_intake_with_unsafe_worktree_config_is_preserved(
     tmp_path: Path,
     worktree_config_content: bytes,
     config_is_parseable: bool,
 ) -> None:
-    """Unsafe config stops intake before checkout or external commands."""
+    """An abandoned launch with unsafe Git config is preserved by the sweep."""
     caller, remote = _make_repository(tmp_path)
     first_manager = _manager(caller, remote)
     receipt = first_manager.prepare()
@@ -395,7 +470,6 @@ def test_existing_intake_rejects_unsafe_or_malformed_worktree_config_before_exte
     worktree_config = admin_dir / "config.worktree"
     receipt_content = first_manager.receipt_path.read_bytes()
     common_config_content = common_config.read_bytes()
-    registrations = _run_git(caller, "worktree", "list", "--porcelain").stdout
     caller_state = _caller_state(caller)
     intake_head = _run_git(receipt.path, "rev-parse", "HEAD").stdout
     intake_status = _run_git(
@@ -409,29 +483,30 @@ def test_existing_intake_rejects_unsafe_or_malformed_worktree_config_before_exte
     tracked_content = (receipt.path / "tracked.txt").read_bytes()
     worktree_config.write_bytes(worktree_config_content)
 
-    manager = _manager(caller, remote)
+    manager = _manager(caller, remote, "sweep-launch")
     original_runner = manager._run_command
-    prohibited_commands: list[tuple[tuple[str, ...], Path | None]] = []
+    damaged_checkout_commands: list[tuple[str, ...]] = []
 
     def record_external_action(
         command: list[str],
         **kwargs: Any,
     ) -> subprocess.CompletedProcess[str]:
         cwd = kwargs.get("cwd")
-        if cwd == receipt.path or command[0] == "gh" or "fetch" in command:
-            prohibited_commands.append((tuple(command), cwd))
+        if cwd == receipt.path:
+            damaged_checkout_commands.append(tuple(command))
         return original_runner(command, **kwargs)
 
     manager._run_command = record_external_action
 
-    with pytest.raises(RepoIntakeError):
-        manager.prepare()
+    second_receipt = manager.prepare()
 
-    assert prohibited_commands == []
+    assert damaged_checkout_commands == []
+    assert second_receipt.path != receipt.path
     assert first_manager.receipt_path.read_bytes() == receipt_content
     assert common_config.read_bytes() == common_config_content
     assert worktree_config.read_bytes() == worktree_config_content
-    assert _run_git(caller, "worktree", "list", "--porcelain").stdout == registrations
+    remaining = _run_git(caller, "worktree", "list", "--porcelain").stdout.split("worktree ")[1:]
+    assert any(entry.startswith(str(receipt.path)) for entry in remaining)
     assert (admin_dir / "HEAD").read_bytes() == admin_head
     assert (admin_dir / "index").read_bytes() == admin_index
     if config_is_parseable:
@@ -534,8 +609,8 @@ def test_worktree_records_accept_known_attributes_with_optional_reasons(
     assert records[0].branch == "refs/heads/master"
 
 
-def test_dirty_owned_intake_is_preserved_and_fails_closed(tmp_path: Path) -> None:
-    """A dirty owned intake is never removed or silently rebound."""
+def test_dirty_abandoned_intake_is_preserved_and_fails_closed(tmp_path: Path) -> None:
+    """A dirty abandoned intake is never removed or silently rebound."""
     caller, remote = _make_repository(tmp_path)
     manager = _manager(caller, remote)
     receipt = manager.prepare()
@@ -543,11 +618,11 @@ def test_dirty_owned_intake_is_preserved_and_fails_closed(tmp_path: Path) -> Non
     dirty_file.write_text("keep for recovery\n", encoding="utf-8")
     _advance_remote(tmp_path, remote)
 
-    with pytest.raises(RepoIntakeError, match="dirty and preserved"):
-        _manager(caller, remote).prepare()
+    second = _manager(caller, remote, "next-launch").prepare()
 
     assert dirty_file.read_text(encoding="utf-8") == "keep for recovery\n"
     assert receipt.path.is_dir()
+    assert second.path != receipt.path
 
 
 def test_foreign_intake_path_is_preserved_and_fails_closed(tmp_path: Path) -> None:
@@ -587,16 +662,19 @@ def test_intake_state_inside_registered_worktree_fails_before_write(tmp_path: Pa
     manager = _manager(caller, remote)
     _run_git(caller, "worktree", "add", "--detach", str(manager.state_parent), "HEAD")
     manager.state_parent.chmod(0o700)
-    before = _run_git(manager.state_parent, "status", "--porcelain").stdout
 
     with pytest.raises(RepoIntakeError, match="overlaps a registered worktree"):
         manager.prepare()
 
-    assert not manager.state_dir.exists()
-    assert _run_git(manager.state_parent, "status", "--porcelain").stdout == before
+    # No intake authority was written; only the empty lock skeleton remains.
+    assert not manager.receipt_path.exists()
+    assert not manager.registration_path.exists()
+    assert not manager.worktree_path.exists()
+    residue = _run_git(manager.state_parent, "status", "--porcelain").stdout.splitlines()
+    assert residue == [f"?? {manager.state_dir.name}/"]
 
 
-def test_mismatched_receipt_is_preserved_and_fails_closed(tmp_path: Path) -> None:
+def test_launch_receipt_tamper_is_preserved_and_fails_closed(tmp_path: Path) -> None:
     """A receipt with foreign ownership cannot be reused or replaced."""
     caller, remote = _make_repository(tmp_path)
     manager = _manager(caller, remote)
@@ -606,14 +684,14 @@ def test_mismatched_receipt_is_preserved_and_fails_closed(tmp_path: Path) -> Non
     changed = json.dumps(payload, sort_keys=True, indent=2) + "\n"
     manager.receipt_path.write_text(changed, encoding="utf-8")
 
-    with pytest.raises(RepoIntakeError, match="receipt ownership does not match"):
+    with pytest.raises(RepoIntakeError, match="unowned repository-intake worktree"):
         manager.prepare()
 
     assert manager.receipt_path.read_text(encoding="utf-8") == changed
     assert _run_git(receipt.path, "rev-parse", "HEAD").stdout.strip() == receipt.revision
 
 
-def test_mismatched_state_root_is_preserved_and_fails_closed(tmp_path: Path) -> None:
+def test_launch_receipt_state_root_tamper_is_preserved_and_fails_closed(tmp_path: Path) -> None:
     """A receipt cannot redirect durable state outside its owner directory."""
     caller, remote = _make_repository(tmp_path)
     manager = _manager(caller, remote)
@@ -623,11 +701,68 @@ def test_mismatched_state_root_is_preserved_and_fails_closed(tmp_path: Path) -> 
     changed = json.dumps(payload, sort_keys=True, indent=2) + "\n"
     manager.receipt_path.write_text(changed, encoding="utf-8")
 
-    with pytest.raises(RepoIntakeError, match="receipt ownership does not match"):
+    with pytest.raises(RepoIntakeError, match="unowned repository-intake worktree"):
         manager.prepare()
 
     assert manager.receipt_path.read_text(encoding="utf-8") == changed
     assert _run_git(receipt.path, "rev-parse", "HEAD").stdout.strip() == receipt.revision
+
+
+def test_launch_cleanup_preserves_durable_build_state(tmp_path: Path) -> None:
+    """Current durable state at the state root survives the launch cleanup."""
+    caller, remote = _make_repository(tmp_path)
+    manager = _manager(caller, remote)
+    manager.prepare()
+    destination = manager.state_dir / "build" / ".automation-state"
+    destination.mkdir(parents=True)
+    marker = destination / "current.json"
+    marker.write_bytes(b"current\n")
+
+    manager.cleanup()
+
+    assert marker.read_bytes() == b"current\n"
+    assert not manager.launch_dir.exists()
+
+
+def test_launch_cleanup_is_idempotent(tmp_path: Path) -> None:
+    """A repeated cleanup reports nothing left to remove."""
+    caller, remote = _make_repository(tmp_path)
+    manager = _manager(caller, remote)
+    manager.prepare()
+
+    manager.cleanup()
+
+    assert not manager.launch_dir.exists()
+    manager.cleanup()
+    assert not manager.launch_dir.exists()
+
+
+def test_launch_cleanup_preserves_dirty_launch_intake(tmp_path: Path) -> None:
+    """A dirty launch worktree is preserved with the retained path."""
+    caller, remote = _make_repository(tmp_path)
+    manager = _manager(caller, remote)
+    first = manager.prepare()
+    dirty_file = first.path / "operator-notes.txt"
+    dirty_file.write_text("keep for recovery\n", encoding="utf-8")
+
+    with pytest.raises(RepoIntakeError, match=f"preserved.*{re.escape(str(first.path))}"):
+        manager.cleanup()
+
+    assert dirty_file.read_text(encoding="utf-8") == "keep for recovery\n"
+    assert first.path.is_dir()
+
+
+def test_launch_cleanup_removes_the_git_worktree_registration(tmp_path: Path) -> None:
+    """Cleanup removes both the launch tree and its Git worktree registration."""
+    caller, remote = _make_repository(tmp_path)
+    manager = _manager(caller, remote)
+    first = manager.prepare()
+    assert str(first.path) in _run_git(caller, "worktree", "list", "--porcelain").stdout
+
+    manager.cleanup()
+
+    assert str(first.path) not in _run_git(caller, "worktree", "list", "--porcelain").stdout
+    assert not manager.launch_dir.exists()
 
 
 @pytest.mark.parametrize("directory_name", [".automation-state", Path(DEFAULT_STATE_DIR).name])
@@ -1041,15 +1176,16 @@ def test_registered_home_event_log_does_not_dirty_or_block_intake(
 def test_current_destination_state_is_preserved_during_reuse(tmp_path: Path) -> None:
     """Current durable state does not conflict without legacy caller state."""
     caller, remote = _make_repository(tmp_path)
-    first = _manager(caller, remote).prepare()
-    destination = first.state_root / "build" / ".automation-state"
+    first = _manager(caller, remote, "state-launch").prepare()
+    destination = first.state_root.parent.parent / "build" / ".automation-state"
     destination.mkdir(parents=True)
     marker = destination / "current.json"
     marker.write_bytes(b"current\n")
 
-    second = _manager(caller, remote).prepare()
+    second = _manager(caller, remote, "next-state-launch").prepare()
 
-    assert second == first
+    assert second != first
+    assert second.revision == first.revision
     assert marker.read_bytes() == b"current\n"
 
 
@@ -1154,7 +1290,7 @@ def test_fetch_failure_preserves_attached_caller_state(tmp_path: Path) -> None:
 
 
 def test_first_fetch_failure_can_retry_without_adopting_an_unowned_path(tmp_path: Path) -> None:
-    """A failed first fetch does not strand the intake path on the next prepare."""
+    """A failed first fetch rolls back and a retry gets a fresh launch intake."""
     caller, remote = _make_repository(tmp_path)
     manager = _manager(caller, remote)
     run_command = manager._run_command
@@ -1169,16 +1305,21 @@ def test_first_fetch_failure_can_retry_without_adopting_an_unowned_path(tmp_path
     with pytest.raises(RepoIntakeError, match="fetch failed"):
         manager.prepare()
 
-    receipt = _manager(caller, remote).prepare()
+    assert not manager.receipt_path.exists()
+    assert not manager.worktree_path.exists()
+    assert (
+        str(manager.worktree_path) not in _run_git(caller, "worktree", "list", "--porcelain").stdout
+    )
 
-    assert receipt.path == manager.worktree_path
+    receipt = _manager(caller, remote, "retry-launch").prepare()
+
     assert receipt.revision == _run_git(remote, "rev-parse", "master").stdout.strip()
 
 
-def test_non_fast_forward_remote_rewrite_preserves_owned_intake(tmp_path: Path) -> None:
-    """A rewritten remote cannot replace a clean owned intake worktree."""
+def test_next_launch_prepares_isolated_intake_after_a_remote_rewrite(tmp_path: Path) -> None:
+    """A rewritten remote never pins a previous launch's stale revision."""
     caller, remote = _make_repository(tmp_path)
-    first = _manager(caller, remote).prepare()
+    first = _manager(caller, remote, "before-rewrite").prepare()
     rewritten = _rewrite_remote(tmp_path, remote)
     _run_git(
         caller,
@@ -1188,55 +1329,104 @@ def test_non_fast_forward_remote_rewrite_preserves_owned_intake(tmp_path: Path) 
         "refs/heads/master:refs/remotes/origin/master",
     )
 
-    with pytest.raises(RepoIntakeError, match="non-fast-forward"):
-        _manager(caller, remote).prepare()
+    second = _manager(caller, remote, "after-rewrite").prepare()
 
     assert rewritten != first.revision
-    assert _run_git(first.path, "rev-parse", "HEAD").stdout.strip() == first.revision
-    assert (
-        json.loads(_manager(caller, remote).receipt_path.read_text(encoding="utf-8"))["revision"]
-        == first.revision
-    )
+    assert second.revision == rewritten
+    assert second.revision == _run_git(second.path, "rev-parse", "HEAD").stdout.strip()
 
 
-def test_concurrent_intake_preparation_reuses_one_owned_path(tmp_path: Path) -> None:
-    """Concurrent preparations produce one path and one initial generation."""
+def test_concurrent_intake_preparations_use_distinct_launch_intakes(tmp_path: Path) -> None:
+    """Concurrent preparations keep distinct launch paths under one lock."""
     caller, remote = _make_repository(tmp_path)
+    managers = [_manager(caller, remote, f"launch-{index}") for index in range(2)]
 
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        receipts = list(
-            executor.map(
-                lambda _index: _manager(caller, remote).prepare(),
-                range(2),
-            )
-        )
+    with ExitStack() as stack:
+        for manager in managers:
+            stack.enter_context(manager.owner())
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            receipts = list(executor.map(lambda manager: manager.prepare(), managers))
 
-    assert receipts[0].path == receipts[1].path
+    assert receipts[0].path != receipts[1].path
     assert receipts[0].revision == receipts[1].revision
     assert receipts[0].generation == receipts[1].generation == 1
+    for receipt in receipts:
+        assert _run_git(receipt.path, "rev-parse", "HEAD").stdout.strip() == receipt.revision
 
 
-def test_linked_callers_share_one_concurrent_intake(tmp_path: Path) -> None:
-    """Linked callers serialize intake through their shared common directory."""
+def test_duplicate_launch_identity_fails_closed_under_contention(tmp_path: Path) -> None:
+    """A duplicate launch identity fails closed instead of sharing an intake."""
+    caller, remote = _make_repository(tmp_path)
+    failures: list[BaseException] = []
+    acquired: list[RepoIntakeManager] = []
+    start = threading.Barrier(2)
+    # A network mount can delay flock visibility between clients, so the
+    # contender retries its nonblocking acquisition within a bounded window.
+    deadline = time.monotonic() + 5.0
+
+    def hold(manager: RepoIntakeManager) -> None:
+        with manager.owner():
+            acquired.append(manager)
+            start.wait(timeout=10)
+            time.sleep(0.2)
+
+    def contend(manager: RepoIntakeManager) -> None:
+        start.wait(timeout=10)
+        while time.monotonic() < deadline:
+            try:
+                with manager.owner():
+                    acquired.append(manager)
+                    return
+            except RepoIntakeError as exc:
+                failures.append(exc)
+                return
+        failures.append(TimeoutError("owner-lock contention was never observed"))
+
+    managers = [_manager(caller, remote, "same-launch") for _ in range(2)]
+    # Pre-create the lock file so both threads open one inode; a network
+    # mount can hand two concurrent O_CREAT opens distinct inodes.
+    managers[0].state_parent.mkdir(mode=0o700, parents=True)
+    managers[0].launch_dir.mkdir(mode=0o700, parents=True)
+    managers[0].owner_lock_path.touch(mode=0o600)
+    holder = threading.Thread(target=hold, args=(managers[0],))
+    contender = threading.Thread(target=contend, args=(managers[1],))
+    holder.start()
+    contender.start()
+    holder.join(timeout=30)
+    contender.join(timeout=30)
+    assert not contender.is_alive()
+
+    assert len(acquired) == 1
+    assert len(failures) == 1
+    assert "launch_in_use" in str(failures[0])
+
+
+def test_linked_callers_prepare_distinct_launch_intakes(tmp_path: Path) -> None:
+    """Linked callers serialize metadata and keep their own launch intakes."""
     caller, remote = _make_repository(tmp_path)
     linked = tmp_path / "linked-caller"
     _run_git(caller, "worktree", "add", "--detach", str(linked), "HEAD")
 
+    def prepare(pair: tuple[Path, str]) -> RepoIntakeReceipt:
+        manager = _manager(pair[0], remote, pair[1])
+        with manager.owner():
+            return manager.prepare()
+
     with ThreadPoolExecutor(max_workers=2) as executor:
         receipts = list(
             executor.map(
-                lambda root: _manager(root, remote).prepare(),
-                (caller, linked),
+                prepare,
+                ((caller, "primary-launch"), (linked, "linked-launch")),
             )
         )
 
-    assert receipts[0].path == receipts[1].path
+    assert receipts[0].path != receipts[1].path
     assert receipts[0].revision == receipts[1].revision
     assert receipts[0].generation == receipts[1].generation == 1
 
 
-def test_linked_callers_share_one_intake_across_processes(tmp_path: Path) -> None:
-    """Linked processes exclude a live owner and reuse its intake on retry."""
+def test_linked_processes_run_distinct_launches_across_processes(tmp_path: Path) -> None:
+    """Linked processes serialize metadata and keep their own launch intakes."""
     pytest.importorskip("fcntl")
     source_root = Path(__file__).resolve().parents[3]
     caller, remote = _make_repository(tmp_path)
@@ -1249,6 +1439,7 @@ import json
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 
 from hephaestus.git.runtime import operation_deadline
@@ -1298,6 +1489,7 @@ manager = RepoIntakeManager(
     git_runner=runner,
     git_env=_controlled_git_env(),
     remote_config=(),
+    launch_identity=uuid.uuid4().hex,
 )
 if mode == "timeout":
     ready.write_text("attempting\n", encoding="utf-8")
@@ -1362,10 +1554,11 @@ print(json.dumps(manager.prepare().to_dict(), sort_keys=True))
         retry = start(linked, "normal", tmp_path / "unused.ready")
         retry_stdout, retry_stderr = retry.communicate(timeout=30)
         assert retry.returncode == 0, retry_stderr
-        receipts = [json.loads(owner_stdout), json.loads(retry_stdout)]
-        assert receipts[0]["path"] == receipts[1]["path"]
-        assert receipts[0]["revision"] == receipts[1]["revision"]
-        assert receipts[0]["generation"] == receipts[1]["generation"] == 1
+        owner_receipt = json.loads(owner_stdout)
+        retry_receipt = json.loads(retry_stdout)
+        assert owner_receipt["path"] != retry_receipt["path"]
+        assert owner_receipt["revision"] == retry_receipt["revision"]
+        assert owner_receipt["generation"] == retry_receipt["generation"] == 1
         assert _caller_state(caller) == caller_before
         assert _caller_state(linked) == linked_before
     finally:
@@ -1432,6 +1625,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from pathlib import Path
 
 from hephaestus.git.runtime import operation_deadline
@@ -1501,6 +1695,7 @@ manager = RepoIntakeManager(
     git_runner=runner,
     git_env=_controlled_git_env(),
     remote_config=(),
+    launch_identity=uuid.uuid4().hex,
 )
 try:
     with operation_deadline(time.monotonic() + 30.0, shutdown=shutdown):
@@ -1549,6 +1744,116 @@ raise SystemExit("preparation did not observe interruption")
     assert manager.state_dir.is_dir()
     assert not manager.worktree_path.exists()
     assert not manager.receipt_path.exists()
+
+
+def test_sigkilled_launch_intake_sweep_recovers_an_abandoned_pointer(
+    tmp_path: Path,
+) -> None:
+    """A SIGKILLed launch's intake is recovered by the next launch's sweep.
+
+    Process-level coverage spawns a real helper subprocess. The first
+    launch prepares its intake and holds no lock owner while it idles;
+    SIGKILL reproduces the host-failure state exactly. The kernel releases
+    every lock owner, and the second launch's abandoned-intake sweep then
+    proves and removes the leftover intake before creating its own.
+    """
+    pytest.importorskip("fcntl")
+    source_root = Path(__file__).resolve().parents[3]
+    caller, remote = _make_repository(tmp_path)
+    marker = tmp_path / "first.intake.json"
+    first_ready = tmp_path / "first.ready"
+    before = _caller_state(caller)
+    child = r"""
+import json
+import subprocess
+import sys
+import uuid
+from pathlib import Path
+
+from hephaestus.automation.repo_intake import RepoIntakeManager
+from hephaestus.git.snapshot import _controlled_git_env
+
+caller = Path(sys.argv[1])
+remote = Path(sys.argv[2])
+marker = Path(sys.argv[3])
+ready = Path(sys.argv[4])
+
+def runner(command, *, cwd=None, check=True, timeout=None, env=None,
+           log_errors=True, input_text=None):
+    del log_errors
+    if command[0] == "gh":
+        return subprocess.CompletedProcess(command, 0, "master\n", "")
+    adjusted = list(command)
+    if "fetch" in adjusted:
+        adjusted[adjusted.index("origin")] = str(remote)
+    return subprocess.run(
+        adjusted,
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        check=check,
+        timeout=timeout,
+        env=env,
+        input=input_text,
+    )
+
+manager = RepoIntakeManager(
+    caller,
+    repository="acme/repo",
+    gh_command="gh",
+    timeout_s=30,
+    git_runner=runner,
+    git_env=_controlled_git_env(),
+    remote_config=(),
+    launch_identity=uuid.uuid4().hex,
+)
+receipt = manager.prepare()
+marker.write_text(json.dumps(receipt.to_dict()), encoding="utf-8")
+ready.write_text("prepared\n", encoding="utf-8")
+"""
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = str(source_root)
+    child_process = subprocess.Popen(
+        [sys.executable, "-c", child, str(caller), str(remote), str(marker), str(first_ready)],
+        cwd=source_root,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=environment,
+        start_new_session=True,
+    )
+    try:
+        deadline = time.monotonic() + 30.0
+        while not first_ready.is_file():
+            if child_process.poll() is not None:
+                _stdout, stderr = child_process.communicate()
+                pytest.fail(f"The first launch exited before its marker: {stderr}")
+            if time.monotonic() >= deadline:
+                pytest.fail("The first launch did not finish its intake preparation.")
+            time.sleep(0.01)
+        abandoned_receipt = json.loads(marker.read_text(encoding="utf-8"))
+        os.killpg(child_process.pid, signal.SIGKILL)
+        child_process.wait(timeout=10)
+    finally:
+        if child_process.poll() is None:
+            with suppress(ProcessLookupError):
+                os.killpg(child_process.pid, signal.SIGKILL)
+            child_process.wait(timeout=5)
+
+    abandoned_worktree = Path(abandoned_receipt["path"])
+    abandoned_launch_root = Path(abandoned_receipt["state_root"])
+    assert abandoned_worktree.is_dir()
+    assert abandoned_launch_root.is_dir()
+
+    manager = _manager(caller, remote, "recovery-launch")
+    recovered_receipt = manager.prepare()
+
+    assert recovered_receipt.revision == abandoned_receipt["revision"]
+    assert recovered_receipt.path != abandoned_worktree
+    assert not abandoned_launch_root.exists()
+    remaining = _run_git(caller, "worktree", "list", "--porcelain").stdout.split("worktree ")[1:]
+    assert not any(entry.startswith(str(abandoned_worktree)) for entry in remaining)
+    assert _caller_state(caller) == before
 
 
 @pytest.mark.parametrize("stop", ["deadline", "cancellation"])
@@ -1622,7 +1927,9 @@ def test_intake_metadata_lock_observes_operation_stop(
     assert len(failures) == 1
     expected = subprocess.TimeoutExpired if stop == "deadline" else InterruptedError
     assert isinstance(failures[0], expected)
-    assert not manager.state_dir.exists()
+    assert not manager.receipt_path.exists()
+    assert not manager.worktree_path.exists()
+    assert not manager.registration_path.exists()
 
 
 def test_intake_rejects_unavailable_exclusive_lock_without_waiting(
@@ -1643,20 +1950,23 @@ def test_intake_rejects_unavailable_exclusive_lock_without_waiting(
     monkeypatch.setattr(builtins, "__import__", import_without_fcntl)
     monkeypatch.setattr(manager, "_prepare_locked", lambda: effects.append("prepared"))
 
-    with pytest.raises(RepoIntakeError, match="exclusive Git metadata locking is unavailable"):
+    with pytest.raises(
+        RepoIntakeError, match="exclusive repository-intake launch locking is unavailable"
+    ):
         manager.prepare()
 
     assert effects == []
-    assert not manager.state_dir.exists()
+    assert not manager.receipt_path.exists()
+    assert not manager.worktree_path.exists()
 
 
 @pytest.mark.parametrize("failure", ["missing-module", "unsupported-operation"])
-def test_run_lease_reports_unavailable_exclusive_lock_capability(
+def test_owner_lock_reports_unavailable_exclusive_lock_capability(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     failure: str,
 ) -> None:
-    """A permanent run-lock failure is not reported as active contention."""
+    """A permanent owner-lock failure is not reported as active contention."""
     caller, remote = _make_repository(tmp_path)
     manager = _manager(caller, remote)
     if failure == "missing-module":
@@ -1678,14 +1988,14 @@ def test_run_lease_reports_unavailable_exclusive_lock_capability(
 
     with pytest.raises(
         RepoIntakeError,
-        match="exclusive repository-intake run locking is unavailable",
+        match="exclusive repository-intake launch locking is unavailable",
     ):
-        with manager.run_lease():
-            pytest.fail("Unavailable exclusive locking admitted the run lease.")
+        with manager.owner():
+            pytest.fail("Unavailable exclusive locking admitted the owner lock.")
 
 
-def test_run_lease_blocks_a_second_process_before_intake_rebind(tmp_path: Path) -> None:
-    """A live run keeps a second process from changing its intake checkout."""
+def test_owner_lock_blocks_a_second_process_before_preparation(tmp_path: Path) -> None:
+    """A live launch keeps a second process from preparing the same intake."""
     source_root = Path(__file__).resolve().parents[3]
     caller, remote = _make_repository(tmp_path)
     manager = _manager(caller, remote)
@@ -1706,18 +2016,19 @@ manager = RepoIntakeManager(
     git_runner=git_utils.run,
     git_env=_controlled_git_env(),
     remote_config=(),
+    launch_identity=sys.argv[2],
 )
 try:
-    with manager.run_lease():
+    with manager.owner():
         raise SystemExit(0)
 except Exception as error:
     print(f"{type(error).__name__}: {error}", file=sys.stderr)
     raise SystemExit(23)
 """
 
-    with manager.run_lease():
+    with manager.owner():
         attempted = subprocess.run(
-            [sys.executable, "-c", child, str(caller)],
+            [sys.executable, "-c", child, str(caller), manager.launch_identity],
             cwd=source_root,
             capture_output=True,
             text=True,
@@ -1726,25 +2037,32 @@ except Exception as error:
         )
 
     assert attempted.returncode == 23
-    assert "RepoIntakeInUseError: repository_intake_in_use:" in attempted.stderr
-    assert "wait for the active automation run to finish" in attempted.stderr
+    assert "RepoIntakeError: repository_intake_launch_in_use:" in attempted.stderr
+    assert "use a unique launch identity and retry" in attempted.stderr
     assert _run_git(first.path, "rev-parse", "HEAD").stdout.strip() == first.revision
 
 
-def test_run_lease_uses_a_stable_common_directory_path(tmp_path: Path) -> None:
-    """Linked callers use one stable lease for their Git common directory."""
+def test_owner_lock_uses_a_stable_launch_directory_path(tmp_path: Path) -> None:
+    """One launch identity selects one owner lock for its launch directory."""
     caller, remote = _make_repository(tmp_path)
     linked = tmp_path / "lease-linked-caller"
     _run_git(caller, "worktree", "add", "--detach", str(linked), "HEAD")
-    primary = _manager(caller, remote)
-    secondary = _manager(linked, remote)
+    primary = _manager(caller, remote, "shared-launch")
+    secondary = _manager(linked, remote, "shared-launch")
 
-    assert primary.run_lease_path == secondary.run_lease_path
-    with primary.run_lease():
+    assert primary.owner_lock_path == secondary.owner_lock_path
+    with primary.owner():
         with pytest.raises(RepoIntakeError) as caught:
-            with secondary.run_lease():
+            with secondary.owner():
                 pass
-    assert type(caught.value).__name__ == "RepoIntakeInUseError"
+    assert "repository_intake_launch_in_use" in str(caught.value)
+
+
+def test_intake_launch_in_use_error_stays_exported_for_callers() -> None:
+    """The legacy in-use error remains an importable intake failure."""
+    from hephaestus.automation.repo_intake import RepoIntakeInUseError
+
+    assert issubclass(RepoIntakeInUseError, RepoIntakeError)
 
 
 def test_intake_lock_interruption_preserves_shutdown_signal(

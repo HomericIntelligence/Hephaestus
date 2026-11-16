@@ -11,12 +11,18 @@ from hephaestus.automation.worktree_manager import WorktreeManager
 from tests.unit.automation.test_repo_intake import _make_repository, _manager, _run_git
 
 
+def _durable_root(intake: object) -> Path:
+    """Return the durable state root that outlives every launch."""
+    return intake.state_root.parent.parent  # type: ignore[attr-defined]
+
+
 @pytest.mark.precommit
 @pytest.mark.parametrize("manager_kind", ["source", "worktree"])
 def test_intake_restart_preserves_a_worker_checkout(tmp_path: Path, manager_kind: str) -> None:
     """A preserved worker must not make the next intake fail."""
     caller, remote = _make_repository(tmp_path)
-    intake = _manager(caller, remote).prepare()
+    intake = _manager(caller, remote, "worker-launch").prepare()
+    durable_root = _durable_root(intake)
     if manager_kind == "source":
         source = SourceWorkspaceManager(intake.path, repository="repo")
         worker = source.path_for(602, SourceLane.IMPLEMENTATION)
@@ -27,14 +33,16 @@ def test_intake_restart_preserves_a_worker_checkout(tmp_path: Path, manager_kind
     (worker / "preserved.txt").write_text("uncommitted worker data\n", encoding="utf-8")
     before = _run_git(worker, "rev-parse", "HEAD").stdout
 
-    restarted = _manager(caller, remote).prepare()
+    restarted = _manager(caller, remote, "restart-launch").prepare()
 
-    assert restarted.path == intake.path
-    assert not worker.is_relative_to(intake.path)
-    assert _run_git(intake.path, "status", "--porcelain").stdout == ""
+    assert restarted.path != intake.path
+    assert not worker.is_relative_to(restarted.path)
+    assert not worker.is_relative_to(restarted.state_root)
+    assert _run_git(restarted.path, "status", "--porcelain").stdout == ""
     assert _run_git(worker, "rev-parse", "HEAD").stdout == before
     assert _run_git(worker, "branch", "--show-current").stdout.strip() == "existing-pr"
     assert (worker / "preserved.txt").read_text(encoding="utf-8") == "uncommitted worker data\n"
+    assert durable_root == _durable_root(restarted)
 
 
 @pytest.mark.precommit
@@ -43,10 +51,10 @@ def test_intake_restart_preserves_a_worker_checkout(tmp_path: Path, manager_kind
 def test_intake_worker_rejects_another_repository(
     tmp_path: Path, repository: str, explicit_base: bool
 ) -> None:
-    """Worker ownership must match the repository in the intake receipt."""
+    """Worker ownership must match the repository in the intake registration."""
     caller, remote = _make_repository(tmp_path)
     intake = _manager(caller, remote).prepare()
-    base = intake.state_root / "build" / ".worktrees" if explicit_base else None
+    base = _durable_root(intake) / "build" / ".worktrees" if explicit_base else None
 
     with pytest.raises(RepoIntakeError, match="repository"):
         SourceWorkspaceManager(intake.path, repository=repository, base_dir=base)
@@ -98,7 +106,7 @@ def test_intake_worker_host_path_authority(tmp_path: Path, case: str) -> None:
     caller, remote = _make_repository(tmp_path)
     intake = _manager(caller, remote).prepare()
     root = intake.path
-    worker = intake.state_root / "build" / ".worktrees" / "auto-602-impl"
+    worker = _durable_root(intake) / "build" / ".worktrees" / "auto-602-impl"
     if case == "review":
         worker = worker.with_name("auto-602-review")
     if case == "nested":
@@ -132,13 +140,13 @@ def test_intake_worker_host_path_authority(tmp_path: Path, case: str) -> None:
 
 
 @pytest.mark.precommit
-def test_intake_worker_host_path_requires_its_receipt(tmp_path: Path) -> None:
+def test_intake_worker_host_path_requires_its_registration(tmp_path: Path) -> None:
     """Nested paths must not bypass missing intake ownership evidence."""
     from hephaestus.automation.repo_intake import repository_worker_path_is_valid
 
     caller, remote = _make_repository(tmp_path)
     intake = _manager(caller, remote).prepare()
-    (intake.state_root / "receipt.json").write_text("{}\n", encoding="utf-8")
+    (_durable_root(intake) / "intake-registration.json").write_text("{}\n", encoding="utf-8")
 
     with pytest.raises(RepoIntakeError):
         repository_worker_path_is_valid(

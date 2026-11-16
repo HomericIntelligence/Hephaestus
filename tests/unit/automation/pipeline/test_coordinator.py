@@ -55,6 +55,7 @@ from hephaestus.automation.pipeline.jobs import (
 )
 from hephaestus.automation.pipeline.plan_journal import requirements_epoch
 from hephaestus.automation.pipeline.queues import CompletionQueue
+from hephaestus.automation.pipeline.repo_intake_cleanup import RepoIntakeCleanupFailure
 from hephaestus.automation.pipeline.routing import (
     Disposition,
     PipelineScope,
@@ -67,7 +68,10 @@ from hephaestus.automation.pipeline.stages.durable_request import PENDING_GITHUB
 from hephaestus.automation.pipeline.stages.implementation import DIRTY_RECOVERY_WAIT
 from hephaestus.automation.pipeline.work_item import ItemKind, ItemResult, WorkItem
 from hephaestus.automation.pipeline.worker_pool import WorkerPool
-from hephaestus.automation.repo_intake import RepoIntakeError, RepoIntakeManager
+from hephaestus.automation.repo_intake import (
+    RepoIntakeError,
+    RepoIntakeManager,
+)
 from hephaestus.automation.source_worktree import SourceWorkspaceManager
 from hephaestus.automation.state_labels import STATE_NEEDS_PLAN
 from hephaestus.resilience import (
@@ -230,10 +234,11 @@ class _OrderedWorkerPool(WorkerPool):
         super().shutdown(mark_interrupted=mark_interrupted)
         self._events.append("main_shutdown")
 
-    def release_repo_intake_leases(self) -> None:
-        """Release real intake leases and record the completed call."""
-        super().release_repo_intake_leases()
-        self._events.append("main_release")
+    def cleanup_repo_intakes(self) -> list[RepoIntakeCleanupFailure]:
+        """Run real intake cleanup and record the completed call."""
+        failures = super().cleanup_repo_intakes()
+        self._events.append("main_cleanup")
+        return failures
 
 
 class _OrderedAuxiliaryPool(FakeWorkerPool):
@@ -5281,12 +5286,12 @@ def test_update_plan_same_issue_number_in_two_repositories(
 
 
 @pytest.mark.parametrize("case", ["normal", "fatal", "interrupt", "report_failure"])
-def test_run_releases_intake_leases_after_shutdown_and_reporting(
+def test_run_cleans_up_intakes_after_shutdown_and_reporting(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     case: str,
 ) -> None:
-    """All run exits preserve the caller and release the real intake lease."""
+    """All run exits preserve the caller and remove the launch-owned intake."""
     events: list[str] = []
 
     caller, _revision = _writer_repository(tmp_path)
@@ -5300,10 +5305,14 @@ def test_run_releases_intake_leases_after_shutdown_and_reporting(
 
     pools: list[_OrderedWorkerPool] = []
 
-    def main_factory(**kwargs: Any) -> _OrderedWorkerPool:
+    # ``run_identity`` keeps a default so the factory satisfies the
+    # ``WorkerFactory`` protocol; the coordinator introspects the signature
+    # and passes the run identity when the parameter exists.
+    def main_factory(*, run_identity: str = "unknown", **kwargs: Any) -> _OrderedWorkerPool:
         pool = _OrderedWorkerPool(
             events=events,
             lock_dir=tmp_path / "locks",
+            run_identity=run_identity,
             **kwargs,
         )
         pools.append(pool)
@@ -5341,6 +5350,7 @@ def test_run_releases_intake_leases_after_shutdown_and_reporting(
     assert intake_result.ok
     assert isinstance(intake_result.value, dict)
     intake_path = Path(str(intake_result.value["path"]))
+    assert intake_path.is_dir()
     manager = RepoIntakeManager(
         caller,
         repository="acme/repo",
@@ -5349,9 +5359,10 @@ def test_run_releases_intake_leases_after_shutdown_and_reporting(
         git_runner=run_intake_git,
         git_env=worker_pool_module._controlled_git_env(),
         remote_config=(),
+        launch_identity=coordinator.config.run_identity,
     )
-    with pytest.raises(RepoIntakeError, match="repository_intake_in_use"):
-        with manager.run_lease():
+    with pytest.raises(RepoIntakeError, match="repository_intake_launch_in_use"):
+        with manager.owner():
             pass
     original_finalize = coordinator._finalize_resumable
 
@@ -5373,15 +5384,14 @@ def test_run_releases_intake_leases_after_shutdown_and_reporting(
         coordinator.run()
 
     assert _caller_state(caller) == before
-    assert intake_path.is_dir()
-    with manager.run_lease():
-        pass
+    assert not intake_path.exists()
+    assert "main_cleanup" in events
     assert events == [
         "main_shutdown",
         "auxiliary_shutdown",
         "resumable",
         "summary",
-        "main_release",
+        "main_cleanup",
     ]
 
 

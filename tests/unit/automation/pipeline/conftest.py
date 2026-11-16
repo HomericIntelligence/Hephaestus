@@ -30,6 +30,7 @@ from hephaestus.automation.pipeline.jobs import (
     JobResult,
 )
 from hephaestus.automation.pipeline.queues import CompletionQueue
+from hephaestus.automation.pipeline.repo_intake_cleanup import RepoIntakeCleanupFailure
 from hephaestus.automation.pipeline.routing import StageName
 from hephaestus.automation.pipeline.worker_protocol import (
     AuxiliaryWorker,
@@ -91,7 +92,8 @@ class FakeWorkerPool:
         self.submitted: list[JobHandle] = []
         self.submitted_claims: list[tuple[str, str]] = []
         self.shutdown_calls = 0
-        self.repo_intake_lease_release_calls = 0
+        self.repo_intake_cleanup_calls = 0
+        self.repo_intake_cleanup_failures: list[RepoIntakeCleanupFailure] = []
         self._scripted: deque[JobResult | Exception] = deque()
         self.github_job_runner = github_job_runner
         self._wakeup = threading.Event()
@@ -258,16 +260,17 @@ class FakeWorkerPool:
             return JobResult(
                 ok=True,
                 value={
-                    "schema_version": 2,
+                    "schema_version": 3,
                     "repository": job.kwargs.get("repo", ""),
                     "repository_identity": "fake:repo",
-                    "ownership_key": "fake:repo:intake",
+                    "ownership_key": "fake:repo:intake:fake-launch",
                     "common_dir": str(common_dir),
                     "path": str(intake_path),
                     "state_root": str(intake_path.parent),
                     "default_branch": "main",
                     "revision": "a" * 40,
                     "generation": 1,
+                    "launch_identity": "fake-launch",
                     "detached": True,
                     "branch": None,
                 },
@@ -302,9 +305,10 @@ class FakeWorkerPool:
         if mark_interrupted:
             self.shutdown_event.set()
 
-    def release_repo_intake_leases(self) -> None:
-        """Record release of the test lane's repository-intake leases."""
-        self.repo_intake_lease_release_calls += 1
+    def cleanup_repo_intakes(self) -> list[RepoIntakeCleanupFailure]:
+        """Record terminal launch-intake cleanup for the test lane."""
+        self.repo_intake_cleanup_calls += 1
+        return list(self.repo_intake_cleanup_failures)
 
 
 class WorkerFactories(TypedDict):
