@@ -19,6 +19,17 @@ from hephaestus.prompts.fencing import (
     get_untrusted_notice as get_untrusted_notice,
 )
 
+# The canonical fencing primitives live in hephaestus.prompts.fencing (issue
+# #3509). __all__ marks the re-exports so static checks accept them; current
+# callers still import the names from this module.
+__all__ = [
+    "FencedContent",
+    "fence_content",
+    "fence_untrusted",
+    "get_terse_output_directive",
+    "get_untrusted_notice",
+]
+
 _prompts_logger = logging.getLogger("hephaestus.automation.prompts")
 
 # Package-internal alias preserved for existing callers/tests; the canonical
