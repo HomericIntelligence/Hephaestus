@@ -10689,7 +10689,6 @@ class WorkerPool:
             message = str(exc)
             error = f"repository intake failed: {message}" if message == "lock_timeout" else message
             return JobResult(ok=False, error=error)
-        return JobResult(ok=False, error="repository intake did not produce a receipt")
 
     def _sync_checkout_locked(
         self,
