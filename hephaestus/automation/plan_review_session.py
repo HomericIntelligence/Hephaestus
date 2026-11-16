@@ -15,7 +15,7 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Final, Literal
 from uuid import uuid4
 
 from hephaestus.agents.pi_session import AgentSessionBinding, PiSessionBindingError
@@ -25,6 +25,58 @@ from hephaestus.utils.file_lock import file_lock
 
 SCHEMA_VERSION = 1
 type ArtifactKind = Literal["review", "amendment"]
+
+#: One-shot decomposition generation runs under their own session role, so a
+#: generation conversation can never resume or replay an iterative review
+#: conversation (issue #2982).
+DECOMPOSITION_GENERATOR_ROLE: Final[str] = "plan-decomposition-generator"
+
+#: One-shot independent decomposition review runs under its own session role
+#: bound to the exact draft digest it approves (issue #2982).
+DECOMPOSITION_REVIEWER_ROLE: Final[str] = "plan-decomposition-reviewer"
+
+
+def decomposition_generation_session_key(requirements_epoch: str) -> str:
+    """Return the one-shot generation session identity for one epoch.
+
+    Args:
+        requirements_epoch: The requirements epoch that fixes one tree.
+
+    Returns:
+        A stable session key that never collides with the iterative
+        reviewer conversation keys.
+
+    Raises:
+        ValueError: If the epoch is not a bounded 64-character digest.
+
+    """
+    if not isinstance(requirements_epoch, str) or len(requirements_epoch) != 64:
+        raise ValueError("requirements epoch must be a 64-character digest")
+    if any(character not in "0123456789abcdef" for character in requirements_epoch):
+        raise ValueError("requirements epoch must be a lowercase hex digest")
+    return f"{DECOMPOSITION_GENERATOR_ROLE}:{requirements_epoch}"
+
+
+def decomposition_review_session_key(requirements_epoch: str, draft_digest: str) -> str:
+    """Return the one-shot review session identity for one draft.
+
+    Args:
+        requirements_epoch: The requirements epoch that fixes one tree.
+        draft_digest: The exact normalized draft digest under review.
+
+    Returns:
+        A stable session key bound to the exact draft digest.
+
+    Raises:
+        ValueError: If the epoch or digest is not a 64-character hex digest.
+
+    """
+    for value in (requirements_epoch, draft_digest):
+        if not isinstance(value, str) or len(value) != 64:
+            raise ValueError("decomposition session identity requires 64-character digests")
+        if any(character not in "0123456789abcdef" for character in value):
+            raise ValueError("decomposition session identity requires lowercase hex digests")
+    return f"{DECOMPOSITION_REVIEWER_ROLE}:{requirements_epoch}:{draft_digest}"
 
 
 class PlanReviewSessionError(RuntimeError):

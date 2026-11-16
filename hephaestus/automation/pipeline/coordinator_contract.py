@@ -293,6 +293,12 @@ if TYPE_CHECKING:
 
         def _record_terminal_result(self, item: ct.WorkItem) -> None: ...
 
+        def _admit_decomposition_children(self, item: ct.WorkItem) -> None:
+            pass
+
+        def _release_decomposition_dependents(self, item: ct.WorkItem, *, passed: bool) -> None:
+            pass
+
         def _claim_item(
             self, stage_name: ct.StageName, *, index: int = 0
         ) -> ct.WorkItem | None: ...

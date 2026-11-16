@@ -77,6 +77,41 @@ class PipelineGitHubMutations(PipelineGitHubMergeMutations):
             return
         close_issue_as_covered(issue_number, pr_number)
 
+    def create_issue(self, title: str, body: str, labels: list[str] | None = None) -> int:
+        """Create one issue in the scoped repository and return its number.
+
+        The decomposition child-creation job is the only caller. The body
+        starts with the deterministic host-owned recovery marker, so an
+        ambiguous create outcome is recoverable by exact marker match.
+
+        Args:
+            title: Complete issue title.
+            body: Complete issue body that starts with the recovery marker.
+            labels: Optional labels applied at creation.
+
+        Returns:
+            The new issue number.
+
+        Raises:
+            RuntimeError: If the accessor is not repo-scoped or the creation
+                output carries no parsable issue number.
+
+        """
+        if self._repo_slug is None:
+            raise RuntimeError("create issue requires a repo-scoped PipelineGitHub accessor")
+        if self._skip(f"create issue {title!r}"):
+            return 0
+        cmd = ["issue", "create", "--title", title, "--body", body]
+        for label in labels or ():
+            cmd.extend(["--label", label])
+        result = self._gh(cmd)
+        from hephaestus.automation.github_api.issues import _parse_issue_number
+
+        number = _parse_issue_number(result.stdout)
+        if number is None:
+            raise RuntimeError("issue creation returned no parsable issue number")
+        return number
+
     def create_pr(
         self,
         issue_number: int,

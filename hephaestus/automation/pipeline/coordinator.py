@@ -10,6 +10,7 @@ from collections.abc import Callable
 from dataclasses import replace
 from functools import partial
 from pathlib import Path
+from typing import Any
 
 import hephaestus.automation.pipeline.coordinator_types as ct
 import hephaestus.automation.pipeline.seeding as _seeding
@@ -39,6 +40,7 @@ from hephaestus.automation.pipeline.work_item import (
 )
 
 from .athena_skill_jobs import AthenaSkillExecutor
+from .coordinator_decomposition import DecompositionCoordinator
 from .coordinator_dispatch import ImplementationDispatcher
 from .coordinator_execution import ExecutionCoordinator
 from .coordinator_issue_classification import IssueClassificationCoordinator
@@ -78,6 +80,7 @@ class Coordinator(
     ImplementationDispatcher,
     ExecutionCoordinator,
     LearningRecoveryCoordinator,
+    DecompositionCoordinator,
 ):
     """Assemble the coordinator's type, runtime, source, and dispatch seams."""
 
@@ -357,6 +360,13 @@ class Coordinator(
         self._seen_item_ids: set[int] = set()
         self._manual_rebase_selected: set[tuple[str, str, int]] = set()
         self._plan_updates_selected: set[tuple[str, int]] = set()
+        # Coordinator-owned decomposition admission state (issue #2982). The
+        # same-run generated-identity set is shared through every stage
+        # context; the graph/done/queued maps own topological admission.
+        self._generated_issue_ids: set[int] = set()
+        self._decomposition_graph: dict[tuple[str, int], dict[int, dict[str, Any]]] = {}
+        self._decomposition_done: dict[tuple[str, int], set[int]] = {}
+        self._decomposition_queued: set[tuple[str, int]] = set()  # (repo, child issue)
         # A context contains a GitHub accessor and path configuration but no
         # mutable item state.  At most C items can be live, so an LRU of C is
         # enough for concurrent work and prevents all-org discovery from

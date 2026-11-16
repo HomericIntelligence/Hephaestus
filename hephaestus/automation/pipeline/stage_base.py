@@ -202,6 +202,12 @@ class StageContext:
     # ``PipelineConfig.reset_plan_review_sessions`` frozenset so stages can
     # consume entries without mutating caller-owned configuration (POLA).
     plan_review_session_resets: set[int] = field(default_factory=set)
+    # Coordinator-owned set of issue identities generated in the current run
+    # (issue #2982). The coordinator shares one set object through every
+    # StageContext of one process run and resets it when the process starts.
+    # It is only a same-run recursion guard; durable GitHub records remain
+    # the restart authority.
+    generated_issue_ids: set[int] = field(default_factory=set)
     # A worktree-holder result is only a diagnostic fact from Git.  The
     # coordinator proves that it belongs to a live pipeline sibling before
     # implementation can treat a collision as redundant work.  Leaving this
