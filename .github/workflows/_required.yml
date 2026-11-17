@@ -899,10 +899,20 @@ jobs:
           hephaestus-ci:local uv run bandit -c pyproject.toml -r hephaestus scripts
           --severity-level medium
 
+      - name: Run bandit LOW-severity baseline check (in container)
+        id: bandit-low
+        run: |
+          mkdir -p build
+          podman run --rm --tmpfs /tmp:rw,size=4g,mode=1777 -v "$PWD:/workspace:Z" --userns=keep-id:uid=1000,gid=1000 hephaestus-ci:local bash -c '
+            uv run bandit -c pyproject.toml -r hephaestus scripts --severity-level low --exit-zero -f json -o /workspace/build/bandit_low.json
+            uv run python /workspace/hephaestus/ci/bandit_baseline_check.py /workspace/build/bandit_low.json /workspace/hephaestus/ci/bandit_low_baseline.json
+          '
+
       - name: Post bandit summary
         if: always()
         env:
           BANDIT_OUTCOME: ${{ steps.bandit.outcome }}
+          BANDIT_LOW_OUTCOME: ${{ steps.bandit-low.outcome }}
         run: |
           {
             echo "## Bandit Static Application Security Testing"
@@ -911,6 +921,11 @@ jobs:
               echo "No security issues found."
             else
               echo "Security issues detected — see job logs for details."
+            fi
+            if [ "$BANDIT_LOW_OUTCOME" = "success" ]; then
+              echo "Bandit LOW-severity findings match the reviewed baseline."
+            else
+              echo "Bandit LOW-severity findings differ from the reviewed baseline — see job logs."
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 

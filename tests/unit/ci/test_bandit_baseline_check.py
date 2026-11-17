@@ -8,8 +8,10 @@ from pathlib import Path
 import pytest
 
 from hephaestus.ci.bandit_baseline_check import (
+    count_by_file_test_id,
     count_by_test_id,
     diff_against_baseline,
+    diff_files_against_baseline,
     main,
 )
 from hephaestus.cli.localization import using_localizer
@@ -306,9 +308,9 @@ def test_update_baseline_writes_canonical_counts(tmp_path: Path) -> None:
             {
                 "errors": [],
                 "results": [
-                    {"test_id": "B607", "issue_severity": "LOW"},
-                    {"test_id": "B311", "issue_severity": "LOW"},
-                    {"test_id": "B607", "issue_severity": "LOW"},
+                    {"test_id": "B607", "issue_severity": "LOW", "filename": "hephaestus/a.py"},
+                    {"test_id": "B311", "issue_severity": "LOW", "filename": "hephaestus/b.py"},
+                    {"test_id": "B607", "issue_severity": "LOW", "filename": "hephaestus/a.py"},
                 ],
             }
         ),
@@ -331,6 +333,7 @@ def test_update_baseline_writes_canonical_counts(tmp_path: Path) -> None:
         "generated_by": "issue #2384",
         "severity": "LOW",
         "counts": {"B311": 1, "B607": 2},
+        "files": {"hephaestus/a.py::B607": 2, "hephaestus/b.py::B311": 1},
     }
     assert main([str(report_path), str(baseline_path)]) == 0
 
@@ -368,3 +371,190 @@ def test_update_baseline_rejects_report_errors_without_rewriting(
     )
     assert baseline_path.read_text(encoding="utf-8") == original_baseline
     assert "Bandit report contains scan errors" in capsys.readouterr().err
+
+
+def test_count_by_file_test_id_tallies_per_file() -> None:
+    """Per-file LOW counts are keyed by ``filename::test_id``."""
+    report = {
+        "errors": [],
+        "results": [
+            {"test_id": "B607", "issue_severity": "LOW", "filename": "hephaestus/a.py"},
+            {"test_id": "B607", "issue_severity": "LOW", "filename": "hephaestus/a.py"},
+            {"test_id": "B607", "issue_severity": "LOW", "filename": "hephaestus/b.py"},
+            {"test_id": "B311", "issue_severity": "LOW", "filename": "hephaestus/b.py"},
+            {"test_id": "B607", "issue_severity": "HIGH", "filename": "hephaestus/a.py"},
+        ],
+    }
+    assert count_by_file_test_id(report) == {
+        "hephaestus/a.py::B607": 2,
+        "hephaestus/b.py::B607": 1,
+        "hephaestus/b.py::B311": 1,
+    }
+
+
+@pytest.mark.parametrize(
+    "filename",
+    [None, "", "   ", 42, {"a": "b"}],
+    ids=["missing", "empty", "whitespace", "int", "dict"],
+)
+def test_count_by_file_test_id_rejects_invalid_filename(filename: object) -> None:
+    """Per-file counting rejects missing or invalid filenames."""
+    report = {
+        "errors": [],
+        "results": [
+            {
+                "test_id": "B607",
+                "issue_severity": "LOW",
+                **({} if filename is None else {"filename": filename}),
+            }
+        ],
+    }
+    with pytest.raises(ValueError, match="invalid filename"):
+        count_by_file_test_id(report)
+
+
+@pytest.mark.parametrize(
+    ("current", "baseline", "expected"),
+    [
+        pytest.param(
+            {"hephaestus/a.py::B607": 1}, {"hephaestus/a.py::B607": 1}, [], id="unchanged"
+        ),
+        pytest.param(
+            {"hephaestus/a.py::B607": 2},
+            {"hephaestus/a.py::B607": 1},
+            ["REGRESSION: hephaestus/a.py::B607 count increased (1 -> 2)"],
+            id="increased-count",
+        ),
+        pytest.param(
+            {"hephaestus/b.py::B999": 1},
+            {"hephaestus/a.py::B999": 1},
+            [
+                "STALE BASELINE: hephaestus/a.py::B999 is no longer observed (1 -> 0)",
+                "REGRESSION: hephaestus/b.py::B999 is new (0 -> 1)",
+            ],
+            id="per-file-offset-cannot-cancel-across-files",
+        ),
+        pytest.param(
+            {},
+            {"hephaestus/a.py::B607": 1},
+            ["STALE BASELINE: hephaestus/a.py::B607 is no longer observed (1 -> 0)"],
+            id="removed-finding",
+        ),
+    ],
+)
+def test_diff_files_against_baseline_classifies(
+    current: dict[str, int],
+    baseline: dict[str, int],
+    expected: list[str],
+) -> None:
+    """The per-file comparator classifies changes without cross-file cancellation."""
+    assert diff_files_against_baseline(current, baseline) == expected
+
+
+def test_main_uses_files_section_when_baseline_provides_it(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A files section in the baseline turns on per-file drift enforcement."""
+    report_path = tmp_path / "report.json"
+    baseline_path = tmp_path / "baseline.json"
+    report_path.write_text(
+        json.dumps(
+            {
+                "errors": [],
+                "results": [
+                    {"test_id": "B999", "issue_severity": "LOW", "filename": "hephaestus/x.py"}
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    baseline_path.write_text(
+        json.dumps(
+            {
+                "generated_by": "issue #3593",
+                "severity": "LOW",
+                "counts": {"B999": 1},
+                "files": {"hephaestus/y.py::B999": 1},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert main([str(report_path), str(baseline_path)]) == 1
+    output = capsys.readouterr().out
+    assert "REGRESSION: hephaestus/x.py::B999 is new" in output
+    assert "STALE BASELINE: hephaestus/y.py::B999 is no longer observed" in output
+
+
+def test_main_legacy_baseline_without_files_section_ignores_file_drift(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Totals-only baselines compare exactly as they did before per-file support."""
+    report_path = tmp_path / "report.json"
+    baseline_path = tmp_path / "baseline.json"
+    report_path.write_text(
+        json.dumps(
+            {
+                "errors": [],
+                "results": [
+                    {"test_id": "B999", "issue_severity": "LOW", "filename": "hephaestus/x.py"}
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    baseline_path.write_text(
+        json.dumps(
+            {
+                "generated_by": "issue #3593",
+                "severity": "LOW",
+                "counts": {"B999": 1},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert main([str(report_path), str(baseline_path)]) == 0
+    assert capsys.readouterr().out == ""
+
+
+def test_main_update_baseline_writes_files_section(
+    tmp_path: Path,
+) -> None:
+    """--update-baseline persists both the totals and the per-file section."""
+    report_path = tmp_path / "report.json"
+    baseline_path = tmp_path / "baseline.json"
+    report_path.write_text(
+        json.dumps(
+            {
+                "errors": [],
+                "results": [
+                    {"test_id": "B607", "issue_severity": "LOW", "filename": "hephaestus/a.py"},
+                    {"test_id": "B607", "issue_severity": "LOW", "filename": "hephaestus/a.py"},
+                    {"test_id": "B311", "issue_severity": "LOW", "filename": "hephaestus/b.py"},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert (
+        main(
+            [
+                str(report_path),
+                str(baseline_path),
+                "--update-baseline",
+                "--review-reference",
+                "#1",
+            ]
+        )
+        == 0
+    )
+    document = json.loads(baseline_path.read_text(encoding="utf-8"))
+    assert document["counts"] == {"B311": 1, "B607": 2}
+    assert document["files"] == {
+        "hephaestus/a.py::B607": 2,
+        "hephaestus/b.py::B311": 1,
+    }
