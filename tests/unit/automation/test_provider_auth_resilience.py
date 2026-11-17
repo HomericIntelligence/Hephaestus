@@ -9,33 +9,27 @@ from hephaestus.automation.pipeline.job_failures import durable_error_class
 from hephaestus.automation.pipeline.worker_pool import _agent_exception_result
 
 INVALID_KEY_EVENT = (
-    "opencode2_fatal_error_event: provider.auth: "
-    "invalid or missing API key: 78e2-expired"
+    "opencode2_fatal_error_event: provider.auth: invalid or missing API key: 78e2-expired"
 )
 
 
 def test_classify_invalid_or_missing_key() -> None:
     """The canonical r2/r3c signature maps to the named class."""
-    assert par.classify_agent_error(INVALID_KEY_EVENT) == (
-        par.PROVIDER_AUTH_INVALID_OR_MISSING_KEY
-    )
+    assert par.classify_agent_error(INVALID_KEY_EVENT) == (par.PROVIDER_AUTH_INVALID_OR_MISSING_KEY)
 
 
 @pytest.mark.parametrize(
     ("text", "expected"),
     [
-        ("agent_error: opencode2_fatal_error_event: provider.auth: token expired",
-         par.PROVIDER_AUTH_SESSION_EXPIRED),
-        ("provider.auth: token expiry noticed by gateway",
-         par.PROVIDER_AUTH_SESSION_EXPIRED),
-        ("provider.auth: rate limit exceeded",
-         par.PROVIDER_AUTH_RATE_OR_QUOTA),
-        ("provider.auth: quota exhausted",
-         par.PROVIDER_AUTH_RATE_OR_QUOTA),
-        ("provider.auth: some other auth condition",
-         par.PROVIDER_AUTH_OTHER),
-        ("PROVIDER.AUTH: INVALID OR MISSING API KEY",
-         par.PROVIDER_AUTH_INVALID_OR_MISSING_KEY),
+        (
+            "agent_error: opencode2_fatal_error_event: provider.auth: token expired",
+            par.PROVIDER_AUTH_SESSION_EXPIRED,
+        ),
+        ("provider.auth: token expiry noticed by gateway", par.PROVIDER_AUTH_SESSION_EXPIRED),
+        ("provider.auth: rate limit exceeded", par.PROVIDER_AUTH_RATE_OR_QUOTA),
+        ("provider.auth: quota exhausted", par.PROVIDER_AUTH_RATE_OR_QUOTA),
+        ("provider.auth: some other auth condition", par.PROVIDER_AUTH_OTHER),
+        ("PROVIDER.AUTH: INVALID OR MISSING API KEY", par.PROVIDER_AUTH_INVALID_OR_MISSING_KEY),
         ("agent_error: codex_tool_or_provider_failure: exit rc=1", None),
         ("agent_error: timeout: read timed out", None),
         ("", None),
