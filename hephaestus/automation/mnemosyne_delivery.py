@@ -10,8 +10,8 @@ from pathlib import Path
 from typing import Protocol
 from urllib.parse import urlparse
 
-from hephaestus.automation.remote_git import TrustedRemoteGit
 from hephaestus.config.child_environments import build_git_signing_env
+from hephaestus.github.remote_git import TrustedRemoteGit
 from hephaestus.utils.helpers import NETWORK_TIMEOUT, run_subprocess
 
 

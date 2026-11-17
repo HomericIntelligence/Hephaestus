@@ -80,5 +80,6 @@ confirm all three.
 | [0064](0064-documentation-path-reference-maintenance.md) | Living documents follow the paths they name | Proposed |
 | [0065](0065-fleet-git-are-library-members.md) | hephaestus.fleet and hephaestus.git are library members | Accepted |
 | [0066](0066-duplicate-plan-consolidation.md) | Operator-authorized consolidation of duplicate canonical plan records | Proposed |
+| [0067](0067-pr-bound-repair-publication.md) | PR-bound repair publication uses receipts, namespaces, and exact leases | Accepted |
 | [0068](0068-plan-decomposition.md) | Plan decomposition into single-PR epics | Proposed |
 | [0069](0069-ephemeral-launch-intake.md) | The repository intake is one ephemeral worktree per launch | Proposed |

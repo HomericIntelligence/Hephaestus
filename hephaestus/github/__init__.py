@@ -4,8 +4,14 @@ Provides utilities for working with GitHub repositories, PRs, and automation.
 
 The ``gh`` CLI adapter (``gh_call``, the rate-limit utilities, and the
 exception hierarchy) moved to :mod:`hephaestus.git.gh`; see its module
-docstring for the public adapter contract. The interactive ``gh tidy``
-Popen bypass stays with ``tidy`` in this package until W4.
+docstring for the public adapter contract. ``gh_call`` dispatches through the
+literal ``gh`` on ``PATH`` by default. An ``executable`` override must be an
+absolute path and is caller-trusted: the caller must obtain it from
+``hephaestus.github.remote_git.trusted_gh_executable`` or an equivalent
+host-owned resolver. ``gh_call`` rejects any other relative value before
+throttle or circuit-breaker work and does not authorize an arbitrary
+executable itself. The interactive ``gh tidy`` Popen bypass stays with
+``tidy`` in this package until W4.
 
 Run ``hephaestus-fleet-sync`` and ``hephaestus-tidy`` as console scripts.
 Their CLI entry points are not exported here.

@@ -23,10 +23,9 @@ def _adr_files() -> dict[int, Path]:
     return files
 
 
-# A number stays reserved while the PR that claims it is still open. ADR-0067
-# is the pr-bound-repair-publication record on PR #3636; this branch allocates
-# ADR-0068 so both changes can land without a number race.
-_RESERVED_NUMBERS = {67}
+# ADR-0067 is the pr-bound-repair-publication record on PR #3636. The file
+# ships on this branch, so the number is allocated and no gap is reserved.
+_RESERVED_NUMBERS: set[int] = set()
 
 
 def test_adr_numbers_are_contiguous_and_unique() -> None:

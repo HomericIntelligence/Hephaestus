@@ -323,9 +323,9 @@ def test_default_remote_delivery_uses_trusted_transport(tmp_path: Path, existing
     prefix = ("-c", "credential.helper=trusted")
     with (
         patch.dict("os.environ", {"GH_TOKEN": "synthetic-token"}, clear=True),
-        patch("hephaestus.automation.remote_git.trusted_gh_executable", return_value="/trusted/gh"),
-        patch("hephaestus.automation.remote_git.trusted_gh_authenticated", return_value=True),
-        patch("hephaestus.automation.remote_git.trusted_remote_git_config", return_value=prefix),
+        patch("hephaestus.github.remote_git.trusted_gh_executable", return_value="/trusted/gh"),
+        patch("hephaestus.github.remote_git.trusted_gh_authenticated", return_value=True),
+        patch("hephaestus.github.remote_git.trusted_remote_git_config", return_value=prefix),
         patch("hephaestus.utils.helpers.run_subprocess", return_value=_completed()) as run,
     ):
         service.deliver(request)

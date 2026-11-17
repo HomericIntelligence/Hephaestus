@@ -14,11 +14,6 @@ from packaging.utils import canonicalize_name
 from packaging.version import InvalidVersion, Version
 
 from hephaestus.automation.athena_contract import AthenaContractReceipt
-from hephaestus.automation.remote_git import (
-    trusted_gh_authenticated,
-    trusted_gh_executable,
-    trusted_remote_git_config,
-)
 from hephaestus.config.child_environments import build_git_child_env, build_remote_git_env
 from hephaestus.github.mnemosyne_repo import (
     UPSTREAM_OWNER,
@@ -27,6 +22,11 @@ from hephaestus.github.mnemosyne_repo import (
     MnemosyneTarget,
     MnemosyneTrustBasis,
     resolve_mnemosyne_target,
+)
+from hephaestus.github.remote_git import (
+    trusted_gh_authenticated,
+    trusted_gh_executable,
+    trusted_remote_git_config,
 )
 from hephaestus.utils.git import _is_full_commit_sha
 from hephaestus.utils.helpers import NETWORK_TIMEOUT, run_subprocess
