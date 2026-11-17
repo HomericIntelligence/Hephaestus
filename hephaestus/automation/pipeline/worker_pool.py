@@ -3916,6 +3916,10 @@ def _dirty_direct_failure_result(
         isinstance(exc, SourceWorkspacePreparationError)
         and exc.cause is SourceWorkspacePreparationCause.GIT_TIMEOUT
     ):
+        logger.warning(
+            "dirty direct continuation was not claimed: operation deadline hit "
+            "before the claim could complete",
+        )
         return JobResult(ok=False, error="timeout", value=timeout_value)
     logger.warning("dirty direct continuation was not claimed: %s", exc, exc_info=True)
     return JobResult(
@@ -10952,7 +10956,17 @@ class WorkerPool:
         if original is None:
             path = manager.path_for(issue, SourceLane.IMPLEMENTATION)
             if path.exists() or path.is_symlink():
-                raise SourceWorkspaceError("dirty direct writer owner is unavailable")
+                # An unowned path cannot bind to any future run (the nonce
+                # rule), and the receipt-less claim would fail closed on
+                # every relaunch (#3649). Quarantine it aside so the bytes
+                # stay recoverable and a fresh lane forms.
+                quarantine = path.parent / (f"{path.name}.quarantine-{uuid.uuid4().hex[:12]}")
+                path.rename(quarantine)
+                logger.warning(
+                    "dirty direct lane path for #%s has no receipt; quarantined the orphan to %s",
+                    issue,
+                    quarantine,
+                )
             return JobResult(ok=True, value={"dirty_direct_not_applicable": True})
         manager._reject_foreign_owner(original, issue, SourceLane.IMPLEMENTATION)
         if original.schema_version != 1:

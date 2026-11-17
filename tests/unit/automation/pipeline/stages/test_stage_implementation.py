@@ -5940,6 +5940,55 @@ class TestDirectPublicationRace:
 
         assert outcome == StageOutcome(Disposition.FINISH_FAIL, "dirty_direct_claim_failed")
 
+    def test_dirty_direct_claim_timeout_is_retried_not_terminal(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A timed-out claim re-requests the probe instead of failing (#3649).
+
+        The claim holds writer locks and reads remote evidence; contention
+        can push it past its deadline without any permanent state change.
+        The stage stores the error class, routes back to WORKTREE_WAIT, and
+        the submit path re-arms the claim.
+        """
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, state="WORKTREE_WAIT")
+        item.branch = "1-auto-impl"
+        item.payload["_direct_scope_base_sha"] = "b" * 40
+        item.payload["implementation_started"] = True
+        item.payload["dirty_direct_claim_inflight"] = True
+
+        stage.on_job_done(item, JobResult(ok=False, error="timeout"), ctx)
+        item.state = "DIRTY_DIRECT_CLAIM_WAIT"
+
+        result = stage.step(item, ctx)
+
+        assert result == Continue(next_state="WORKTREE_WAIT")
+        assert item.payload["_dirty_direct_claim_timeouts"] == 1
+        assert "dirty_direct_claim_inflight" not in item.payload
+
+    def test_dirty_direct_claim_timeout_retries_are_bounded(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Repeated claim timeouts finish with the real cause, not a loop."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, state="WORKTREE_WAIT")
+        item.branch = "1-auto-impl"
+        item.payload["_direct_scope_base_sha"] = "b" * 40
+        item.payload["implementation_started"] = True
+        item.payload["dirty_direct_claim_inflight"] = True
+        item.payload["_dirty_direct_claim_timeouts"] = (
+            ImplementationStage._DIRTY_CLAIM_TIMEOUT_RETRIES
+        )
+
+        stage.on_job_done(item, JobResult(ok=False, error="timeout"), ctx)
+        item.state = "DIRTY_DIRECT_CLAIM_WAIT"
+
+        outcome = stage.step(item, ctx)
+
+        assert outcome == StageOutcome(Disposition.FINISH_FAIL, "dirty_direct_claim_timeout")
+
 
 class TestFullWalks:
     """Full pool-driven walks of the whole stage (canonical FakeWorkerPool)."""

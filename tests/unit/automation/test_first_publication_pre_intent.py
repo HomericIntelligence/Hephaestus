@@ -109,3 +109,54 @@ def test_discovery_requires_matching_start_without_publication_intent(
     finally:
         if pool is not None:
             pool.shutdown()
+
+
+def test_pre_intent_recovery_clears_a_stale_resume_state_and_proceeds() -> None:
+    """A non-rebase resume state recovers instead of blocking forever (#3649).
+
+    A pre-PR item interrupted mid-implementation saves a resume state such
+    as IMPLEMENT_WAIT. The nonce rule makes that lane unresumable by any
+    future run, so retaining the stale state would block the item on every
+    relaunch. The route clears the stale key, binds the cleared context,
+    and proceeds through discovery to a fresh decision.
+    """
+    from hephaestus.automation.pipeline.stages.implementation.implementation import (
+        _PUBLICATION_REBASE_RESUME,
+        ImplementationStage,
+    )
+    from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
+
+    stage = ImplementationStage()
+    item = WorkItem(repo="project", kind=ItemKind.ISSUE, issue=12, state="GATE")
+    item.payload["first_publication_resume_state"] = "IMPLEMENT_WAIT"
+    value = {"first_publication_pre_intent": True, "first_publication_rebase_candidate": None}
+
+    retained = stage._retain_pre_intent_route(item, value, None)
+
+    assert retained is True
+    assert "first_publication_resume_state" not in item.payload
+    assert "first_publication_discovery_failed" not in item.payload
+    assert item.payload[_PUBLICATION_REBASE_RESUME] == {
+        "publication_resume_state": None,
+        "publication_manual_rebase": False,
+    }
+
+
+def test_pre_intent_route_still_rejects_an_invalid_handoff() -> None:
+    """An invalid pending rebase handoff keeps its fail-closed contract."""
+    import pytest
+
+    from hephaestus.automation.pipeline.stages.implementation.implementation import (
+        ImplementationStage,
+    )
+    from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
+
+    stage = ImplementationStage()
+    item = WorkItem(repo="project", kind=ItemKind.ISSUE, issue=12, state="GATE")
+    value = {
+        "first_publication_pre_intent": True,
+        "first_publication_rebase_candidate": "not-a-hash",
+    }
+
+    with pytest.raises(ValueError, match="pending rebase handoff is invalid"):
+        stage._retain_pre_intent_route(item, value, None)

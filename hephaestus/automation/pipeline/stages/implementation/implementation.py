@@ -1167,6 +1167,10 @@ def build_test_fix_prompt(issue_number: int, prev_iteration: int, test_output: s
 class ImplementationStage(Stage):
     """Stage: gate plan GO, worktree, advise, implement, test, commit, PR."""
 
+    #: Bounded retries for a dirty-direct claim that hits its deadline before
+    #: any state changed; contention only (P038).
+    _DIRTY_CLAIM_TIMEOUT_RETRIES = 2
+
     def on_enter(self, item: WorkItem, ctx: StageContext) -> StageOutcome | None:
         """Proceed with no durable writes; all entry checks live in GATE.
 
@@ -1375,6 +1379,50 @@ class ImplementationStage(Stage):
         _consume_plan_scope(item)
         return JobRequest(worktree_job, on_done_state=DIRTY_DECISION_WAIT)
 
+    def _dirty_direct_claim_timeout_outcome(
+        self, item: WorkItem, result: object
+    ) -> StepResult | None:
+        """Retry a deadline-hit claim within a bounded budget, or fail with the cause.
+
+        The claim holds writer locks and reads remote evidence, so
+        contention can push it past its deadline without any permanent
+        state change (#3649). A repeat timeout fails with the real cause
+        instead of a silent loop.
+        """
+        if not (
+            isinstance(result, dict)
+            and result.get("ok") is not True
+            and result.get("error") == "timeout"
+        ):
+            return None
+        timeouts = int(item.payload.get("_dirty_direct_claim_timeouts", 0)) + 1
+        if timeouts <= ImplementationStage._DIRTY_CLAIM_TIMEOUT_RETRIES:
+            item.payload["_dirty_direct_claim_timeouts"] = timeouts
+            logger.warning(
+                "implementation:%s: dirty direct claim timed out; retry %d/%d",
+                item.issue,
+                timeouts,
+                ImplementationStage._DIRTY_CLAIM_TIMEOUT_RETRIES,
+            )
+            return Continue(next_state=WORKTREE_WAIT)
+        return StageOutcome(Disposition.FINISH_FAIL, "dirty_direct_claim_timeout")
+
+    @staticmethod
+    def _adopt_claimed_lane_path(
+        item: WorkItem, result: dict[str, Any], manager: SourceWorkspaceManager
+    ) -> None:
+        """Adopt a preserved orphan lane path the claim verified for reuse."""
+        value = result.get("value")
+        if not (isinstance(value, dict) and item.issue is not None):
+            return
+        path = manager.path_for(item.issue, SourceLane.IMPLEMENTATION)
+        if (
+            value.get("preserved_worktree") == str(path)
+            and manager.repository == item.repo
+            and (path.exists() or path.is_symlink())
+        ):
+            item.worktree = str(path)
+
     def _dirty_direct_claim_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """Route a fresh claim to exactly one implementation turn."""
         result = item.payload.pop("dirty_direct_claim_result", None)
@@ -1382,16 +1430,10 @@ class ImplementationStage(Stage):
         if callable(manager):
             manager = manager()
             ctx.paths.source_workspaces = manager
+        if timeout_outcome := self._dirty_direct_claim_timeout_outcome(item, result):
+            return timeout_outcome
         if isinstance(result, dict) and isinstance(manager, SourceWorkspaceManager):
-            value = result.get("value")
-            if isinstance(value, dict) and item.issue is not None:
-                path = manager.path_for(item.issue, SourceLane.IMPLEMENTATION)
-                if (
-                    value.get("preserved_worktree") == str(path)
-                    and manager.repository == item.repo
-                    and (path.exists() or path.is_symlink())
-                ):
-                    item.worktree = str(path)
+            ImplementationStage._adopt_claimed_lane_path(item, result, manager)
         if not isinstance(result, dict) or result.get("ok") is not True:
             return StageOutcome(Disposition.FINISH_FAIL, "dirty_direct_claim_failed")
         value = result.get("value")
@@ -1939,10 +1981,23 @@ class ImplementationStage(Stage):
             not context["publication_manual_rebase"]
             and context["publication_resume_state"] not in _REBASE_RESUME_STATES
         ):
-            item.payload[_PUBLICATION_DISCOVERY_FAILED] = (
-                "first_publication_pre_intent_recovery_required"
+            # A non-rebase resume state means the item was interrupted
+            # mid-implementation before first publication. The nonce rule
+            # makes that lane unresumable by any future run, so retaining
+            # the stale key would block the item identically on every
+            # relaunch (#3649). Clear it, bind the cleared context, and let
+            # discovery take a fresh decision; the old lane bytes stay in
+            # place for operator adoption.
+            logger.warning(
+                "implementation:%s: first-publication resume state %r is not a "
+                "rebase state and no manual rebase owner exists; clearing the "
+                "stale nonce-bound resume state for a fresh discovery decision",
+                item.issue,
+                context["publication_resume_state"],
             )
-            return False
+            item.payload.pop("first_publication_resume_state", None)
+            item.payload.pop("manual_rebase_required", None)
+            context = ImplementationStage._publication_resume_context(item)
         item.payload[_PUBLICATION_REBASE_RESUME] = context
         return True
 
@@ -3206,7 +3261,11 @@ class ImplementationStage(Stage):
             item.payload[_DIRTY_FINALIZATION_RESULT] = result
             return
         if item.payload.pop("dirty_direct_claim_inflight", False):
-            item.payload["dirty_direct_claim_result"] = {"ok": result.ok, "value": result.value}
+            item.payload["dirty_direct_claim_result"] = {
+                "ok": result.ok,
+                "value": result.value,
+                "error": result.error,
+            }
             return
         if item.state == COMMIT_PUSH_WAIT and item.payload.get("dirty_direct_active"):
             item.payload["dirty_direct_publication_result"] = {

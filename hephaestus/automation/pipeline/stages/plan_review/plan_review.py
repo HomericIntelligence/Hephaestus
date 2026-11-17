@@ -86,6 +86,10 @@ from hephaestus.automation.comment_identity import (
     CommentAliasConflictError,
 )
 from hephaestus.automation.current_plan import read_current_plan
+from hephaestus.automation.pipeline.job_failures import (
+    agent_failure_diagnostic,
+    agent_failure_reason,
+)
 from hephaestus.automation.plan_decomposition import (
     WorkUnit,
     normalize_work_tree,
@@ -615,31 +619,12 @@ def _decomposition_retry(
 
 def _safe_agent_failure_diagnostic(stderr_tail: str) -> str | None:
     """Classify agent stderr for logs without exposing subprocess output."""
-    text = stderr_tail.strip().casefold()
-    if not text:
-        return None
-    if "stream disconnected" in text or "error sending request" in text:
-        return "backend response stream disconnected"
-    if "rate limit" in text or "usage cap" in text or "429" in text:
-        return "provider rate limit"
-    if "connection" in text or "network" in text or "timed out" in text:
-        return "transient transport failure"
-    return "agent subprocess reported diagnostic output"
+    return agent_failure_diagnostic(stderr_tail)
 
 
 def _safe_agent_failure_reason(error: str | None) -> str:
     """Render an agent failure reason for logs without exposing error text."""
-    if error == "timeout":
-        return "agent timed out"
-    if error == "circuit_open":
-        return "agent circuit is open"
-    if error == "interrupted_before_start":
-        return "agent job was interrupted before start"
-    if error is not None and error.startswith("rc="):
-        returncode = error.removeprefix("rc=")
-        if returncode.lstrip("-").isdigit() and returncode != "":
-            return f"exit code {returncode}"
-    return "agent job failed"
+    return agent_failure_reason(error)
 
 
 def parse_plan_review_verdict(text: str) -> ReviewVerdict:

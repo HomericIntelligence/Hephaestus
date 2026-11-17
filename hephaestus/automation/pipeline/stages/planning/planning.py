@@ -59,6 +59,7 @@ from hephaestus.automation.issue_waves import (
     WaveNonCodeIntent,
     non_code_intent_skip_is_applied,
 )
+from hephaestus.automation.pipeline.job_failures import agent_failure_diagnostic
 from hephaestus.automation.pipeline.summary import record_summary_action
 from hephaestus.automation.prompts._shared import fence_content
 from hephaestus.automation.prompts.planning import get_plan_prompt
@@ -1862,7 +1863,16 @@ class PlanningStage(Stage):
             return
 
         if not result.ok:
-            logger.warning("planning:%s: job failed: %s", item.issue, result.error)
+            diagnostic = agent_failure_diagnostic(result.stderr_tail)
+            if diagnostic:
+                logger.warning(
+                    "planning:%s: job failed: %s; diagnostic: %s",
+                    item.issue,
+                    result.error,
+                    diagnostic,
+                )
+            else:
+                logger.warning("planning:%s: job failed: %s", item.issue, result.error)
             return
 
         if result.value is not None:
