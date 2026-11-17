@@ -209,6 +209,10 @@ from hephaestus.automation.pipeline.tool_scopes import (
 from hephaestus.automation.pipeline_github_review_validation import validation_plan_for_workspace
 from hephaestus.automation.podman_machine_supervisor import validate_podman_machine_name
 from hephaestus.automation.prompts._review_rubric import plugin_skills_context
+from hephaestus.automation.provider_auth_resilience import (
+    is_provider_auth_error,
+    provider_auth_error_message,
+)
 from hephaestus.automation.pyxis_artifact_io import (
     CrossNodePathBinding,
     bind_cross_node_root,
@@ -1033,6 +1037,12 @@ _LINUX_RESOURCE_LIMIT_BOOTSTRAP = (
 def _agent_exception_result(exc: Exception) -> JobResult:
     """Map provider-declared and unexpected agent exceptions to job results."""
     if isinstance(exc, AgentExecutionError):
+        detail = str(exc)
+        if is_provider_auth_error(detail):
+            return JobResult(
+                ok=False,
+                error=provider_auth_error_message(detail),
+            )
         return JobResult(
             ok=False,
             error=f"agent_error: {exc!s}"[:_ERR_MAX],
