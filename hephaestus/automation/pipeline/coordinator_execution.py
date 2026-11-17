@@ -186,7 +186,7 @@ class ExecutionCoordinator(_CoordinatorHost):
         """
         spends_github_budget = isinstance(request.job, (AgentJob, GitHubJob))
         if spends_github_budget and self.config.rate_guard_enabled:
-            item.payload["_pending_agent_request"] = request
+            item.payload["_pending_admission_request"] = request
             quota_job = GitHubJob(
                 repo=item.repo,
                 repo_root=Path(self._ctx_for(item).paths.repo_root),
@@ -267,13 +267,13 @@ class ExecutionCoordinator(_CoordinatorHost):
 
     def _complete_rate_budget(self, item: ct.WorkItem, result: JobResult) -> None:
         """Apply returned quota facts without another coordinator-side read."""
-        request = item.payload.pop("_pending_agent_request", None)
+        request = item.payload.pop("_pending_admission_request", None)
         if result.interrupted or self.shutdown.is_set() or self._pool_shut_down:
             self._park_resumable(item)
             return
         if (
             not isinstance(request, ct.JobRequest)
-            or not isinstance(request.job, AgentJob)
+            or not isinstance(request.job, (AgentJob, GitHubJob))
             or not result.ok
             or not isinstance(result.value, RateBudgetRead)
         ):
