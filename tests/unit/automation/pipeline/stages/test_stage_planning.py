@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 import subprocess
 from dataclasses import replace
@@ -3054,6 +3055,31 @@ class TestPlanningStageOnJobDone:
         stage.on_job_done(item, result, ctx)
 
         assert "plan_text" not in item.payload
+
+    def test_failed_agent_result_logs_a_classified_diagnostic(
+        self, make_ctx: Any, make_work_item: Any, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """An agent-job failure logs a classified diagnostic, not raw stderr (#3649).
+
+        A fast rc=1 from the agent CLI is undiagnosable from the exit code
+        alone. The stage log names the failure class (raw tails stay in the
+        redacted durable event log), mirroring the plan_review contract.
+        """
+        stage = PlanningStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=3, state="PLAN_WAIT")
+        result = JobResult(
+            ok=False,
+            error="rc=1",
+            stderr_tail="provider auth: invalid or missing API key",
+        )
+
+        with caplog.at_level(logging.WARNING):
+            stage.on_job_done(item, result, ctx)
+
+        assert "job failed: rc=1" in caplog.text
+        assert "agent subprocess reported diagnostic output" in caplog.text
+        assert "invalid or missing API key" not in caplog.text
 
 
 def test_planning_summary_retains_safe_athena_failure_class(

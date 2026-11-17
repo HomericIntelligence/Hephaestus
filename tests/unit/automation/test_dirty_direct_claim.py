@@ -1,5 +1,6 @@
 """Tests for durable one-use dirty writer claims."""
 
+import logging
 import threading
 import time
 from dataclasses import replace
@@ -1225,15 +1226,20 @@ def test_probe_claim_classifies_a_foreign_registered_writer_path_not_applicable(
 @pytest.mark.parametrize("orphan_path", ["extant", "absent"])
 def test_probe_claim_classifies_a_missing_receipt_without_claiming(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     orphan_path: str,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """A probe without a receipt classifies the lane and starts no claim.
 
     Covers the ``original is None`` arms of
-    ``WorkerPool._dirty_direct_probe_result`` (#3492). An existing lane path
-    with no receipt fails the claim closed and records the path it preserves;
-    an absent path is ``dirty_direct_not_applicable`` so preparation can create
-    a fresh writer.
+    ``WorkerPool._dirty_direct_probe_result`` (#3492, revised by #3649). An
+    extant lane path with no receipt is quarantined aside (bytes preserved)
+    so the never-resumable orphan cannot fail the claim closed on every
+    relaunch; an absent path is ``dirty_direct_not_applicable`` so
+    preparation can create a fresh writer. Either row answers
+    ``dirty_direct_not_applicable`` without contacting GitHub evidence or
+    arming a dirty claim.
 
     Does not duplicate ``test_probe_claim_marks_unusable_owned_lane_not_applicable``
     (a receipt whose path is missing) or ``test_post_timeout_probe_claim_adopts_the_published_lane``
@@ -1247,6 +1253,8 @@ def test_probe_claim_classifies_a_missing_receipt_without_claiming(
     from hephaestus.automation.pipeline.worker_pool import WorkerPool
 
     repo, _, _ = _repository(tmp_path, origin_repository="example/project")
+    _registered_git_fixture(repo, monkeypatch)
+    _source_registration_fixture(repo, monkeypatch)
     manager = SourceWorkspaceManager(repo, repository="project")
     lane_path = manager.path_for(12, SourceLane.IMPLEMENTATION)
     if orphan_path == "extant":
@@ -1268,15 +1276,16 @@ def test_probe_claim_classifies_a_missing_receipt_without_claiming(
             expected_repository="example/project",
             kwargs={"repo_root": str(repo), "issue_number": 12, "probe": True},
         )
-        result = pool._run_git(probe)
-        assert result.ok is (orphan_path == "absent"), result.error
-        if orphan_path == "absent":
-            assert result.value == {"dirty_direct_not_applicable": True}
-        else:
-            assert result.error == "dirty_direct_claim_failed"
-            assert result.value == {"preserved_worktree": str(lane_path)}
-            assert lane_path.exists()
-            assert (lane_path / "output.txt").read_text() == "orphaned\n"
+        with caplog.at_level(logging.WARNING):
+            result = pool._run_git(probe)
+        assert result.ok, result.error
+        assert result.value == {"dirty_direct_not_applicable": True}
+        if orphan_path == "extant":
+            assert not lane_path.exists()
+            quarantined = list(lane_path.parent.glob(f"{lane_path.name}.quarantine-*"))
+            assert len(quarantined) == 1
+            assert (quarantined[0] / "output.txt").read_text() == "orphaned\n"
+            assert "quarantine" in caplog.text
         assert runner.run.call_count == 0
         assert manager._read_receipt(12, SourceLane.IMPLEMENTATION) is None
     finally:
