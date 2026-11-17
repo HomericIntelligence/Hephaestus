@@ -89,7 +89,7 @@ def test_ready_completion_does_not_dispatch_after_fatal_pool_shutdown(
             5,
             workspace=WorkspaceBinding.external(tmp_path),
         )
-        item.payload["_pending_agent_request"] = JobRequest(pending, "NEXT")
+        item.payload["_pending_admission_request"] = JobRequest(pending, "NEXT")
         quota_request = ReadRateBudgetRequest(coordinator._monotonic() + 5)
         main.queue_result(JobResult(ok=True, value=RateBudgetRead(quota_request, 5000, 0)))
         coordinator._submit_ready_job(
