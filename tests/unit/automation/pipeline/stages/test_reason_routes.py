@@ -55,6 +55,7 @@ _EXPECTED_REASONS: dict[StageName, set[str]] = {
         "plan_not_go",
         "already_implementation_go_pr",
         "review_retained_after_rebase",
+        "stale_plan_recheck",
     },
     StageName.PR_REVIEW: {"agent_error", "empty_pr_diff", "implementation_remediation"},
     StageName.MERGE_WAIT: set(),

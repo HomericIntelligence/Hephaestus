@@ -11,10 +11,12 @@ from .plan_review.plan_review import (
     REVIEW_ERROR_RETRY_CAP,
     PlanReviewStage,
     build_amend_prompt,
+    build_feedback_integrate_prompt,
 )
 
 __all__ = [
     "REVIEW_ERROR_RETRY_CAP",
     "PlanReviewStage",
     "build_amend_prompt",
+    "build_feedback_integrate_prompt",
 ]

@@ -303,14 +303,11 @@ def test_direct_scope_prepares_real_intake_before_labels_and_preserves_caller_ch
     issue_item = next(item for item in coordinator.items if item.issue == 101)
     intake_root = coordinator.config.repo_roots["repo-a"]
     receipt = coordinator.config.repo_intake_receipts["repo-a"]
-    intake_head = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=intake_root,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
-    assert receipt["revision"] == intake_head == remote_head
+    # The launch-scoped intake is removed at run cleanup (#3631), so the
+    # prepared revision is read from the adopted receipt the coordinator
+    # verified, and the removal itself is asserted.
+    assert receipt["revision"] == remote_head
+    assert not Path(str(intake_root)).exists()
     assert issue_item.payload["_direct_scope_base_sha"] == remote_head
     assert coordinator.config.repo_caller_roots["repo-a"] == checkout
     assert coordinator.config.repo_state_roots["repo-a"] == Path(str(receipt["state_root"]))
@@ -474,10 +471,11 @@ def _intake_result(caller_root: Path, intake_root: Path) -> JobResult:
     return JobResult(
         ok=True,
         value={
-            "schema_version": 2,
+            "schema_version": 3,
             "repository": "org/repo-a",
             "repository_identity": "org/repo-a:identity",
             "ownership_key": "org/repo-a:identity:intake",
+            "launch_identity": "testlaunch",
             "common_dir": str(common_dir),
             "path": str(intake_root),
             "state_root": str(intake_root.parent),
