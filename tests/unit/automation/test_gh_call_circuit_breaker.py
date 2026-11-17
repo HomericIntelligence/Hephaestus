@@ -158,4 +158,5 @@ class TestGhCallCircuitBreaker:
             log_on_error=True,
             timeout=None,
             throttle=True,
+            executable="gh",
         )
