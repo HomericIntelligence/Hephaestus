@@ -495,6 +495,42 @@ class TestComposedPromptBuilders:
         assert "## Prior Learnings from Team Knowledge Base" in prompt
         assert prompt.endswith("Use the retry helper.")
 
+    def test_implementation_prompt_appends_plan_review_findings_block(self) -> None:
+        """Accepted-plan review findings are appended as a non-blocking block (#3643)."""
+        prompt = build_implementation_prompt(
+            42, plan_review_findings="- Medium: name the new invariant."
+        )
+
+        assert "## Findings from the accepted plan review" in prompt
+        assert "- Medium: name the new invariant." in prompt
+        # The findings are fenced untrusted input like every other block.
+        assert "BEGIN_" in prompt and "END_" in prompt
+
+    def test_implementation_prompt_without_review_findings_has_no_block(self) -> None:
+        """An empty findings key renders no review-findings block."""
+        prompt = build_implementation_prompt(42, branch_name="42-auto-impl")
+
+        assert "## Findings from the accepted plan review" not in prompt
+
+    def test_implementation_job_carries_review_findings_from_payload(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """The implement job prompt_kwargs include the accepted-review findings."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, state="IMPLEMENT_WAIT")
+        item.branch = "1-auto-impl"
+        item.payload["plan_review_findings"] = "- Medium: name the new invariant."
+
+        _prepared_writer(item)
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, JobRequest)
+        job = result.job
+        assert isinstance(job, AgentJob)
+        assert job.prompt_kwargs["plan_review_findings"] == "- Medium: name the new invariant."
+
     def test_ordinary_implementation_prompt_rejects_legacy_conflict_inputs(self) -> None:
         """Conflict context cannot use the ordinary implementation prompt."""
         with pytest.raises(TypeError):

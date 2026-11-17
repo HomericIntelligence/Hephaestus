@@ -122,6 +122,7 @@ from hephaestus.automation.test_summary import (
 )
 from hephaestus.automation.worktree_manager import ADOPTED_HEAD_FAILURES, BRANCH_WORKTREE_OWNED
 from hephaestus.prompts import PromptCatalog
+from hephaestus.prompts.fencing import fence_content
 from hephaestus.utils.git import _is_full_digest
 
 from ...admission import dependency_block_reason, parse_issue_dependencies
@@ -1081,6 +1082,7 @@ def build_implementation_prompt(
     advise_findings: str = "",
     scope_correction_paths: tuple[str, ...] = (),
     resume_context: str = "",
+    plan_review_findings: str = "",
 ) -> str:
     """Compose the implementation prompt with the advise-findings block.
 
@@ -1101,11 +1103,13 @@ def build_implementation_prompt(
             publication. An empty tuple means no correction directive.
         resume_context: Advisory checkpoint block for a retry after a
             timeout. An empty string means no block.
+        plan_review_findings: Accepted-plan review findings (GO verdict,
+            non-blocking). Empty string means no block.
 
     Returns:
         The full implementer prompt, with the findings block, the scope
-        correction directive, and the resume-context block appended when
-        each is present.
+        correction directive, the resume-context block, and the review
+        findings block appended when each is present.
 
     """
     prompt = get_implementation_prompt(
@@ -1124,6 +1128,13 @@ def build_implementation_prompt(
         prompt += get_scope_correction_directive(scope_correction_paths)
     if resume_context:
         prompt += resume_context
+    if plan_review_findings:
+        fenced = fence_content()
+        prompt += PromptCatalog.current().render(
+            "implementation/plan_review_findings_append.j2",
+            untrusted_notice=fenced.untrusted_notice,
+            plan_review_findings=fenced.fence("REVIEW_FINDINGS", plan_review_findings),
+        )
     return prompt
 
 
@@ -2753,6 +2764,7 @@ class ImplementationStage(Stage):
                 "advise_findings": item.payload.get("advise_findings", ""),
                 "scope_correction_paths": scope_correction_paths,
                 "resume_context": resume_context,
+                "plan_review_findings": item.payload.get("plan_review_findings", ""),
             },
             **_codex_isolation_job_kwargs(ctx),
             descr="implement",

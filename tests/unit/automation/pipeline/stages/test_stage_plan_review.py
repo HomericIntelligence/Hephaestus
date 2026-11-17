@@ -38,6 +38,7 @@ from hephaestus.automation.pipeline.stages.plan_review import (
     REVIEW_ERROR_RETRY_CAP,
     PlanReviewStage,
     build_amend_prompt,
+    build_feedback_integrate_prompt,
     plan_review,
 )
 from hephaestus.automation.plan_review_session import PlanReviewSessionStore
@@ -1020,6 +1021,181 @@ class TestPlanReviewStageStep:
         ]
         assert item.attempts["plan_review_iter"] == 1  # real verdict counted
         assert item.payload["review_round"] == 1
+
+    def test_eval_go_with_findings_routes_one_feedback_pass(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A GO review carrying non-blocking findings runs one final planner pass.
+
+        The reviewer accepted the plan and gave findings (comet#5394 shape:
+        "Verdict: GO (with the two medium changes above)"). The pass is
+        bounded: the guard key is set before the planner job is requested,
+        and the GO label is not written until the pass completes or is
+        skipped.
+        """
+        stage = PlanReviewStage()
+        github = FakeStageGitHub()
+        ctx = make_ctx(github=github, config_overrides={"enable_learn": False})
+        item = _review_item(make_work_item, github, issue=2, state="EVAL")
+        item.payload["review_verdict"] = ReviewVerdict(
+            grade=None,
+            verdict="GO",
+            raw="### Findings\n- Medium: name the new invariant.\n\nstate:plan-go",
+        )
+
+        result = stage.step(item, ctx)
+
+        assert result == Continue(next_state="FEEDBACK_WAIT")
+        assert item.payload["plan_feedback_integrated"] is True
+        assert "Medium: name the new invariant." in item.payload["plan_review_findings"]
+        # The review text is durable; the GO label waits for the pass.
+        assert github.mutation_log == [
+            ("gh_issue_upsert_comment", (2, PLAN_REVIEW_CANONICAL_MARKER)),
+        ]
+
+    def test_eval_go_without_findings_advances_directly(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A clean GO (no severity findings) skips the integration pass."""
+        stage = PlanReviewStage()
+        github = FakeStageGitHub()
+        ctx = make_ctx(github=github, config_overrides={"enable_learn": False})
+        item = _review_item(make_work_item, github, issue=2, state="EVAL")
+        item.payload["review_verdict"] = _verdict("GO")
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, StageOutcome)
+        assert result.disposition == Disposition.ADVANCE
+        assert "plan_feedback_integrated" not in item.payload
+        assert "plan_review_findings" not in item.payload
+
+    def test_feedback_wait_submits_the_integrate_job(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """FEEDBACK_WAIT submits one bounded planner integration job."""
+        stage = PlanReviewStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=10, state="FEEDBACK_WAIT")
+        item.session_ids["planner"] = "planner-session-id"
+        item.payload["issue_title"] = "Retry failure"
+        item.payload["issue_body"] = "The loop retries forever."
+        item.payload["advise_findings"] = "Use the retry helper."
+        item.payload["plan_review_findings"] = "Medium: name the new invariant."
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, JobRequest)
+        assert isinstance(result.job, AgentJob)  # narrow the job union
+        assert result.on_done_state == "EVAL"  # the GO completion path re-evaluates
+        assert result.job.descr == "feedback-integrate"
+        assert result.job.resume_session_id == "planner-session-id"
+        assert result.job.prompt_builder is build_feedback_integrate_prompt
+        assert result.job.prompt_kwargs == {
+            "issue_number": 10,
+            "issue_title": "Retry failure",
+            "issue_body": "The loop retries forever.",
+            "advise_findings": "Use the retry helper.",
+            "prior_review": "Medium: name the new invariant.",
+            "plan_history": "",
+        }
+
+    def test_feedback_integrate_captures_output_then_advances(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """The integration output travels to the implementer; the GO completes.
+
+        The plan journal supersedes a revision only under an exclusive
+        state:plan-no-go label, so the GO-approved plan artifact stays as
+        reviewed; the pass output is advisory payload for implementation.
+        """
+        stage = PlanReviewStage()
+        github = FakeStageGitHub()
+        ctx = make_ctx(github=github, config_overrides={"enable_learn": False})
+        item = _review_item(make_work_item, github, issue=2, state="EVAL")
+        item.payload["review_verdict"] = ReviewVerdict(
+            grade=None,
+            verdict="GO",
+            raw="### Findings\n- Medium: name the new invariant.\n\nstate:plan-go",
+        )
+
+        assert stage.step(item, ctx) == Continue(next_state="FEEDBACK_WAIT")
+        item.state = "FEEDBACK_WAIT"
+        stage.on_job_done(item, JobResult(ok=True, value="Integrated plan v2"), ctx)
+
+        assert item.payload["plan_feedback_integration"] == "Integrated plan v2"
+        comment_kinds = [entry[0] for entry in github.mutation_log]
+        assert "upsert_plan_comment" not in comment_kinds  # plan artifact stays as reviewed
+
+        item.state = "EVAL"
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, StageOutcome)
+        assert result.disposition == Disposition.ADVANCE
+        # Exactly one pass: the guard blocks a second integration round.
+        assert item.payload["plan_feedback_integrated"] is True
+        assert item.attempts["plan_review_iter"] == 1
+        assert (
+            "edit_labels",
+            (2, (STATE_PLAN_GO,), (STATE_PLAN_NO_GO, STATE_NEEDS_PLAN)),
+        ) in github.mutation_log
+
+    def test_feedback_integrate_unchanged_plan_skips_publish(
+        self, make_ctx: Any, make_work_item: Any, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A planner that keeps the plan publishes nothing; the GO still completes."""
+        stage = PlanReviewStage()
+        github = FakeStageGitHub()
+        ctx = make_ctx(github=github, config_overrides={"enable_learn": False})
+        item = _review_item(make_work_item, github, issue=2, state="EVAL")
+        item.payload["review_verdict"] = ReviewVerdict(
+            grade=None,
+            verdict="GO",
+            raw="### Findings\n- Medium: name the new invariant.\n\nstate:plan-go",
+        )
+        assert stage.step(item, ctx) == Continue(next_state="FEEDBACK_WAIT")
+        item.state = "FEEDBACK_WAIT"
+        before = list(github.mutation_log)
+
+        with caplog.at_level(logging.INFO):
+            stage.on_job_done(item, JobResult(ok=True, value=item.payload["plan_text"]), ctx)
+
+        assert list(github.mutation_log) == before  # no plan comment write
+        assert "kept the plan" in caplog.text
+
+        item.state = "EVAL"
+        result = stage.step(item, ctx)
+        assert isinstance(result, StageOutcome)
+        assert result.disposition == Disposition.ADVANCE
+
+    def test_feedback_integrate_failure_still_advances(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A failed integration pass never blocks the accepted GO."""
+        stage = PlanReviewStage()
+        github = FakeStageGitHub()
+        ctx = make_ctx(github=github, config_overrides={"enable_learn": False})
+        item = _review_item(make_work_item, github, issue=2, state="EVAL")
+        item.payload["review_verdict"] = ReviewVerdict(
+            grade=None,
+            verdict="GO",
+            raw="### Findings\n- Medium: name the new invariant.\n\nstate:plan-go",
+        )
+        assert stage.step(item, ctx) == Continue(next_state="FEEDBACK_WAIT")
+        item.state = "FEEDBACK_WAIT"
+
+        stage.on_job_done(item, JobResult(ok=False, error="planner transport died"), ctx)
+
+        assert item.payload["plan_review_findings"]  # findings still delivered
+
+        item.state = "EVAL"
+        result = stage.step(item, ctx)
+        assert isinstance(result, StageOutcome)
+        assert result.disposition == Disposition.ADVANCE
+        assert (
+            "edit_labels",
+            (2, (STATE_PLAN_GO,), (STATE_PLAN_NO_GO, STATE_NEEDS_PLAN)),
+        ) in github.mutation_log
 
     def test_eval_cannot_advance_when_label_write_is_not_observable(
         self, make_ctx: Any, make_work_item: Any
