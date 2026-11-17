@@ -35,12 +35,8 @@ def _load_json_object(path: Path) -> dict[str, Any]:
     return value
 
 
-def count_by_test_id(report: dict[str, Any]) -> dict[str, int]:
-    """Return LOW-severity finding counts from a validated Bandit report.
-
-    Bandit's ``--severity-level low`` flag is a minimum threshold, so the
-    report can also contain MEDIUM/HIGH findings. Those are filtered out here
-    so they are never compared against the LOW-only baseline.
+def low_findings(report: dict[str, Any]) -> list[tuple[int, str, str | None]]:
+    """Validate a Bandit report and return (index, test_id, filename) LOW tuples.
 
     Raises:
         ValueError: If the report or any finding has an invalid structure.
@@ -56,7 +52,7 @@ def count_by_test_id(report: dict[str, Any]) -> dict[str, int]:
     if not isinstance(results, list):
         raise ValueError("Bandit report must define a 'results' list")
 
-    low_test_ids: list[str] = []
+    findings: list[tuple[int, str, str | None]] = []
     for index, result in enumerate(results):
         if not isinstance(result, dict):
             raise ValueError(f"Bandit result {index} must be an object")
@@ -66,10 +62,79 @@ def count_by_test_id(report: dict[str, Any]) -> dict[str, int]:
             raise ValueError(f"Bandit result {index} has an invalid test_id")
         if not isinstance(severity, str) or not severity:
             raise ValueError(f"Bandit result {index} has an invalid issue_severity")
-        if severity == "LOW":
-            low_test_ids.append(test_id)
+        if severity != "LOW":
+            continue
+        filename = result.get("filename")
+        if filename is not None and (
+            not isinstance(filename, str) or not filename.strip() or "\r" in filename
+        ):
+            raise ValueError(f"Bandit result {index} has an invalid filename")
+        findings.append((index, test_id, filename))
+    return findings
 
-    return dict(Counter(low_test_ids))
+
+def count_by_file_test_id(report: dict[str, Any]) -> dict[str, int]:
+    """Return LOW-severity counts keyed by ``filename::test_id``.
+
+    Identical validation to :func:`count_by_test_id`; the per-file key lets the
+    diff cancel same-ID findings only within the same file, instead of hiding
+    offsetting drift repository-wide.
+
+    Raises:
+        ValueError: If the report or any finding has an invalid structure.
+
+    """
+    counts: dict[str, int] = Counter()
+    for index, test_id, filename in low_findings(report):
+        if filename is None:
+            raise ValueError(f"Bandit result {index} has an invalid filename")
+        counts[f"{filename}::{test_id}"] += 1
+    return dict(counts)
+
+
+def count_by_test_id(report: dict[str, Any]) -> dict[str, int]:
+    """Return LOW-severity finding counts from a validated Bandit report.
+
+    Bandit's ``--severity-level low`` flag is a minimum threshold, so the
+    report can also contain MEDIUM/HIGH findings. Those are filtered out here
+    so they are never compared against the LOW-only baseline.
+
+    Raises:
+        ValueError: If the report or any finding has an invalid structure.
+
+    """
+    return dict(Counter(test_id for _, test_id, _ in low_findings(report)))
+
+
+def _validated_counts_object(counts: Any, label: str) -> dict[str, int]:
+    """Validate one ``{key: int}`` object from the baseline document."""
+    if not isinstance(counts, dict):
+        raise ValueError(f"baseline must define a '{label}' object")
+    validated: dict[str, int] = {}
+    for key, count in counts.items():
+        if (
+            not isinstance(key, str)
+            or not key
+            or isinstance(count, bool)
+            or not isinstance(count, int)
+            or count <= 0
+        ):
+            raise ValueError(f"invalid baseline {label} count for {key!r}: {count!r}")
+        validated[key] = count
+    return validated
+
+
+def _baseline_files(document: dict[str, Any]) -> dict[str, int] | None:
+    """Validate the optional per-file counts; return ``None`` when absent.
+
+    Baselines written before the per-file comparison was introduced omit this
+    section; callers fall back to the repository-wide ``counts`` comparison so
+    they keep validating exactly as before.
+    """
+    files = document.get("files")
+    if files is None:
+        return None
+    return _validated_counts_object(files, "files")
 
 
 def _baseline_counts(document: dict[str, Any]) -> dict[str, int]:
@@ -85,38 +150,31 @@ def _baseline_counts(document: dict[str, Any]) -> dict[str, int]:
     if not isinstance(generated_by, str) or not generated_by.strip():
         raise ValueError("baseline must contain a non-empty generated_by reference")
 
-    counts = document.get("counts")
-    if not isinstance(counts, dict):
-        raise ValueError("baseline must define a 'counts' object")
-
-    validated_counts: dict[str, int] = {}
-    for test_id, count in counts.items():
-        if (
-            not isinstance(test_id, str)
-            or not test_id
-            or isinstance(count, bool)
-            or not isinstance(count, int)
-            or count <= 0
-        ):
-            raise ValueError(f"invalid baseline count for {test_id!r}: {count!r}")
-        validated_counts[test_id] = count
-    return validated_counts
+    return _validated_counts_object(document.get("counts"), "counts")
 
 
 def diff_against_baseline(current: dict[str, int], baseline: dict[str, int]) -> list[str]:
     """Return classified regression and stale-baseline differences."""
+    return diff_against_keys(current, baseline)
+
+
+def diff_files_against_baseline(current: dict[str, int], baseline: dict[str, int]) -> list[str]:
+    """Return classified per-file drift differences."""
+    return diff_against_keys(current, baseline)
+
+
+def diff_against_keys(current: dict[str, int], baseline: dict[str, int]) -> list[str]:
+    """Classify drift over an arbitrary ``{key: count}`` comparison space."""
     problems: list[str] = []
-    for test_id in sorted(current.keys() | baseline.keys()):
-        current_count = current.get(test_id, 0)
-        baseline_count = baseline.get(test_id, 0)
+    for key in sorted(current.keys() | baseline.keys()):
+        current_count = current.get(key, 0)
+        baseline_count = baseline.get(key, 0)
         if current_count > baseline_count:
             reason = "is new" if baseline_count == 0 else "count increased"
-            problems.append(f"REGRESSION: {test_id} {reason} ({baseline_count} -> {current_count})")
+            problems.append(f"REGRESSION: {key} {reason} ({baseline_count} -> {current_count})")
         elif current_count < baseline_count:
             reason = "is no longer observed" if current_count == 0 else "count decreased"
-            problems.append(
-                f"STALE BASELINE: {test_id} {reason} ({baseline_count} -> {current_count})"
-            )
+            problems.append(f"STALE BASELINE: {key} {reason} ({baseline_count} -> {current_count})")
     return problems
 
 
@@ -155,13 +213,15 @@ def _format_problem(problem: str) -> str:
 def _write_baseline(
     baseline_path: Path,
     counts: dict[str, int],
+    files: dict[str, int],
     review_reference: str,
 ) -> None:
-    """Atomically write reviewed LOW-severity counts."""
+    """Atomically write reviewed LOW-severity counts and per-file counts."""
     document = {
         "generated_by": review_reference.strip(),
         "severity": "LOW",
         "counts": dict(sorted(counts.items())),
+        "files": dict(sorted(files.items())),
     }
     safe_write(
         baseline_path,
@@ -196,17 +256,27 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(text("--review-reference requires --update-baseline"))
 
     try:
-        current = count_by_test_id(_load_json_object(args.report_path))
+        report_doc = _load_json_object(args.report_path)
+        current = count_by_test_id(report_doc)
         if args.update_baseline:
-            _write_baseline(args.baseline_path, current, args.review_reference)
+            _write_baseline(
+                args.baseline_path,
+                current,
+                count_by_file_test_id(report_doc),
+                args.review_reference,
+            )
             print(text("Updated Bandit LOW baseline: %(value0)s", value0=args.baseline_path))
             return 0
-        baseline = _baseline_counts(_load_json_object(args.baseline_path))
+        baseline_doc = _load_json_object(args.baseline_path)
+        baseline = _baseline_counts(baseline_doc)
+        baseline_files = _baseline_files(baseline_doc)
     except (OSError, json.JSONDecodeError, ValueError) as exc:
         print(text("ERROR: invalid Bandit baseline input: %(value0)s", value0=exc), file=sys.stderr)
         return 2
 
     problems = diff_against_baseline(current, baseline)
+    if baseline_files is not None:
+        problems += diff_files_against_baseline(count_by_file_test_id(report_doc), baseline_files)
     if not problems:
         return 0
 
