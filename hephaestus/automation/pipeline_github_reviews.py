@@ -4,6 +4,7 @@
 import json
 from collections.abc import Mapping, Sequence
 
+from .github_api.graphql import GraphQLQuerySpec
 from .pipeline_github_contract import _PipelineGitHubHost
 from .pipeline_github_transport import *
 
@@ -131,7 +132,7 @@ class PipelineGitHubReviews(_PipelineGitHubHost):
         return second[0]
 
     def _read_thread_snapshot_once(  # noqa: C901 - GraphQL response validation is fail-closed
-        self, spec: dict[str, Any], pr_number: int, thread_id: str
+        self, spec: GraphQLQuerySpec[dict[str, Any]], pr_number: int, thread_id: str
     ) -> tuple[dict[str, Any], bool] | None:
         """Return one traversal of the thread connection and a paginated flag.
 
@@ -157,7 +158,7 @@ class PipelineGitHubReviews(_PipelineGitHubHost):
             }
             if after is not None:
                 fields["after"] = after
-            page = self._graphql(spec, **fields)
+            page: dict[str, Any] = self._graphql(spec, **fields)
             pr_id = page["pr_node_id"]
             pr_state = page["pr_state"]
             if expected_pr_id is None:
