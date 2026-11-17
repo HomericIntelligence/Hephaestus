@@ -25,7 +25,7 @@ PROVIDER_AUTH_ERROR_CLASS = "provider_auth"
 PROVIDER_AUTH_MAX_DETAIL = 160
 
 PROVIDER_AUTH_INVALID_OR_MISSING_KEY = "provider_auth_invalid_or_missing_api_key"
-PROVIDER_AUTH_TOKEN_EXPIRED = "provider_auth_token_expired"
+PROVIDER_AUTH_SESSION_EXPIRED = "provider_auth_token_expired"
 PROVIDER_AUTH_RATE_OR_QUOTA = "provider_auth_rate_or_quota"
 PROVIDER_AUTH_OTHER = "provider_auth_other"
 
@@ -52,7 +52,7 @@ def classify_agent_error(text: object) -> str | None:
     if "invalid" in snippet and "api key" in snippet:
         return PROVIDER_AUTH_INVALID_OR_MISSING_KEY
     if any(hint in snippet for hint in _TOKEN_EXPIRY_HINTS):
-        return PROVIDER_AUTH_TOKEN_EXPIRED
+        return PROVIDER_AUTH_SESSION_EXPIRED
     if any(hint in snippet for hint in _RATE_HINTS):
         return PROVIDER_AUTH_RATE_OR_QUOTA
     if any(hint in snippet for hint in _INVALID_KEY_HINTS):

@@ -25,9 +25,9 @@ def test_classify_invalid_or_missing_key() -> None:
     ("text", "expected"),
     [
         ("agent_error: opencode2_fatal_error_event: provider.auth: token expired",
-         par.PROVIDER_AUTH_TOKEN_EXPIRED),
+         par.PROVIDER_AUTH_SESSION_EXPIRED),
         ("provider.auth: token expiry noticed by gateway",
-         par.PROVIDER_AUTH_TOKEN_EXPIRED),
+         par.PROVIDER_AUTH_SESSION_EXPIRED),
         ("provider.auth: rate limit exceeded",
          par.PROVIDER_AUTH_RATE_OR_QUOTA),
         ("provider.auth: quota exhausted",
