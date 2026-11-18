@@ -14,8 +14,8 @@ from pathlib import Path
 import pytest
 
 from hephaestus.cli.localization import using_localizer
-from hephaestus.logging.formatters import JsonFormatter
 from hephaestus.logging import utils as logging_utils
+from hephaestus.logging.formatters import JsonFormatter
 from hephaestus.logging.utils import (
     ContextLogger,
     get_logger,
