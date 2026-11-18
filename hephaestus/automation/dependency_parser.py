@@ -69,15 +69,26 @@ def parse_issue_dependencies(issue_body: str) -> list[int]:
     """
     dependencies: list[int] = []
 
-    # Read only references after the dependency keyword on each line. A
-    # preceding epic reference is not a dependency declaration.
+    # Read only references in the dependency clause(s) on each line. A clause
+    # ends at a sentence boundary (". "), a semicolon, or a parenthesis; clauses
+    # whose only substance is parent/epic prose ("Part of #N", "(parent: #N)")
+    # are not dependency declarations and are skipped entirely.
     dep_keywords = r"(?:depends on|blocked by|requires|dependencies?:?)"
     keyword_re = re.compile(dep_keywords, re.IGNORECASE)
+    clause_split_re = re.compile(r"(?<=[.!?])\s+|;|,|[()\[\]]")
+    parent_prose_re = re.compile(
+        r"\b(part of|child of|sub-?issue of|parent( of)?|epic( of)?|relates? to)\b",
+        re.IGNORECASE,
+    )
     for line in issue_body.split("\n"):
         keyword_match = keyword_re.search(line)
         if keyword_match:
-            for match in re.finditer(r"#(\d+)", line[keyword_match.start() :]):
-                dependencies.append(int(match.group(1)))
+            scope = line[keyword_match.start() :]
+            for clause in clause_split_re.split(scope):
+                if parent_prose_re.search(clause):
+                    continue
+                for match in re.finditer(r"#(\d+)", clause):
+                    dependencies.append(int(match.group(1)))
 
     # Also read issue references in list items under a Dependencies heading.
     dep_section_match = re.search(
