@@ -23,7 +23,8 @@ def test_classify_header_timeout() -> None:
     ("text", "expected"),
     [
         (
-            "agent_error: opencode2_fatal_error_event: provider.transport: Timed out waiting for response headers",
+            "agent_error: opencode2_fatal_error_event: "
+            "provider.transport: Timed out waiting for response headers",
             ptf.PROVIDER_TRANSPORT_TIMEOUT,
         ),
         ("provider.transport: response headers deadline hit", ptf.PROVIDER_TRANSPORT_TIMEOUT),
