@@ -364,7 +364,7 @@ _STEP_HANDLER_NAMES: dict[str, str] = {
     PR_CREATE: "_create_pr",
 }
 
-_DEPENDENCY_RETRY_DELAY_S = 1.0
+_DEPENDENCY_RETRY_BACKOFF_S = (1.0, 5.0, 15.0, 60.0, 300.0)
 
 _PLAN_SCOPE_RECEIPT = "_implementation_plan_scope_receipt"
 _PLAN_SCOPE_STATE = "_implementation_plan_scope_state"
@@ -426,9 +426,26 @@ def _live_dependency_block_reason(item: WorkItem, ctx: StageContext) -> str | No
 
 
 def _dependency_retry(item: WorkItem, reason: str) -> StageOutcome:
-    """Park the same item without changing its implementation mini-state."""
+    """Park the same item without changing its implementation mini-state.
+
+    Repeated polls are geometric, capped, and visible: the first block logs the
+    reason once, every later block advances the per-item ladder up to five
+    minutes, and ``dependency_blocked_reason`` stays in the payload so the
+    operator can see why the item is parked.
+    """
+    attempts = item.payload.get("dependency_retry_attempt")
+    if type(attempts) is not int or attempts < 0:
+        attempts = 0
+    delay = _DEPENDENCY_RETRY_BACKOFF_S[min(attempts, len(_DEPENDENCY_RETRY_BACKOFF_S) - 1)]
+    if attempts == 0:
+        try:
+            issue = _issue_number(item)
+        except Exception:
+            issue = "?"
+        logger.warning("implementation:%s: dependency-blocked: %s", issue, reason)
+    item.payload["dependency_retry_attempt"] = attempts + 1
     item.payload["dependency_blocked_reason"] = reason
-    item.payload["retry_delay_s"] = _DEPENDENCY_RETRY_DELAY_S
+    item.payload["retry_delay_s"] = delay
     return StageOutcome(Disposition.RETRY, reason)
 
 
@@ -436,6 +453,7 @@ def _clear_dependency_retry(item: WorkItem) -> None:
     """Remove an obsolete dependency retry marker after a successful read."""
     if item.payload.pop("dependency_blocked_reason", None) is not None:
         item.payload.pop("retry_delay_s", None)
+        item.payload.pop("dependency_retry_attempt", None)
 
 
 def _restore_work_item(item: WorkItem, snapshot: WorkItem) -> None:
