@@ -60,3 +60,76 @@ def test_requires_version_with_periods_keeps_later_reference() -> None:
     """Periods inside numeric clauses do not end the keyword scope."""
     body = "Requires version 1.2.3 of the tool, see #55"
     assert parse_issue_dependencies(body) == [55]
+
+
+from hephaestus.automation.dependency_parser import DependencyFact, canonical_dependency_numbers
+
+
+@pytest.mark.parametrize(
+    "factory",
+    [
+        lambda: DependencyFact(0, "Issue", "OPEN"),
+        lambda: DependencyFact(2, "Issue", "MERGED"),  # type: ignore[arg-type]
+        lambda: DependencyFact(5, "Issue", "OPEN", merged=False),
+        lambda: DependencyFact(3, "Issue", "MERGED"),  # type: ignore[arg-type]
+        lambda: DependencyFact(1, "Issue", "BOGUS"),  # type: ignore[arg-type]
+        lambda: DependencyFact(4, "PRs", "OPEN"),  # type: ignore[arg-type]
+        lambda: DependencyFact(8, "PullRequest", "BOGUS"),  # type: ignore[arg-type]
+        lambda: DependencyFact(7, "PullRequest", "MERGED", merged="yes"),  # type: ignore[arg-type]
+        lambda: DependencyFact(9, "PullRequest", "MERGED", merged=False),
+        lambda: DependencyFact(10, "PullRequest", "CLOSED", merged=True),
+    ],
+    ids=[
+        "zero-number",
+        "issue-state-merged",
+        "issue-with-merged-set",
+        "issue-state-merged-2",
+        "issue-bogus-state",
+        "pr-bogus-type",
+        "pr-bogus-state",
+        "pr-merged-not-bool",
+        "pr-merged-state-mismatch-false",
+        "pr-merged-state-mismatch-true",
+    ],
+)
+def test_dependency_fact_rejects_contradictions(factory) -> None:  # type: ignore[no-untyped-def]
+    """Contradictory dependency facts fail closed."""
+    with pytest.raises(ValueError):
+        factory()
+
+
+def test_dependency_fact_satisfied_property() -> None:
+    """Satisfied reflects merged (requester perspective) for PRs, closed for issues."""
+    assert DependencyFact(1, "Issue", "CLOSED").satisfied is True
+    assert DependencyFact(2, "Issue", "OPEN").satisfied is False
+    assert DependencyFact(3, "PullRequest", "MERGED", merged=True).satisfied is True
+    assert DependencyFact(4, "PullRequest", "CLOSED", merged=False).satisfied is False
+
+
+def test_canonical_dependency_numbers_valid() -> None:
+    """Valid orders are returned as tuples."""
+    assert canonical_dependency_numbers((3, 7, 9)) == (3, 7, 9)
+    assert canonical_dependency_numbers([]) == ()
+
+
+def test_canonical_dependency_numbers_rejects_unsorted() -> None:
+    """Out-of-order input violates canonicity."""
+    with pytest.raises(ValueError, match="canonical order"):
+        canonical_dependency_numbers((5, 1))
+
+
+def test_canonical_dependency_numbers_rejects_duplicates() -> None:
+    with pytest.raises(ValueError, match="unique"):
+        canonical_dependency_numbers((4, 4))
+
+
+def test_canonical_dependency_numbers_rejects_non_positive() -> None:
+    with pytest.raises(ValueError):
+        canonical_dependency_numbers((0, 7))
+
+
+def test_canonical_dependency_numbers_rejects_too_many() -> None:
+    from hephaestus.automation.dependency_parser import MAX_DEPENDENCY_FACTS
+
+    with pytest.raises(ValueError, match="maximum"):
+        canonical_dependency_numbers(tuple(range(1, MAX_DEPENDENCY_FACTS + 2)))
