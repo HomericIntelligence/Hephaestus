@@ -4,6 +4,7 @@
 import json
 from collections.abc import Mapping, Sequence
 
+from .github_api.graphql import GraphQLQuerySpec
 from .pipeline_github_contract import _PipelineGitHubHost
 from .pipeline_github_transport import *
 
@@ -101,9 +102,7 @@ class PipelineGitHubReviews(_PipelineGitHubHost):
             snapshot.append((comment_id, body))
         return tuple(snapshot)
 
-    def _review_thread_snapshot(  # noqa: C901 - GraphQL response validation is fail-closed
-        self, pr_number: int, thread_id: str
-    ) -> dict[str, Any] | None:
+    def _review_thread_snapshot(self, pr_number: int, thread_id: str) -> dict[str, Any] | None:
         """Return one complete thread and PR-state snapshot, including a resolved thread.
 
         An unresolved-thread list cannot prove the contents of a thread after
@@ -118,164 +117,7 @@ class PipelineGitHubReviews(_PipelineGitHubHost):
         owner, name = self._owner_name()
         spec = github_api.pipeline_thread_snapshot_page_query(owner, name, pr_number, thread_id)
 
-        def read_once() -> tuple[dict[str, Any], bool] | None:  # noqa: C901
-            comments: list[dict[str, Any]] = []
-            comment_bytes = 0
-            seen_comment_ids: set[str] = set()
-            seen_cursors: set[str] = set()
-            after: str | None = None
-            page_count = 0
-            expected_pr_id: str | None = None
-            expected_pr_state: dict[str, Any] | None = None
-            expected_thread_fields: tuple[bool, str, int | None, str | None] | None = None
-            while True:
-                if page_count >= THREAD_COMMENT_PAGE_MAX:
-                    raise RuntimeError(
-                        f"could not fetch all comments for PR review thread {thread_id}"
-                    )
-                page_count += 1
-                fields: dict[str, int | str] = {
-                    "number": int(pr_number),
-                    "threadId": thread_id,
-                }
-                if after is not None:
-                    fields["after"] = after
-                page = self._graphql(spec, **fields)
-                pr_id = page["pr_node_id"]
-                pr_state = page["pr_state"]
-                if expected_pr_id is None:
-                    expected_pr_id = pr_id
-                    expected_pr_state = pr_state
-                elif expected_pr_id != pr_id or expected_pr_state != pr_state:
-                    return None
-                node = page["thread"]
-                pull_request = node.get("pullRequest")
-                thread_pr_number = (
-                    pull_request.get("number") if isinstance(pull_request, dict) else None
-                )
-                thread_repository = (
-                    pull_request.get("repository") if isinstance(pull_request, dict) else None
-                )
-                owner = (
-                    thread_repository.get("owner") if isinstance(thread_repository, dict) else None
-                )
-                if (
-                    not isinstance(pull_request, dict)
-                    or pull_request.get("id") != expected_pr_id
-                    or isinstance(thread_pr_number, bool)
-                    or not isinstance(thread_pr_number, int)
-                    or thread_pr_number != pr_number
-                    or not isinstance(thread_repository, dict)
-                    or thread_repository.get("name") != self.repo
-                    or not isinstance(owner, dict)
-                    or owner.get("login") != self.org
-                    or not isinstance(node.get("isResolved"), bool)
-                ):
-                    return None
-                path = node.get("path")
-                line = node.get("line")
-                side = node.get("side")
-                if (
-                    not isinstance(path, str)
-                    or (line is not None and (isinstance(line, bool) or not isinstance(line, int)))
-                    or (side is not None and not isinstance(side, str))
-                ):
-                    return None
-                thread_fields = (node["isResolved"], path, line, side)
-                if expected_thread_fields is None:
-                    expected_thread_fields = thread_fields
-                elif expected_thread_fields != thread_fields:
-                    return None
-                comment_connection = page["comments"]
-                comment_nodes = comment_connection["nodes"]
-                for comment in comment_nodes:
-                    if not isinstance(comment, dict):
-                        return None
-                    if "author" not in comment:
-                        return None
-                    author_node = comment.get("author")
-                    if author_node is None:
-                        author = ""
-                        author_type = ""
-                    elif isinstance(author_node, dict):
-                        author_login = author_node.get("login")
-                        actor_type = author_node.get("__typename")
-                        if not isinstance(author_login, str) or not isinstance(actor_type, str):
-                            return None
-                        author = author_login
-                        author_type = actor_type
-                    else:
-                        return None
-                    review = comment.get("pullRequestReview")
-                    if review is not None and not isinstance(review, dict):
-                        return None
-                    commit = review.get("commit") if isinstance(review, dict) else None
-                    if commit is not None and not isinstance(commit, dict):
-                        return None
-                    comment_id = comment.get("id")
-                    body = comment.get("body")
-                    review_id = review.get("id") if isinstance(review, dict) else ""
-                    review_state = review.get("state") if isinstance(review, dict) else ""
-                    review_body = review.get("body") if isinstance(review, dict) else ""
-                    review_commit_sha = commit.get("oid") if isinstance(commit, dict) else ""
-                    if (
-                        not isinstance(comment_id, str)
-                        or not comment_id
-                        or not isinstance(body, str)
-                        or not isinstance(author, str)
-                        or not isinstance(author_type, str)
-                        or not isinstance(comment.get("viewerDidAuthor"), bool)
-                        or not isinstance(review_id, str)
-                        or not isinstance(review_state, str)
-                        or not isinstance(review_body, str)
-                        or not isinstance(review_commit_sha, str)
-                    ):
-                        return None
-                    if comment_id in seen_comment_ids:
-                        return None
-                    seen_comment_ids.add(comment_id)
-                    admitted = admitted_review_comment(
-                        comment,
-                        author=author,
-                        author_type=author_type,
-                        review=(review_id, review_state, review_body, review_commit_sha),
-                        comment_count=len(comments),
-                        current_bytes=comment_bytes,
-                    )
-                    if admitted is None:
-                        return None
-                    normalized_comment, comment_bytes = admitted
-                    comments.append(normalized_comment)
-                page_info = comment_connection["pageInfo"]
-                if not page_info["hasNextPage"]:
-                    if expected_thread_fields is None or expected_pr_state is None:
-                        return None
-                    return (
-                        {
-                            "id": thread_id,
-                            "isResolved": expected_thread_fields[0],
-                            "path": expected_thread_fields[1],
-                            "line": expected_thread_fields[2],
-                            "side": expected_thread_fields[3],
-                            "comments": comments,
-                            "pr_node_id": expected_pr_id,
-                            "pr_state": expected_pr_state,
-                        },
-                        page_count > 1,
-                    )
-                next_cursor = page_info.get("endCursor")
-                if (
-                    not isinstance(next_cursor, str)
-                    or not next_cursor
-                    or next_cursor in seen_cursors
-                ):
-                    raise RuntimeError(
-                        f"could not fetch all comments for PR review thread {thread_id}"
-                    )
-                seen_cursors.add(next_cursor)
-                after = next_cursor
-
-        first = read_once()
+        first = self._read_thread_snapshot_once(spec, pr_number, thread_id)
         if first is None:
             return None
         snapshot, was_paginated = first
@@ -284,10 +126,164 @@ class PipelineGitHubReviews(_PipelineGitHubHost):
         # A multi-page connection cannot be one atomic read.  Stabilize it
         # with a complete second traversal; any comment or PR-state change
         # makes the proof unusable instead of resolving a raced discussion.
-        second = read_once()
+        second = self._read_thread_snapshot_once(spec, pr_number, thread_id)
         if second is None or snapshot != second[0]:
             return None
         return second[0]
+
+    def _read_thread_snapshot_once(  # noqa: C901 - GraphQL response validation is fail-closed
+        self, spec: GraphQLQuerySpec[dict[str, Any]], pr_number: int, thread_id: str
+    ) -> tuple[dict[str, Any], bool] | None:
+        """Return one traversal of the thread connection and a paginated flag.
+
+        Split from ``_review_thread_snapshot`` so the double-pass fixed-point
+        logic can be read independently from the single-pass reader.
+        """
+        comments: list[dict[str, Any]] = []
+        comment_bytes = 0
+        seen_comment_ids: set[str] = set()
+        seen_cursors: set[str] = set()
+        after: str | None = None
+        page_count = 0
+        expected_pr_id: str | None = None
+        expected_pr_state: dict[str, Any] | None = None
+        expected_thread_fields: tuple[bool, str, int | None, str | None] | None = None
+        while True:
+            if page_count >= THREAD_COMMENT_PAGE_MAX:
+                raise RuntimeError(f"could not fetch all comments for PR review thread {thread_id}")
+            page_count += 1
+            fields: dict[str, int | str] = {
+                "number": int(pr_number),
+                "threadId": thread_id,
+            }
+            if after is not None:
+                fields["after"] = after
+            page: dict[str, Any] = self._graphql(spec, **fields)
+            pr_id = page["pr_node_id"]
+            pr_state = page["pr_state"]
+            if expected_pr_id is None:
+                expected_pr_id = pr_id
+                expected_pr_state = pr_state
+            elif expected_pr_id != pr_id or expected_pr_state != pr_state:
+                return None
+            node = page["thread"]
+            pull_request = node.get("pullRequest")
+            thread_pr_number = (
+                pull_request.get("number") if isinstance(pull_request, dict) else None
+            )
+            thread_repository = (
+                pull_request.get("repository") if isinstance(pull_request, dict) else None
+            )
+            owner = thread_repository.get("owner") if isinstance(thread_repository, dict) else None
+            if (
+                not isinstance(pull_request, dict)
+                or pull_request.get("id") != expected_pr_id
+                or isinstance(thread_pr_number, bool)
+                or not isinstance(thread_pr_number, int)
+                or thread_pr_number != pr_number
+                or not isinstance(thread_repository, dict)
+                or thread_repository.get("name") != self.repo
+                or not isinstance(owner, dict)
+                or owner.get("login") != self.org
+                or not isinstance(node.get("isResolved"), bool)
+            ):
+                return None
+            path = node.get("path")
+            line = node.get("line")
+            side = node.get("side")
+            if (
+                not isinstance(path, str)
+                or (line is not None and (isinstance(line, bool) or not isinstance(line, int)))
+                or (side is not None and not isinstance(side, str))
+            ):
+                return None
+            thread_fields = (node["isResolved"], path, line, side)
+            if expected_thread_fields is None:
+                expected_thread_fields = thread_fields
+            elif expected_thread_fields != thread_fields:
+                return None
+            comment_connection = page["comments"]
+            comment_nodes = comment_connection["nodes"]
+            for comment in comment_nodes:
+                if not isinstance(comment, dict):
+                    return None
+                if "author" not in comment:
+                    return None
+                author_node = comment.get("author")
+                if author_node is None:
+                    author = ""
+                    author_type = ""
+                elif isinstance(author_node, dict):
+                    author_login = author_node.get("login")
+                    actor_type = author_node.get("__typename")
+                    if not isinstance(author_login, str) or not isinstance(actor_type, str):
+                        return None
+                    author = author_login
+                    author_type = actor_type
+                else:
+                    return None
+                review = comment.get("pullRequestReview")
+                if review is not None and not isinstance(review, dict):
+                    return None
+                commit = review.get("commit") if isinstance(review, dict) else None
+                if commit is not None and not isinstance(commit, dict):
+                    return None
+                comment_id = comment.get("id")
+                body = comment.get("body")
+                review_id = review.get("id") if isinstance(review, dict) else ""
+                review_state = review.get("state") if isinstance(review, dict) else ""
+                review_body = review.get("body") if isinstance(review, dict) else ""
+                review_commit_sha = commit.get("oid") if isinstance(commit, dict) else ""
+                if (
+                    not isinstance(comment_id, str)
+                    or not comment_id
+                    or not isinstance(body, str)
+                    or not isinstance(author, str)
+                    or not isinstance(author_type, str)
+                    or not isinstance(comment.get("viewerDidAuthor"), bool)
+                    or not isinstance(review_id, str)
+                    or not isinstance(review_state, str)
+                    or not isinstance(review_body, str)
+                    or not isinstance(review_commit_sha, str)
+                ):
+                    return None
+                if comment_id in seen_comment_ids:
+                    return None
+                seen_comment_ids.add(comment_id)
+                admitted = admitted_review_comment(
+                    comment,
+                    author=author,
+                    author_type=author_type,
+                    review=(review_id, review_state, review_body, review_commit_sha),
+                    comment_count=len(comments),
+                    current_bytes=comment_bytes,
+                )
+                if admitted is None:
+                    return None
+                normalized_comment, comment_bytes = admitted
+                comments.append(normalized_comment)
+            page_info = comment_connection["pageInfo"]
+            if not page_info["hasNextPage"]:
+                if expected_thread_fields is None or expected_pr_state is None:
+                    return None
+                return (
+                    {
+                        "id": thread_id,
+                        "isResolved": expected_thread_fields[0],
+                        "path": expected_thread_fields[1],
+                        "line": expected_thread_fields[2],
+                        "side": expected_thread_fields[3],
+                        "comments": comments,
+                        "pr_node_id": expected_pr_id,
+                        "pr_state": expected_pr_state,
+                    },
+                    page_count > 1,
+                )
+            next_cursor = page_info.get("endCursor")
+            if not isinstance(next_cursor, str) or not next_cursor or next_cursor in seen_cursors:
+                raise RuntimeError(f"could not fetch all comments for PR review thread {thread_id}")
+            seen_cursors.add(next_cursor)
+            after = next_cursor
 
     def _implementation_reply_lock_path(self, pr_number: int) -> Path:
         """Return a local worktree-shared lock for one repository PR reply batch.
