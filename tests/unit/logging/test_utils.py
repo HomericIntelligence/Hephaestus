@@ -15,6 +15,7 @@ import pytest
 
 from hephaestus.cli.localization import using_localizer
 from hephaestus.logging.formatters import JsonFormatter
+from hephaestus.logging import utils as logging_utils
 from hephaestus.logging.utils import (
     ContextLogger,
     get_logger,
@@ -552,8 +553,11 @@ class TestSetupLogging:
         root.handlers.clear()
         try:
             setup_logging(log_file=log_file)
-            handler_files = [getattr(h, "baseFilename", None) for h in root.handlers]
-            assert os.path.abspath(log_file) in handler_files
+            listener = logging_utils._file_log_listener
+            assert listener is not None
+            basenames = {getattr(h, "baseFilename", None) for h in listener.handlers}
+            assert os.path.abspath(log_file) in basenames
+            assert any(isinstance(h, logging.handlers.QueueHandler) for h in root.handlers)
         finally:
             root.handlers.clear()
             root.handlers.extend(saved)
@@ -627,9 +631,11 @@ class TestSetupLogging:
         try:
             setup_logging(log_file=log_file)
             setup_logging(log_file=log_file)
+            listener = logging_utils._file_log_listener
+            assert listener is not None
             file_handlers = [
                 h
-                for h in root.handlers
+                for h in listener.handlers
                 if isinstance(h, logging.FileHandler)
                 and h.baseFilename == os.path.abspath(log_file)
             ]
@@ -708,7 +714,14 @@ class TestSetupLogging:
         try:
             setup_logging(log_file=log_a)
             setup_logging(log_file=log_b)
-            file_handlers = [h for h in root.handlers if isinstance(h, logging.FileHandler)]
+            listener = logging_utils._file_log_listener
+            assert listener is not None
+            file_handlers = [
+                h
+                for h in listener.handlers
+                if isinstance(h, logging.FileHandler)
+                and h.baseFilename in {os.path.abspath(log_a), os.path.abspath(log_b)}
+            ]
             assert len(file_handlers) == 2
             basenames = {h.baseFilename for h in file_handlers}
             assert os.path.abspath(log_a) in basenames
@@ -739,7 +752,14 @@ class TestSetupLogging:
         try:
             log_file = str(tmp_path / "json_setup.log")
             setup_logging(json_format=True, log_file=log_file)
-            file_handlers = [h for h in root.handlers if isinstance(h, logging.FileHandler)]
+            listener = logging_utils._file_log_listener
+            assert listener is not None
+            file_handlers = [
+                h
+                for h in listener.handlers
+                if isinstance(h, logging.FileHandler)
+                and h.baseFilename == os.path.abspath(log_file)
+            ]
             assert len(file_handlers) >= 1
             assert isinstance(file_handlers[0].formatter, JsonFormatter)
         finally:

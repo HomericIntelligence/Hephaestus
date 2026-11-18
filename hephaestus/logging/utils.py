@@ -12,14 +12,17 @@ Usage:
     logger.info("This is an info message")
 """
 
+import atexit
 import contextvars
 import logging
+import logging.handlers
 import os
+import queue
 import sys
 import threading
 import uuid
 from collections.abc import Generator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import Any, Literal
 from weakref import WeakSet
@@ -30,6 +33,48 @@ from hephaestus.logging.formatters import JsonFormatter, _LocalizedFormatter
 # Module-level lock protects the check-then-add TOCTOU in get_logger()
 _handler_setup_lock = threading.Lock()
 _setup_file_handlers: WeakSet[logging.FileHandler] = WeakSet()
+
+# Queue-backed file-logging: a synchronous FileHandler holding the root logger
+# lock freezes all later emits when one emit blocks (#3626). The root logger
+# instead hands records to a bounded queue drained by one process-wide
+# QueueListener thread; callers never wait for the file write.
+_file_log_queue: queue.Queue[logging.LogRecord] = queue.Queue()
+_file_log_listener: logging.handlers.QueueListener | None = None
+_file_log_listener_lock = threading.Lock()
+_setup_logging_pid = os.getpid()
+
+
+@atexit.register
+def _flush_file_log_on_exit() -> None:
+    """Drain pending file-log records once, in the process that set it up."""
+    if os.getpid() != _setup_logging_pid:
+        return
+    listener = _file_log_listener
+    if listener is not None:
+        with suppress(Exception):
+            listener.stop()
+
+
+def _configure_queued_file_handler(
+    logger: logging.Logger, file_handler: logging.FileHandler
+) -> logging.FileHandler:
+    """Route the given FileHandler through the process-wide queue listener."""
+    global _file_log_listener
+    with _file_log_listener_lock:
+        if _file_log_listener is None:
+            _file_log_listener = logging.handlers.QueueListener(
+                _file_log_queue, file_handler, respect_handler_level=True
+            )
+            _file_log_listener.start()
+        else:
+            # Replace the listener's handler set when the path changes.
+            listener_handlers = _file_log_listener.handlers
+            if file_handler not in listener_handlers:
+                _file_log_listener.handlers = (*listener_handlers, file_handler)
+        if not any(isinstance(h, logging.handlers.QueueHandler) for h in logger.handlers):
+            logger.addHandler(logging.handlers.QueueHandler(_file_log_queue))
+    return file_handler
+
 
 # Keep high-volume dependency traces out of Hephaestus verbose output.
 _MINIMUM_DEPENDENCY_LOG_LEVELS = {"markdown_it": logging.WARNING}
@@ -224,7 +269,10 @@ def _configure_file_handler(
     """Configure one file destination while the setup lock is held."""
     abs_log_file = os.path.abspath(log_file)
     has_file = False
-    for handler in logger.handlers:
+    # Dedup must see the queue-listener-managed file handlers, not the root logger
+    # (the FileHandlers no longer sit on the root logger after the #3626 rework).
+    managed = _file_log_listener.handlers if _file_log_listener is not None else ()
+    for handler in managed:
         if isinstance(handler, logging.FileHandler) and handler.baseFilename == abs_log_file:
             has_file = True
             if handler in _setup_file_handlers:
@@ -232,7 +280,7 @@ def _configure_file_handler(
     if not has_file:
         file_handler = logging.FileHandler(log_file)
         file_handler.setFormatter(formatter)
-        logger.addHandler(file_handler)
+        _configure_queued_file_handler(logger, file_handler)
         _setup_file_handlers.add(file_handler)
 
 
