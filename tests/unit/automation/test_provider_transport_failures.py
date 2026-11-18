@@ -22,16 +22,17 @@ def test_classify_header_timeout() -> None:
 @pytest.mark.parametrize(
     ("text", "expected"),
     [
-        ("agent_error: opencode2_fatal_error_event: provider.transport: Timed out waiting for response headers",
-         ptf.PROVIDER_TRANSPORT_TIMEOUT),
-        ("provider.transport: response headers deadline hit",
-         ptf.PROVIDER_TRANSPORT_TIMEOUT),
-        ("provider.transport: timed out",
-         ptf.PROVIDER_TRANSPORT_TIMEOUT),
-        ("PROVIDER.TRANSPORT: TIMED OUT WAITING FOR RESPONSE HEADERS",
-         ptf.PROVIDER_TRANSPORT_TIMEOUT),
-        ("provider.transport: dns failure",
-         ptf.PROVIDER_TRANSPORT_OTHER),
+        (
+            "agent_error: opencode2_fatal_error_event: provider.transport: Timed out waiting for response headers",
+            ptf.PROVIDER_TRANSPORT_TIMEOUT,
+        ),
+        ("provider.transport: response headers deadline hit", ptf.PROVIDER_TRANSPORT_TIMEOUT),
+        ("provider.transport: timed out", ptf.PROVIDER_TRANSPORT_TIMEOUT),
+        (
+            "PROVIDER.TRANSPORT: TIMED OUT WAITING FOR RESPONSE HEADERS",
+            ptf.PROVIDER_TRANSPORT_TIMEOUT,
+        ),
+        ("provider.transport: dns failure", ptf.PROVIDER_TRANSPORT_OTHER),
         ("agent_error: codex_tool_or_provider_failure: x", None),
         ("agent_error: provider_auth: x", None),
         ("", None),
@@ -80,8 +81,7 @@ def test_auth_precedence_and_legacy_unchanged() -> None:
     from hephaestus.automation import provider_auth_resilience as par
 
     mixed = (
-        "agent_error: provider.auth: invalid or missing API key; "
-        "also provider.transport: timed out"
+        "agent_error: provider.auth: invalid or missing API key; also provider.transport: timed out"
     )
     assert par.classify_agent_error(mixed) is not None
     result = _agent_exception_result(AgentExecutionError(mixed))
