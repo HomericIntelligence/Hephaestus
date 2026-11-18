@@ -78,7 +78,6 @@ def test_agent_exception_result_named_for_transport_timeout() -> None:
 def test_auth_precedence_and_legacy_unchanged() -> None:
     """Auth class still wins when both markers appear; non-provider errors unchanged."""
     from hephaestus.agents.runtime import AgentExecutionError
-
     from hephaestus.automation import provider_auth_resilience as par
 
     mixed = (
