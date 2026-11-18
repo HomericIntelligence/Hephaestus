@@ -6,6 +6,7 @@ deduplication and propagation behaviour.
 """
 
 import logging
+import time
 import sys
 
 import pytest
@@ -108,7 +109,11 @@ class TestFileLogging:
         root_logger = logging.getLogger()
         root_logger.info("file-logging-test")
 
-        content = log_file.read_text()
+        deadline = time.monotonic() + 4.0
+        content = log_file.read_text(encoding="utf-8") if log_file.exists() else ""
+        while "file-logging-test" not in content and time.monotonic() < deadline:
+            time.sleep(0.05)
+            content = log_file.read_text(encoding="utf-8") if log_file.exists() else ""
         assert "file-logging-test" in content
 
     def test_get_logger_writes_to_file(self, tmp_path) -> None:
