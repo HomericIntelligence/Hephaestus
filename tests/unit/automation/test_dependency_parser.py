@@ -14,10 +14,12 @@ def test_part_of_clause_on_same_line_is_not_a_dependency() -> None:
 
 
 def test_plain_comma_list_still_collected() -> None:
+    """A comma list of dependencies is collected as before."""
     assert parse_issue_dependencies("Depends on #10, #20") == [10, 20]
 
 
 def test_newline_terminates_keyword_scope() -> None:
+    """A newline terminates the keyword scope."""
     body = "Blocked by #1\nPart of #99"
     assert parse_issue_dependencies(body) == [1]
 
@@ -49,10 +51,12 @@ def test_dependency_scenarios(body: str, expected: list[int]) -> None:
 
 
 def test_dependencies_section_remains_honored() -> None:
+    """The Dependencies heading section path is unchanged."""
     body = "Intro\n\n## Dependencies\n\n- #42\n- #43\n\n## Notes\n\n- #99\n"
     assert parse_issue_dependencies(body) == [42, 43]
 
 
 def test_requires_version_with_periods_keeps_later_reference() -> None:
+    """Periods inside numeric clauses do not end the keyword scope."""
     body = "Requires version 1.2.3 of the tool, see #55"
     assert parse_issue_dependencies(body) == [55]
