@@ -200,6 +200,14 @@ def latest_logical_items(items: Sequence[WorkItem]) -> list[WorkItem]:
     return list(latest.values())
 
 
+def _dependency_blocked_reason(item: WorkItem) -> str | None:
+    """Return the sticky dependency block reason recorded on the payload, if any."""
+    value = item.payload.get("dependency_blocked_reason")
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
 def _blocked_detail(reason: str) -> str:
     """Return the cause that follows the redundant ``blocked`` prefix.
 
@@ -213,6 +221,8 @@ def _blocked_detail(reason: str) -> str:
 
 def _disposition(item: WorkItem) -> str:
     """Classify one item's summary disposition cell."""
+    if (reason := _dependency_blocked_reason(item)) is not None:
+        return f"BLOCKED:{reason}"
     result = item.result
     if result is None:
         return "PENDING"
@@ -236,6 +246,8 @@ def _disposition_bucket(item: WorkItem) -> str:
 def _display_disposition(item: WorkItem, *, localizer: Localizer | None = None) -> str:
     """Return a localized disposition for the human summary row."""
     render = (localizer or get_localizer()).text
+    if (reason := _dependency_blocked_reason(item)) is not None:
+        return render("BLOCKED:%(reason)s", reason=reason)
     result = item.result
     if result is None:
         return render("PENDING")
@@ -553,6 +565,11 @@ def print_summary(  # noqa: C901
             for item in items
             if item.result is not None and item.result.reason.startswith("resumable")
         ]
+        dependency_blocked = [
+            f"{item.repo}#{item.issue or item.pr or ''}@{item.stage.value}"
+            for item in items
+            if _dependency_blocked_reason(item) is not None
+        ]
         emit_json_status(
             stats.exit_code,
             message=_json_message(stats.exit_code),
@@ -568,6 +585,7 @@ def print_summary(  # noqa: C901
             auxiliary_jobs_deferred=stats.auxiliary_job_deferred_count,
             wall_s=round(stats.wall_s, 1),
             resumable=resumable,
+            dependency_blocked=dependency_blocked,
             preserved_worktrees=[[number, path] for _, number, path in preserved],
             recovery_worktrees=[[number, path] for _, number, path in recovery_preserved],
             plan_review_sessions=review_sessions,

@@ -257,6 +257,30 @@ class TestPrintSummaryRows:
         assert "RESUMABLE at pr_review" in text
         assert "#1" in text and "!11" in text
 
+    def test_dependency_blocked_item_renders_as_blocked(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A dependency-blocked item is visibly BLOCKED with its reason."""
+        items = [
+            _item(6, StageName.FINISHED, passed=False, reason="resumable at implementation"),
+        ]
+        items[0].payload["dependency_blocked_reason"] = "dependency #3325 is still open"
+
+        with caplog.at_level(logging.INFO):
+            print_summary(items, _stats(), [], json_out=False)
+
+        assert "BLOCKED:dependency #3325 is still open" in caplog.text
+        assert "RESUMABLE at implementation" not in caplog.text
+
+    def test_aggregate_bucket_counts_blocked(self, caplog: pytest.LogCaptureFixture) -> None:
+        """TerminalSummary folds dependency-blocked items under blocked."""
+        blocked = _item(7, StageName.FINISHED, passed=False, reason="resumable at implementation")
+        blocked.payload["dependency_blocked_reason"] = "dependency #3325 is still open"
+        aggregate = TerminalSummary()
+        aggregate.record(blocked)
+
+        assert aggregate.dispositions.get("blocked") == 1
+
     def test_aggregates_and_stats(self, caplog: pytest.LogCaptureFixture) -> None:
         """Disposition counts, per-stage throughput, agent time, loops, wall."""
         items = [
