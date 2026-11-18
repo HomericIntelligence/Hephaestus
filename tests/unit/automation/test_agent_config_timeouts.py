@@ -10,7 +10,8 @@ import pytest
 from hephaestus.automation import agent_config
 
 TWO_HOURS_S = 7200
-DEFAULT_THROUGHPUT_TIMEOUT_S = 1200
+DEFAULT_THROUGHPUT_TIMEOUT_S = 1800
+DEFAULT_GIT_MESSAGE_TIMEOUT_S = 1200
 DEFAULT_REVIEW_TIMEOUT_S = 3600
 
 
@@ -87,7 +88,7 @@ def test_agent_default_timeout_ignores_removed_env(monkeypatch: pytest.MonkeyPat
             "HEPH_GIT_MESSAGE_AGENT_TIMEOUT",
             "HEPH_GIT_MESSAGE_CLAUDE_TIMEOUT",
             agent_config.git_message_agent_timeout,
-            DEFAULT_THROUGHPUT_TIMEOUT_S,
+            DEFAULT_GIT_MESSAGE_TIMEOUT_S,
         ),
     ],
 )
@@ -216,7 +217,7 @@ def test_git_message_timeout_ignores_removed_env(monkeypatch: pytest.MonkeyPatch
     """The lightweight git-message agent uses its own short tunable timeout."""
     monkeypatch.setenv("HEPH_GIT_MESSAGE_AGENT_TIMEOUT", "90")
 
-    assert agent_config.git_message_agent_timeout() == DEFAULT_THROUGHPUT_TIMEOUT_S
+    assert agent_config.git_message_agent_timeout() == DEFAULT_GIT_MESSAGE_TIMEOUT_S
 
 
 def test_reviewer_timeout_paths_share_one_canonical_default() -> None:

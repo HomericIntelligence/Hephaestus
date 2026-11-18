@@ -42,10 +42,10 @@ from hephaestus.agents.workspace import WorkspaceBinding
 from hephaestus.automation.agent_config import (
     AGENT_PLAN_REVIEWER,
     AGENT_PLANNER,
+    adaptive_planner_claude_timeout,
     advise_claude_timeout,
     advise_model,
     plan_reviewer_claude_timeout,
-    planner_claude_timeout,
     planner_model,
     reviewer_model,
 )
@@ -999,7 +999,7 @@ def _requirements_recovery_step(item: WorkItem, ctx: StageContext) -> StepResult
             model=stage_model(ctx, "planner", planner_model),
             prompt_builder=build_recovery_prompt,
             cwd=_planning_job_cwd(item, ctx, workspace),
-            timeout_s=planner_claude_timeout(),
+            timeout_s=adaptive_planner_claude_timeout(item.attempts.get("plan", 0)),
             workspace=workspace,
             sandbox="read-only",
             allowed_tools="Read,Glob,Grep",
@@ -1806,7 +1806,11 @@ class PlanningStage(Stage):
                 model=stage_model(ctx, "planner", planner_model),
                 prompt_builder=build_plan_prompt,
                 cwd=_planning_job_cwd(item, ctx, workspace),
-                timeout_s=stage_timeout(ctx, "planner", planner_claude_timeout),
+                timeout_s=stage_timeout(
+                    ctx,
+                    "planner",
+                    lambda: adaptive_planner_claude_timeout(item.attempts.get("plan", 0)),
+                ),
                 workspace=workspace,
                 sandbox="read-only",
                 allowed_tools="Read,Glob,Grep",
