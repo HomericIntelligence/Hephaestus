@@ -4,21 +4,29 @@ from __future__ import annotations
 
 import pytest
 
+from hephaestus.automation.dependency_parser import DependencyFact
 from hephaestus.automation.pipeline import admission
-
-
-class _Bar:
-    def __init__(self, tag: str) -> None:
-        self.tag = tag
 
 
 class _Reader:
     def __init__(self) -> None:
         self.calls = 0
 
-    def batch_dependency_facts(self, canonical, *, deadline_s, shutdown):
+    def batch_dependency_facts(
+        self,
+        issue_numbers: tuple[int, ...],
+        *,
+        deadline_s: float,
+        shutdown: "object | None" = None,
+    ) -> tuple:
         self.calls += 1
-        return tuple(f"fact-{n}" for n in canonical)
+        return tuple(
+            DependencyFact(n, "Issue", "CLOSED") for n in issue_numbers
+        )
+
+
+def _assert_facts(items: tuple) -> None:
+    assert all(isinstance(item, DependencyFact) for item in items)
 
 
 def _fresh_cache(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -73,9 +81,15 @@ def test_facts_batch_malformed_facts_are_not_cached(monkeypatch: pytest.MonkeyPa
         def __init__(self) -> None:
             self.calls = 0
 
-        def batch_dependency_facts(self, canonical, *, deadline_s, shutdown):
+        def batch_dependency_facts(
+            self,
+            issue_numbers: tuple[int, ...],
+            *,
+            deadline_s: float,
+            shutdown: "object | None" = None,
+        ) -> tuple:
             self.calls += 1
-            return "junk"
+            return "junk"  # type: ignore[return-value]
 
     _fresh_cache(monkeypatch)
     reader = _Broken()
