@@ -135,7 +135,7 @@ def fallback_model(value: str | None = None, *, agent: str = "claude") -> str:
 # Stage defaults use the AGENT_* values from ``hephaestus.constants``.
 DEFAULT_AGENT_TIMEOUT: int = 7200
 DEFAULT_THROUGHPUT_TIMEOUT: int = 1200
-DEFAULT_GIT_MESSAGE_AGENT_TIMEOUT: int = DEFAULT_THROUGHPUT_TIMEOUT
+DEFAULT_GIT_MESSAGE_AGENT_TIMEOUT: int = 1200
 
 
 def agent_default_timeout() -> int:
@@ -150,9 +150,30 @@ def agent_default_timeout() -> int:
     return DEFAULT_AGENT_TIMEOUT
 
 
+#: Ceiling for the adaptive planner timeout when a run already burned
+#: one full timeout on the item (see adaptive_planner_claude_timeout).
+AGENT_PLAN_TIMEOUT_ADAPTIVE_MAX: int = 3600
+
+
 def planner_claude_timeout() -> int:
-    """Timeout for planner agent calls (default 1200s)."""
+    """Timeout for planner agent calls (default 1800s)."""
     return AGENT_PLAN_TIMEOUT
+
+
+def adaptive_planner_claude_timeout(attempts: int) -> int:
+    """Adaptive planner timeout based on prior plan attempts for one item.
+
+    First attempt uses the default budget (AGENT_PLAN_TIMEOUT, 1800 s).
+    Each additional attempt raises the budget by 50 % of the default,
+    clamped to AGENT_PLAN_TIMEOUT_ADAPTIVE_MAX (2x the default, 3600 s).
+    """
+    attempts = (
+        max(0, attempts) if isinstance(attempts, int) and not isinstance(attempts, bool) else 0
+    )
+    if attempts <= 0:
+        return AGENT_PLAN_TIMEOUT
+    scaled = AGENT_PLAN_TIMEOUT + int(AGENT_PLAN_TIMEOUT * 0.5 * attempts)
+    return min(scaled, AGENT_PLAN_TIMEOUT_ADAPTIVE_MAX)
 
 
 def plan_reviewer_claude_timeout() -> int:

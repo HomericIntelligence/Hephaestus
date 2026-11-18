@@ -286,7 +286,7 @@ class PipelineConfig:
     rate_guard_enabled: bool = True
     rate_guard_threshold: int = 200
     plugin_skills_dir: Path | None = None
-    planner_timeout: int = 1200
+    planner_timeout: int = 1800
     reviewer_timeout: int = AGENT_REVIEW_TIMEOUT
     implementer_timeout: int = 1800
     # Periodic implementer progress/checkpoint interval in seconds; zero

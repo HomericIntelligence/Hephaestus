@@ -752,7 +752,7 @@ def build_parser(*, profile: str = "full") -> argparse.ArgumentParser:
             help=text(MODEL_REFERENCE_HELP),
         )
     for name, default in (
-        ("planner", 1200),
+        ("planner", 1800),
         ("reviewer", AGENT_REVIEW_TIMEOUT),
         ("implementer", 1800),
         ("address-review", 7200),
