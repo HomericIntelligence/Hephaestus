@@ -47,7 +47,13 @@ from tests.unit.automation.test_first_publication_process import (
 def test_pre_intent_commit_cannot_authorize_writer_restart(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_ctx: Any, make_work_item: Any, state: str
 ) -> None:
-    """Preserve unpublished H and block work when no publication intent exists."""
+    """Unpublished H never authorizes publication; recovery is local-only.
+
+    Post-#3650 (fix for issue #3649): recoverable resume states flow
+    ``discover_first_publication -> create_worktree -> discover_pending_rebase -> rebase``
+    where the rebase is the implementation-start, local-only rebase and must not publish
+    (``publish_rebased_head: false``). ENTER fails closed with ``rebase_recovery_unavailable:``.
+    """
 
     class PlanGitHub(FakeStageGitHub):
         def discover_plan(self, issue_number: int) -> PlanDiscoveryResult:
@@ -92,12 +98,15 @@ def test_pre_intent_commit_cannot_authorize_writer_restart(
             assert not item.payload
         assert stage.on_enter(item, ctx) is None
         pre_intent_observed = False
-        for _ in range(8):
+        for _ in range(16):
             result = stage.step(item, ctx)
             if isinstance(result, StageOutcome):
-                assert result.disposition is Disposition.BLOCKED
                 assert pre_intent_observed
-                assert result.note == "first_publication_pre_intent_recovery_required"
+                assert result.disposition is Disposition.BLOCKED
+                assert result.note.startswith("rebase_recovery_unavailable:") or (
+                    result.note == "first_publication_pre_intent_recovery_required"
+                )
+                assert state == "ENTER"
                 break
             if isinstance(result, Continue):
                 item.state = result.next_state
@@ -111,7 +120,17 @@ def test_pre_intent_commit_cannot_authorize_writer_restart(
                 "discover_first_publication",
                 "discover_pending_rebase",
                 "create_worktree",
+                "rebase",
             }, "Unpublished H must not authorize publication or rebase."
+            if result.job.op == "rebase":
+                assert state != "ENTER"
+                assert result.job.kwargs.get("publish_rebased_head") is False, (
+                    "Recovery rebase must never publish the head"
+                )
+                assert result.job.kwargs.get("rebase_reason") == "implementation_start"
+                assert result.job.kwargs.get("issue_number") == 9
+                assert result.job.kwargs.get("branch") == "writer"
+                break
             completed = pool._run_git(result.job)
             if result.job.op == "discover_first_publication":
                 assert completed.ok, completed.error
@@ -120,7 +139,7 @@ def test_pre_intent_commit_cannot_authorize_writer_restart(
             item.state = result.on_done_state
             stage.on_job_done(item, completed, ctx)
         else:
-            pytest.fail("Pre-intent ambiguity did not reach an operator recovery outcome.")
+            pytest.fail("Pre-intent discovery did not reach its expected recovery outcome.")
         assert manager._require_receipt(9, SourceLane.IMPLEMENTATION) == receipt
         assert _git(receipt.path, "rev-parse", "HEAD") == job.workspace.revision
         assert _git(receipt.path, "rev-parse", "HEAD^{tree}") == tree
