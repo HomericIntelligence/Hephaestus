@@ -20,9 +20,7 @@ class _Reader:
         shutdown: object | None = None,
     ) -> tuple:
         self.calls += 1
-        return tuple(
-            DependencyFact(n, "Issue", "CLOSED") for n in issue_numbers
-        )
+        return tuple(DependencyFact(n, "Issue", "CLOSED") for n in issue_numbers)
 
 
 def _assert_facts(items: tuple) -> None:
