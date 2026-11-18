@@ -29,9 +29,15 @@ _BASE_URL = f"https://github.com/{_BASE_REPOSITORY}.git"
 
 
 def _git(cwd: Path, *arguments: str) -> str:
-    result = subprocess.run(
-        ["git", *arguments], cwd=cwd, check=True, capture_output=True, text=True
-    )
+    try:
+        result = subprocess.run(
+            ["git", *arguments], cwd=cwd, check=True, capture_output=True, text=True
+        )
+    except subprocess.CalledProcessError as exc:
+        raise AssertionError(
+            f"git {' '.join(arguments)} exited {exc.returncode}\n"
+            f"cwd={cwd}\nstdout:\n{exc.stdout}\nstderr:\n{exc.stderr}"
+        ) from exc
     return result.stdout.strip()
 
 
