@@ -11,6 +11,7 @@ REST reads are controlled fixtures.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -28,10 +29,23 @@ _BASE_URL = f"https://github.com/{_BASE_REPOSITORY}.git"
 # ---------------------------------------------------------------------------
 
 
+_TEST_GIT_IDENTITY = {
+    "GIT_AUTHOR_NAME": "Hephaestus Tests",
+    "GIT_AUTHOR_EMAIL": "tests@example.invalid",
+    "GIT_COMMITTER_NAME": "Hephaestus Tests",
+    "GIT_COMMITTER_EMAIL": "tests@example.invalid",
+}
+
+
 def _git(cwd: Path, *arguments: str) -> str:
     try:
         result = subprocess.run(
-            ["git", *arguments], cwd=cwd, check=True, capture_output=True, text=True
+            ["git", *arguments],
+            cwd=cwd,
+            check=True,
+            capture_output=True,
+            text=True,
+            env={**os.environ, **_TEST_GIT_IDENTITY},
         )
     except subprocess.CalledProcessError as exc:
         raise AssertionError(
