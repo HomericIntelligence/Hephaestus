@@ -6,8 +6,8 @@ deduplication and propagation behaviour.
 """
 
 import logging
-import time
 import sys
+import time
 
 import pytest
 
