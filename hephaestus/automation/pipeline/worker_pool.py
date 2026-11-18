@@ -213,6 +213,10 @@ from hephaestus.automation.provider_auth_resilience import (
     is_provider_auth_error,
     provider_auth_error_message,
 )
+from hephaestus.automation.provider_transport_failures import (
+    is_provider_transport_error,
+    provider_transport_timeout_message,
+)
 from hephaestus.automation.pyxis_artifact_io import (
     CrossNodePathBinding,
     bind_cross_node_root,
@@ -1042,6 +1046,11 @@ def _agent_exception_result(exc: Exception) -> JobResult:
             return JobResult(
                 ok=False,
                 error=provider_auth_error_message(detail),
+            )
+        if is_provider_transport_error(detail):
+            return JobResult(
+                ok=False,
+                error=provider_transport_timeout_message(detail),
             )
         return JobResult(
             ok=False,
