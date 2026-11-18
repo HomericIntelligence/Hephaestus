@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
+import time
 from concurrent.futures import CancelledError
 from subprocess import SubprocessError
 from typing import TYPE_CHECKING, Protocol
@@ -29,7 +31,7 @@ from hephaestus.automation.review_journal import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
     from threading import Event
 
     from .stages import StageGitHub
@@ -232,6 +234,44 @@ def order_for_implementation(issue_infos: Sequence[IssueInfo]) -> list[int]:
         return [info.number for info in issue_infos]
 
 
+#: Seconds a validated dependency-facts batch stays cached. Dependency state
+#: changes far slower than the polling loop; caching bounds GitHub traffic for
+#: a chronically blocked item without altering gate semantics.
+DEPENDENCY_FACTS_CACHE_TTL_S: float = 60.0
+
+_dependency_facts_cache: dict[tuple[int, ...], tuple[float, tuple[object, ...]]] = {}
+_dependency_facts_cache_lock = threading.Lock()
+
+
+def _dependency_facts_batch(
+    github: DependencyFactsReader,
+    canonical: tuple[int, ...],
+    *,
+    deadline_s: float,
+    shutdown: Event | None,
+    clock: Callable[[], float] = time.monotonic,
+) -> object:
+    """Return the dependency facts batch, reusing a fresh cache entry if any.
+
+    Facts that fail validation are not cached. A cache hit is capped by
+    DEPENDENCY_FACTS_CACHE_TTL_S measured against ``clock``.
+    """
+    current = clock()
+    with _dependency_facts_cache_lock:
+        entry = _dependency_facts_cache.get(canonical)
+        if entry is not None and entry[0] > current:
+            return entry[1]
+    fresh = github.batch_dependency_facts(
+        canonical,
+        deadline_s=deadline_s,
+        shutdown=shutdown,
+    )
+    if isinstance(fresh, tuple) and len(fresh) == len(canonical):
+        with _dependency_facts_cache_lock:
+            _dependency_facts_cache[canonical] = (current + DEPENDENCY_FACTS_CACHE_TTL_S, fresh)
+    return fresh
+
+
 def dependency_block_reason(
     dependencies: Sequence[int],
     github: DependencyFactsReader,
@@ -249,7 +289,8 @@ def dependency_block_reason(
         canonical = canonical_dependency_numbers(dependencies)
         if not canonical:
             return None
-        raw_facts = github.batch_dependency_facts(
+        raw_facts = _dependency_facts_batch(
+            github,
             canonical,
             deadline_s=deadline_s,
             shutdown=shutdown,
