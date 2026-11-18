@@ -17,7 +17,7 @@ class _Reader:
         issue_numbers: tuple[int, ...],
         *,
         deadline_s: float,
-        shutdown: "object | None" = None,
+        shutdown: object | None = None,
     ) -> tuple:
         self.calls += 1
         return tuple(
@@ -86,7 +86,7 @@ def test_facts_batch_malformed_facts_are_not_cached(monkeypatch: pytest.MonkeyPa
             issue_numbers: tuple[int, ...],
             *,
             deadline_s: float,
-            shutdown: "object | None" = None,
+            shutdown: object | None = None,
         ) -> tuple:
             self.calls += 1
             return "junk"  # type: ignore[return-value]
