@@ -439,7 +439,7 @@ def _dependency_retry(item: WorkItem, reason: str) -> StageOutcome:
     delay = _DEPENDENCY_RETRY_BACKOFF_S[min(attempts, len(_DEPENDENCY_RETRY_BACKOFF_S) - 1)]
     if attempts == 0:
         try:
-            issue = _issue_number(item)
+            issue = str(_issue_number(item))
         except Exception:
             issue = "?"
         logger.warning("implementation:%s: dependency-blocked: %s", issue, reason)
