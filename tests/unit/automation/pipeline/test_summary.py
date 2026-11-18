@@ -257,7 +257,9 @@ class TestPrintSummaryRows:
         assert "RESUMABLE at pr_review" in text
         assert "#1" in text and "!11" in text
 
-    def test_dependency_blocked_item_renders_as_blocked(self, caplog: pytest.LogCaptureFixture) -> None:
+    def test_dependency_blocked_item_renders_as_blocked(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
         """A dependency-blocked item is visibly BLOCKED with its reason."""
         items = [
             _item(6, StageName.FINISHED, passed=False, reason="resumable at implementation"),
@@ -278,7 +280,6 @@ class TestPrintSummaryRows:
         aggregate.record(blocked)
 
         assert aggregate.dispositions.get("blocked") == 1
-
 
     def test_aggregates_and_stats(self, caplog: pytest.LogCaptureFixture) -> None:
         """Disposition counts, per-stage throughput, agent time, loops, wall."""

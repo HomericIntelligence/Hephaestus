@@ -207,6 +207,7 @@ def _dependency_blocked_reason(item: WorkItem) -> str | None:
         return value.strip()
     return None
 
+
 def _blocked_detail(reason: str) -> str:
     """Return the cause that follows the redundant ``blocked`` prefix.
 
