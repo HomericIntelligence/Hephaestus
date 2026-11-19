@@ -1690,6 +1690,95 @@ class TestWorktreeManager:
             "-z",
         ]
 
+    def test_list_worktrees_fallback_for_git_older_than_2_36(
+        self, worktree_mocks: Any, tmp_path: Any
+    ) -> None:
+        """Verify the old-host plain-porcelain fallback and its cached decision."""
+        worktree_mocks.repo_root.return_value = tmp_path
+        manager = WorktreeManager()
+        assert manager._worktree_list_z_supported is None
+
+        plain_output = (
+            "worktree /repo\n"
+            "HEAD link gitdir:core.worktree\n"
+            "bare\n"
+            "\n"
+            "worktree /repo/build/.worktrees/issue-123\n"
+            "HEAD a1b2c3d4e5f60718293a4b5c6d7e8f9012345678\n"
+            "branch refs/heads/123-feature\n"
+            "locked\n"
+            "\n"
+        )
+        plain_result = Mock()
+        plain_result.stdout = plain_output
+        issued: list[list[str]] = []
+
+        def fake_run(cmd: list[str], **_: Any) -> Mock:
+            issued.append(cmd)
+            if cmd[-1] == "-z":
+                raise subprocess.CalledProcessError(129, cmd)
+            return plain_result
+
+        worktree_mocks.run.side_effect = fake_run
+
+        worktrees = manager.list_worktrees()
+
+        assert manager._worktree_list_z_supported is False
+        assert len(worktrees) == 2
+        assert worktrees[0]["path"] == "/repo"
+        assert "branch" not in worktrees[0]
+        assert "commit" not in worktrees[0]
+        assert worktrees[1]["path"] == "/repo/build/.worktrees/issue-123"
+        assert worktrees[1]["branch"] == "refs/heads/123-feature"
+        assert worktrees[1]["commit"] == "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678"
+        # From now on the plain form runs without re-probing ``-z``.
+        assert manager.list_worktrees() == worktrees
+        assert len(issued) == 3
+        assert issued[0] == ["git", "worktree", "list", "--porcelain", "-z"]
+        assert all(cmd == ["git", "worktree", "list", "--porcelain"] for cmd in issued[1:])
+
+    def test_list_worktrees_cached_z_failure_raises(
+        self, worktree_mocks: Any, tmp_path: Any
+    ) -> None:
+        """A cached ``-z`` decision is never probed again."""
+        worktree_mocks.repo_root.return_value = tmp_path
+        manager = WorktreeManager()
+        manager._worktree_list_z_supported = True
+        worktree_mocks.run.side_effect = [
+            subprocess.CalledProcessError(129, ["git", "worktree", "list", "--porcelain", "-z"]),
+            subprocess.CalledProcessError(1, ["git", "worktree", "list", "--porcelain"]),
+        ]
+
+        with pytest.raises(RuntimeError, match="Failed to list git worktrees"):
+            manager.list_worktrees(raise_on_error=True)
+
+    def test_list_worktrees_timeout_is_not_a_fallback_signal(
+        self, worktree_mocks: Any, tmp_path: Any
+    ) -> None:
+        """A timeout on the old hosts still propagates, not a plain retry."""
+        worktree_mocks.repo_root.return_value = tmp_path
+        manager = WorktreeManager()
+        worktree_mocks.run.side_effect = subprocess.TimeoutExpired(
+            "git worktree list --porcelain -z", timeout=5
+        )
+
+        with pytest.raises(subprocess.TimeoutExpired):
+            manager.list_worktrees()
+
+    def test_list_worktrees_all_forms_fail(self, worktree_mocks: Any, tmp_path: Any) -> None:
+        """Both plain and ``-z`` failing yields [] or a RuntimeError."""
+        worktree_mocks.repo_root.return_value = tmp_path
+        manager = WorktreeManager()
+        worktree_mocks.run.side_effect = subprocess.CalledProcessError(
+            129, ["git", "worktree", "list"]
+        )
+
+        assert manager.list_worktrees() == []
+        assert worktree_mocks.run.call_count == 2
+
+        with pytest.raises(RuntimeError, match="Failed to list git worktrees"):
+            manager.list_worktrees(raise_on_error=True)
+
     def test_ensure_branch_deleted(self, worktree_mocks: Any, tmp_path: Any) -> None:
         """Test deleting branch from local and remote."""
         worktree_mocks.repo_root.return_value = tmp_path

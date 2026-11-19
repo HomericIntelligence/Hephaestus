@@ -4049,3 +4049,26 @@ def test_dirty_check_ignores_only_the_automation_state_dir(
     target.write_text("generated\n", encoding="utf-8")
 
     assert manager._is_dirty(binding.cwd) is expected_dirty
+
+
+def test_registration_query_propagates_a_failed_inventory(tmp_path: Path) -> None:
+    """A failed worktree inventory reports its real cause (#3670).
+
+    Regression coverage: on hosts whose Git rejects ``worktree list
+    --porcelain -z`` (Git older than 2.36), the inventory failure must not
+    become a false "registration changed" result.
+    """
+    repo, first, _ = _repository(tmp_path)
+    manager = SourceWorkspaceManager(repo, repository="example/project")
+    lane = manager.prepare(77, SourceLane.IMPLEMENTATION, first)
+
+    with patch.object(
+        WorktreeManager,
+        "_registered_worktree_at_path",
+        side_effect=RuntimeError("Failed to list git worktrees"),
+    ):
+        with pytest.raises(RuntimeError, match="Failed to list git worktrees"):
+            manager._path_is_registered_to_repository(lane.cwd)
+
+    with patch.object(WorktreeManager, "_registered_worktree_at_path", return_value=None):
+        assert manager._path_is_registered_to_repository(lane.cwd) is False

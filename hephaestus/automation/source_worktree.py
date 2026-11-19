@@ -1583,13 +1583,8 @@ class SourceWorkspaceManager:
 
     def _has_worktree_registration(self, path: Path) -> bool:
         """Return whether Git still registers the exact source path."""
-        expected_path = path.resolve()
-        result = _git(self.repo_root, "worktree", "list", "--porcelain", "-z")
-        return any(
-            Path(field.removeprefix("worktree ")).resolve() == expected_path
-            for field in result.stdout.split("\0")
-            if field.startswith("worktree ")
-        )
+        manager = WorktreeManager(repo_root=self.repo_root, base_dir=self.base_dir)
+        return manager._registered_worktree_at_path(path) is not None
 
     def _recovery(
         self,
@@ -3032,7 +3027,12 @@ class SourceWorkspaceManager:
             return common_path.resolve(strict=True) == self.common_dir
         except (InterruptedError, SourceWorkspacePreparationError):
             raise
-        except (OSError, RuntimeError):
+        except RuntimeError:
+            # A failed worktree inventory is evidence about Git, not about the
+            # path: surface the real cause instead of reporting "not registered".
+            raise
+        except OSError:
+            # A missing or broken path is genuinely not bound to the repository.
             return False
 
     def _require_registered_transition_path(self, path: Path) -> None:
