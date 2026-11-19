@@ -8,13 +8,13 @@ from pathlib import Path
 import pytest
 
 import hephaestus._version as version_module
-from hephaestus.automation.athena_contract import (
-    AthenaContractError,
-    AthenaContractReceipt,
-    _load_manifest,
-    assert_athena_contract_matches,
-    load_athena_contract_receipt,
-)
+import hephaestus.automation.athena_contract as ac
+
+AthenaContractError = ac.AthenaContractError
+AthenaContractReceipt = ac.AthenaContractReceipt
+load_athena_contract_receipt = ac.load_athena_contract_receipt
+assert_athena_contract_matches = ac.assert_athena_contract_matches
+_load_manifest = ac._load_manifest
 
 
 def test_package_version_is_well_formed() -> None:
@@ -39,7 +39,6 @@ _VALID_HEX = "b" * 64
 def _manifest(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, raw: dict[str, object]) -> Path:
     manifest = tmp_path / "manifest.json"
     manifest.write_text(json.dumps(raw), encoding="utf-8")
-    import hephaestus.automation.athena_contract as ac
 
     monkeypatch.setattr(ac, "_CONTRACT_MANIFEST", manifest)
     return manifest
@@ -129,7 +128,6 @@ def test_load_athena_contract_receipt_valid(tmp_path: Path) -> None:
         "skills/learn/SKILL.md": b"learn bed\n",
         "docs/dependency-resolution.md": b"dep doc body\n",
     }
-    import hephaestus.automation.athena_contract as ac
 
     raw = _valid_raw()
     manifest = tmp_path / "manifest.json"
@@ -152,8 +150,6 @@ def test_load_athena_contract_receipt_valid(tmp_path: Path) -> None:
 
 def test_load_contract_rejects_mismatching_root(tmp_path: Path) -> None:
     """A root that does not match the pinned hashes rejects the contract."""
-    import hephaestus.automation.athena_contract as ac
-
     for relative in ac._CONTRACT_FILES.values():
         path = tmp_path / relative
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -170,8 +166,6 @@ def test_load_contract_rejects_trust_source_without_root() -> None:
 
 def test_load_contract_rejects_empty_trust_source(tmp_path: Path) -> None:
     """An empty trust source rejects the contract."""
-    import hephaestus.automation.athena_contract as ac
-
     for relative in ac._CONTRACT_FILES.values():
         path = tmp_path / relative
         path.parent.mkdir(parents=True, exist_ok=True)
