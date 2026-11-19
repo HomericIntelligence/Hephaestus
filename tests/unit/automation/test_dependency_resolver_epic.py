@@ -1,109 +1,101 @@
-"""Behavioral tests for epic-driven dependency loading."""
+"""Behavioral tests for the epic loader and sub-issue parser.
+
+Both surfaces take their GitHub reads from the same module-level symbols, so
+they are mocked with ``mock.patch`` to keep the tests hermetic.
+"""
 
 from __future__ import annotations
 
-import pytest
+from unittest.mock import patch
 
-from hephaestus.automation import dependency_resolver as resolver
-from hephaestus.automation.models import IssueInfo
+from hephaestus.automation.dependency_resolver import DependencyResolver
+from hephaestus.automation.models import IssueInfo, IssueState
 
 _PATCH = "hephaestus.automation.dependency_resolver"
 
 
-class _FakeIssue:
-    def __init__(
-        self, number: int, body: str = "", is_done: bool = False, title: str = "t"
-    ) -> None:
-        self.number = number
-        self.title = title
-        self.body = body
-        self.is_done = is_done
-        self.url = ""
-
-
-def _issue(number: int, body: str = "", is_done: bool = False) -> IssueInfo:
+def _issue(
+    number: int,
+    body: str = "",
+    labels: list[str] | None = None,
+    state: IssueState = IssueState.OPEN,
+) -> IssueInfo:
     return IssueInfo(
         number=number,
         title=f"issue-{number}",
-        url=f"https://github.com/example/project/issues/{number}",
-        labels=frozenset(),
-        is_done=is_done,
         body=body,
+        labels=list(labels or []),
+        state=state,
     )
+
+
+def _empty_payload() -> dict[str, str]:
+    return {"body": ""}
 
 
 def test_parse_sub_issues_checkbox_markers() -> None:
-    """Parse task-list and keyword-list entries from an epic body."""
-    monkeypatch = pytest.MonkeyPatch()
-    monkeypatch.setattr(
+    """Checkbox task items in the epic body are parsed regardless of state."""
+    body = "- [ ] #11\n- [x] #12\n* #13\n1. #99\n"
+    with patch(f"{_PATCH}.gh_issue_json", return_value={"body": body}):
+        result = DependencyResolver()._parse_sub_issues(_issue(1))
+    assert sorted(result) == [11, 12, 13]
+
+
+def test_parse_sub_issues_keyword_lines() -> None:
+    """Keyword markers ``sub-issues:`` / ``includes:`` are parsed."""
+    with patch(
         f"{_PATCH}.gh_issue_json",
-        lambda _: {"body": "- [ ] #11\n- [x] #12\n* #13\n1. #99\n"},
-    )
-    ep = resolver.DependencyResolver()
-    assert sorted(
-        ep._parse_sub_issues(
-            IssueInfo(number=1, title="e", url="u", labels=frozenset(), is_done=False, body="")
-        )
-    ) == [11, 12, 13]
-    monkeypatch.undo()
+        return_value={"body": "sub-issues: #21\nincludes: #22\nother #99\n"},
+    ):
+        result = DependencyResolver()._parse_sub_issues(_issue(1))
+    assert sorted(result) == [21, 22]
 
 
-def test_parse_sub_issues_keywords() -> None:
-    monkeypatch = pytest.MonkeyPatch()
-    monkeypatch.setattr(
-        f"{_PATCH}.gh_issue_json",
-        lambda _: {"body": "sub-issues: #21\nincludes: #22\nother #99\n"},
-    )
-    ep = resolver.DependencyResolver()
-    assert sorted(
-        ep._parse_sub_issues(
-            IssueInfo(number=1, title="e", url="u", labels=frozenset(), is_done=False, body="")
-        )
-    ) == [21, 22]
-    monkeypatch.undo()
+def test_parse_sub_issues_empty_body_returns_empty() -> None:
+    """An epic body with no sub-issue references returns an empty list."""
+    """An epic body with no sub-issue references returns an empty list."""
+    with patch(f"{_PATCH}.gh_issue_json", return_value=_empty_payload()):
+        assert DependencyResolver()._parse_sub_issues(_issue(1)) == []
 
 
-def test_parse_sub_issues_fetch_failure_falls_to_empty(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        f"{_PATCH}.gh_issue_json",
-        lambda _: {"body": ""},
-    )
-    ep = resolver.DependencyResolver()
-    assert (
-        ep._parse_sub_issues(
-            IssueInfo(number=1, title="e", url="u", labels=frozenset(), is_done=False, body="")
-        )
-        == []
-    )
+def test_load_epic_loads_open_sub_issues() -> None:
+    """An epic with an OPEN child issue admits it to the graph."""
+    """An epic for an OPEN child issue adds that issue to the graph."""
+    calls = {"n": 0}
+
+    def _fake_fetch(num: int) -> IssueInfo:
+        calls["n"] += 1
+        return _issue(num)
+
+    with (
+        patch(f"{_PATCH}.fetch_issue_info", side_effect=_fake_fetch),
+        patch(f"{_PATCH}.gh_issue_json", return_value={"body": "- [ ] #42\n"}),
+        patch(f"{_PATCH}.prefetch_issue_states", return_value={42: IssueState.OPEN}),
+    ):
+        resolver = DependencyResolver()
+        resolver.load_epic(1)
+
+    assert 42 in resolver.graph.issues
+    assert 1 in resolver.graph.issues
+    assert calls["n"] >= 2
 
 
-def test_load_epic_skips_done_issue(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Closed issues are marked completed and not loaded."""
-    fetched: list[int] = []
+def test_load_epic_skips_closed_sub_issues() -> None:
+    """A CLOSED sub-issue is completed and excluded from the graph."""
+    """A sub-issue whose state is CLOSED is marked complete, not admitted."""
 
-    def _fetch(n):
-        fetched.append(n)
-        return _issue(n, body="#42")
+    def _fake_fetch(num: int) -> IssueInfo:
+        if num == 1:
+            return _issue(1, body="- [ ] #42\n")
+        return _issue(num)
 
-    monkeypatch.setattr(f"{_PATCH}.fetch_issue_info", _fetch)
-    monkeypatch.setattr(f"{_PATCH}.gh_issue_json", lambda _: {"body": "- [ ] #42\n"})
-    monkeypatch.setattr(
-        f"{_PATCH}.prefetch_issue_states", lambda numbers: {42: _FakeIssue(42, is_done=True)}
-    )
+    with (
+        patch(f"{_PATCH}.fetch_issue_info", side_effect=_fake_fetch),
+        patch(f"{_PATCH}.gh_issue_json", return_value={"body": "- [ ] #42\n"}),
+        patch(f"{_PATCH}.prefetch_issue_states", return_value={42: IssueState.CLOSED}),
+    ):
+        resolver = DependencyResolver(skip_closed=True)
+        resolver.load_epic(1)
 
-    ep = resolver.DependencyResolver(skip_closed=True)
-    ep.load_epic(1)
-    assert 42 in ep.completed
-    assert 42 not in ep.graph.issues
-
-
-def test_load_epic_loads_open_issue_graph(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(f"{_PATCH}.fetch_issue_info", lambda n: _issue(n, body="", is_done=False))
-    monkeypatch.setattr(f"{_PATCH}.gh_issue_json", lambda _: {"body": "- [ ] #42\n"})
-    monkeypatch.setattr(
-        f"{_PATCH}.prefetch_issue_states", lambda numbers: {42: _FakeIssue(42, is_done=False)}
-    )
-
-    ep = resolver.DependencyResolver(skip_closed=True)
-    ep.load_epic(1)
-    assert 42 in ep.graph.issues
+    assert 42 in resolver.completed
+    assert 42 not in resolver.graph.issues
