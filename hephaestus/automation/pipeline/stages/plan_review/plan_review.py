@@ -202,7 +202,11 @@ from ...stage_base import (
     stage_network_deadline,
     stage_timeout,
 )
-from ..planning import build_plan_prompt
+from ..planning import (
+    _finalized_plan_authority_is_current,
+    _finalized_plan_state_is_current,
+    build_plan_prompt,
+)
 
 
 def _review_job_cwd(
@@ -425,6 +429,61 @@ def _missing_plan_admission_outcome(
         item.issue,
     )
     return StageOutcome(Disposition.FAIL_BACK, "plan_missing")
+
+
+def _finalized_plan_admission_outcome(
+    item: WorkItem,
+    ctx: StageContext,
+    labels: Sequence[str],
+) -> StageOutcome | None:
+    """Admit a durable Athena finalized plan whose plan comments are gone (#3665).
+
+    Planning seals one accepted GO planning epoch into the issue body, and
+    that finalize record is durable planning authority even after the
+    intermediate plan/review comments are deleted. When this stage re-enters
+    (for example after a loop restart re-seeds the item) and the comment
+    journal no longer carries the plan, the finalized authority must advance
+    instead of forcing a new planning epoch. Otherwise planning fast-forwards
+    on the same seal, this stage fails back again, and the two stages
+    ping-pong while every restart re-seed resets the fail-back counter.
+
+    Fail-closed: a missing finalize marker, a non-current label state (an
+    operator ``state:skip`` always wins), or any live body or label drift
+    falls through to the ordinary missing-plan admission.
+    """
+    if not item.payload.get("athena_finalized_plan"):
+        return None
+    if not _finalized_plan_state_is_current(labels):
+        return None
+    assert item.issue is not None  # noqa: S101 - on_enter validates the issue
+    try:
+        authority_current = _finalized_plan_authority_is_current(
+            item,
+            ctx.github.gh_issue_json(item.issue),
+            require_current_labels=not ctx.dry_run,
+        )
+    except RuntimeError as exc:
+        logger.warning(
+            "plan_review:%d: finalized authority rebind failed: %s",
+            item.issue,
+            exc,
+        )
+        return None
+    if not authority_current:
+        logger.warning(
+            "plan_review:%d: finalized plan authority drifted; replanning",
+            item.issue,
+        )
+        return None
+    item.payload.pop("plan_text", None)
+    item.payload.pop("plan_revision", None)
+    item.payload.pop(_REVIEWED_PLAN_COMMENT_BODY, None)
+    item.payload.pop("prior_review", None)
+    logger.info(
+        "plan_review:%d: Athena finalized plan remains approved; advancing",
+        item.issue,
+    )
+    return StageOutcome(Disposition.ADVANCE, "Athena finalized plan remains approved")
 
 
 _PLAN_REVIEW_LABELS = {
@@ -1151,6 +1210,9 @@ class PlanReviewStage(Stage):
                 )
             snapshot = journal_snapshot(comments)
             if not snapshot.current_plan:
+                finalized_outcome = _finalized_plan_admission_outcome(item, ctx, labels)
+                if finalized_outcome is not None:
+                    return finalized_outcome
                 return _missing_plan_admission_outcome(item, labels)
 
             if is_exclusive_plan_state(labels, STATE_PLAN_GO):

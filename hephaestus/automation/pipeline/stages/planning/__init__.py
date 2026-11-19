@@ -2,6 +2,8 @@
 
 from .planning import (
     PlanningStage,
+    _finalized_plan_authority_is_current as _finalized_plan_authority_is_current,
+    _finalized_plan_state_is_current as _finalized_plan_state_is_current,
     _mark_published_plan_pending_review as _mark_published_plan_pending_review,
     build_plan_prompt,
 )
