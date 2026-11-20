@@ -126,6 +126,12 @@ STALE_PREDICATE_IN_MEMORY_KEY = "in_memory_key"
 STALE_PREDICATE_PATH = "path"
 STALE_PREDICATE_BRANCH_HOLDER = "branch_holder"
 STALE_PREDICATE_LOCAL_REF = "local_ref"
+# The direct writer's checkout pin sits at the reservation base only before the
+# implementation-start rebase. After the writer publishes a rebased head the
+# main checkout no longer matches the advanced pin; a retry may still accept
+# the pin while the managed writer lane proves it, otherwise the state is
+# deterministically stale (#3672).
+STALE_PREDICATE_CHECKOUT_PIN = "checkout_pin_mismatch"
 
 
 class DirectScopeStaleStateError(RuntimeError):
