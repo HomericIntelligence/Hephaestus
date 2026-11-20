@@ -15,29 +15,33 @@ from hephaestus.automation.pipeline_github import PipelineGitHub
 
 @pytest.mark.parametrize("scoped", [False, True], ids=["legacy", "scoped"])
 @pytest.mark.parametrize(
-    ("failure", "category"),
+    ("failure", "category", "cause"),
     [
         (
             subprocess.CalledProcessError(
                 1, "secret-command", stderr="dial tcp secret-host: i/o timeout"
             ),
             "tcp-timeout",
+            "gh exited with status 1",
         ),
         (
             subprocess.CalledProcessError(
                 1, "secret-command", stderr=b"net/http: TLS handshake timeout secret-token"
             ),
             "tls-timeout",
+            "gh exited with status 1",
         ),
         (
             subprocess.TimeoutExpired("secret-command", 30, stderr="secret-token"),
             "subprocess-timeout",
+            "subprocess timed out after 30 seconds",
         ),
         (
             subprocess.CalledProcessError(1, "secret-command", stderr="secret-token"),
             "subprocess-failed",
+            "gh exited with status 1",
         ),
-        (OSError("secret-path"), "os-error"),
+        (PermissionError(13, "secret-path"), "os-error", "PermissionError (errno=13)"),
     ],
 )
 def test_issue_failure_category_reaches_terminal_summary(
@@ -46,8 +50,9 @@ def test_issue_failure_category_reaches_terminal_summary(
     scoped: bool,
     failure: Exception,
     category: str,
+    cause: str,
 ) -> None:
-    """Both issue readers preserve the cause and emit only a fixed category."""
+    """Issue readers report a safe cause without exposing subprocess data."""
     adapter = PipelineGitHub("org", repo="repo" if scoped else None)
     if scoped:
         monkeypatch.setattr(adapter, "_gh", Mock(side_effect=failure))
@@ -57,7 +62,8 @@ def test_issue_failure_category_reaches_terminal_summary(
     with pytest.raises(RuntimeError) as caught:
         adapter.gh_issue_json(3112)
 
-    assert str(caught.value) == f"Failed to fetch issue #3112: {category}"
+    assert str(caught.value).startswith(f"Failed to fetch issue #3112: {category}; ")
+    assert cause in str(caught.value)
     assert caught.value.__cause__ is failure
     item = WorkItem(repo="repo", kind=ItemKind.ISSUE, issue=3112, stage=StageName.FINISHED)
     item.result = ItemResult(

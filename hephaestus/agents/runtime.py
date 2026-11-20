@@ -12,6 +12,7 @@ import inspect
 import json
 import logging
 import os
+import re
 import secrets
 import shutil
 import signal
@@ -1940,6 +1941,10 @@ def _is_codex_app_server_stream_lag(message: str) -> bool:
 def _is_codex_nonfatal_error_item(message: str) -> bool:
     """Return whether Codex encodes a known informational notice as an error item."""
     if _is_codex_app_server_stream_lag(message):
+        return True
+    # Codex owns this bounded reconnect loop. A terminal event or process result
+    # determines failure; the interim notice does not discard a completed turn.
+    if re.match(r"^reconnecting\.\.\. \d+/\d+ \(.+\)$", message, re.IGNORECASE):
         return True
     if not message.startswith(_CODEX_SKILLS_BUDGET_PREFIX):
         return False

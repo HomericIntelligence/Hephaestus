@@ -251,7 +251,7 @@ class MnemosyneBindingService:
         """Resolve a target or use a verified canonical local checkout."""
         try:
             return self.resolver()
-        except MnemosyneResolutionError:
+        except MnemosyneResolutionError as exc:
             origin = _require_success(
                 self._git(root, "config", "--get", "remote.origin.url"),
                 "origin read",
@@ -260,7 +260,9 @@ class MnemosyneBindingService:
                 raise
             logger.warning(
                 "Mnemosyne repository resolution did not complete; "
-                "the canonical local checkout will be used"
+                "the canonical local checkout will be used (cause=%s: %s)",
+                type(exc).__name__,
+                exc,
             )
             return MnemosyneTarget(
                 owner=UPSTREAM_OWNER,

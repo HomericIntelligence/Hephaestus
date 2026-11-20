@@ -1372,10 +1372,41 @@ def _plan_discovery_stop_outcome(
 ) -> StageOutcome | None:
     """Convert a failed plan lookup into the stage outcome that preserves state."""
     if lookup.status is PlanDiscoveryStatus.READ_ERROR:
-        return _retry_incomplete_requirements_snapshot(
-            item,
-            ctx,
-            f"plan discovery failed: {lookup.error}",
+        reason = f"plan discovery read failed: {lookup.error}"
+        assert item.issue is not None  # noqa: S101 - caller validates this
+        try:
+            live = ctx.github.gh_issue_json(item.issue)
+        except RuntimeError as exc:
+            live = None
+            reason = f"{reason}; terminal-state read failed: {exc}"
+        if live is not None:
+            if issue_outcome := _closed_issue_snapshot_outcome(item, ctx, live):
+                return issue_outcome
+            if is_skipped(_issue_snapshot_labels(live)):
+                return StageOutcome(Disposition.SKIP, "state:skip")
+        attempt = item.attempts.get("plan", 0) + 1
+        item.attempts["plan"] = attempt
+        budget = ctx.budget("plan")
+        item.state = "VERIFY"
+        item.payload["retry_delay_s"] = float(2 ** (attempt - 1))
+        if attempt < budget:
+            logger.warning(
+                "planning:%d: %s; retry %d/%d",
+                item.issue,
+                reason,
+                attempt,
+                budget,
+            )
+            return StageOutcome(Disposition.RETRY, f"{reason}; retry {attempt}/{budget}")
+        logger.warning(
+            "planning:%d: %s; holding without changing the plan-review verdict after %d attempts",
+            item.issue,
+            reason,
+            budget,
+        )
+        return StageOutcome(
+            Disposition.BLOCKED,
+            f"{reason}; holding without changing the plan-review verdict",
         )
     if lookup.status is PlanDiscoveryStatus.IDENTITY_CONFLICT:
         return StageOutcome(
@@ -1458,7 +1489,12 @@ def _verify_plan(item: WorkItem, ctx: StageContext) -> StageOutcome:
         return _verify_published_plan_state(item, ctx)
 
     plan_disappeared = posted_plan or (initial_plan_found and not awaiting_revision_candidate)
-    reason = "plan disappeared before verification" if plan_disappeared else "plan not found"
+    if plan_disappeared:
+        reason = "plan disappeared before verification"
+    elif plan_text is None:
+        reason = "planner produced no candidate plan text; no canonical plan was found"
+    else:
+        reason = "candidate plan publication did not produce a discoverable canonical plan"
     attempt = item.attempts.get("plan", 0) + 1
     item.attempts["plan"] = attempt
     budget = ctx.budget("plan")

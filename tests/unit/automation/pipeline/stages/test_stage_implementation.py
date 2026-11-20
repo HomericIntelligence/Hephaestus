@@ -2486,7 +2486,7 @@ class TestGitErrorRetryCap:
 
         assert isinstance(outcome, StageOutcome)
         assert outcome.disposition == Disposition.RETRY
-        assert outcome.note == "worktree creation failed"
+        assert outcome.note == "worktree creation failed: missing remote ref"
         assert item.state == "WORKTREE_WAIT"
         assert item.worktree == ""
         assert "worktree_dirty" not in item.payload
@@ -5588,7 +5588,11 @@ class TestCommitPushAndPrCreate:
         assert item.state == "GATE"
         assert "no_commits" not in item.payload
         assert github.labels.get(9, set()) == set()
-        assert any("without a commit" in message for message in caplog.messages)
+        assert any(
+            "without a commit: the worktree was clean and its HEAD had not advanced" in message
+            and "retrying within the implement budget" in message
+            for message in caplog.messages
+        )
 
     def test_push_failure_retries_without_pr(self, make_ctx: Any, make_work_item: Any) -> None:
         """A non-"no commits" push failure RETRYs with no PR created."""

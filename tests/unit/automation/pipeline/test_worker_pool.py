@@ -164,6 +164,42 @@ from tests.unit.automation.pipeline.conftest import FakeSigningProvider
 WRITING_STANDARD_SENTINEL = "ASD-STE100 Simplified Technical English, Issue 9"
 
 _WP = "hephaestus.automation.pipeline.worker_pool"
+
+
+def test_github_job_log_preserves_the_failure_cause_and_retry_action(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A classified GitHub failure retains its operation and sanitized cause."""
+    from hephaestus.automation.pipeline.github_jobs import GitHubJob, ReadRateBudgetRequest
+    from hephaestus.automation.review_journal import CommentJournalReadError
+
+    class FailingRunner:
+        gh_timeout = 1
+
+        def run(self, _job: GitHubJob, **_kwargs: Any) -> None:
+            raise CommentJournalReadError("comment page unavailable")
+
+    pool = cast(Any, WorkerPool.__new__(WorkerPool))
+    pool._shutdown = threading.Event()
+    pool._github_job_runner = FailingRunner()
+    pool._repo_lock = lambda *_args, **_kwargs: nullcontext()
+    job = GitHubJob(
+        repo="repo",
+        repo_root=Path("/repo"),
+        request=ReadRateBudgetRequest(deadline_s=time.monotonic() + 5),
+        descr="read plan comments",
+    )
+
+    with caplog.at_level(logging.WARNING, logger=_WP):
+        result = pool._run_github(job)
+
+    assert result.ok is False
+    assert result.error == "comment_journal_read_error"
+    assert "GitHub job failed for read plan comments: comment_journal_read_error" in caplog.text
+    assert "cause=CommentJournalReadError: comment page unavailable" in caplog.text
+    assert "returning the failure for bounded stage retry" in caplog.text
+
+
 _REPOSITORY_LOCK_PROCESS = r"""
 import json
 import queue

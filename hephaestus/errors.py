@@ -18,6 +18,7 @@ Usage:
 
 from __future__ import annotations
 
+import subprocess
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -112,6 +113,19 @@ class TimeoutExpiredError(BoundaryError):
     """An operation exceeded its deadline."""
 
     exit_code = ExitCode.TIMEOUT
+
+
+class OperationDeadlineExpired(subprocess.TimeoutExpired):
+    """Report an exhausted absolute deadline without a fabricated duration."""
+
+    def __init__(self, operation: str, *, next_step: str = "operation") -> None:
+        """Keep TimeoutExpired classification and name the step that could not start."""
+        self.next_step = next_step
+        super().__init__(operation, 0)
+
+    def __str__(self) -> str:
+        """Describe the deadline state instead of a zero-second child process."""
+        return f"{self.cmd}: absolute monotonic deadline expired before the next {self.next_step}"
 
 
 @dataclass(frozen=True)

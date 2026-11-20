@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import logging
 import subprocess
 from pathlib import Path
 
@@ -99,6 +100,31 @@ def _completed(
     stderr: str = "",
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.CompletedProcess(["git"], returncode, stdout=stdout, stderr=stderr)
+
+
+def test_resolution_fallback_reports_the_resolution_cause(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A canonical local fallback explains why repository resolution failed."""
+    root = tmp_path / "knowledge"
+    root.mkdir()
+
+    def unavailable() -> MnemosyneTarget:
+        raise MnemosyneResolutionError("GitHub owner lookup timed out")
+
+    service = MnemosyneBindingService(
+        root=root,
+        resolver=unavailable,
+        git=FakeGit(),
+        remote_git_config=(),
+    )
+
+    with caplog.at_level(logging.WARNING, logger=mnemosyne_binding.__name__):
+        receipt = service.bind(contract=_contract(), sync=False)
+
+    assert receipt.sync_status == "not_requested"
+    assert "MnemosyneResolutionError: GitHub owner lookup timed out" in caplog.text
+    assert "canonical local checkout will be used" in caplog.text
 
 
 def test_default_root_uses_agent_brain_knowledge(

@@ -3399,6 +3399,53 @@ def test_run_codex_session_allows_app_server_stream_lag_after_successful_edits(
     assert result.stdout == "Implemented and verified the fix."
 
 
+def test_run_codex_session_allows_bounded_reconnect_after_successful_turn(
+    tmp_path: Path,
+) -> None:
+    """A bounded provider reconnect notice does not discard a completed turn."""
+
+    def fake_popen(cmd: list[str], **kwargs: Any) -> _FakeCodexPopen:
+        stdout = "\n".join(
+            [
+                json.dumps({"type": "thread.started", "thread_id": "codex-session"}),
+                json.dumps(
+                    {
+                        "type": "item.completed",
+                        "item": {
+                            "id": "item_1",
+                            "type": "error",
+                            "message": (
+                                "Reconnecting... 1/5 (stream disconnected before completion: "
+                                "idle timeout waiting for SSE)"
+                            ),
+                        },
+                    }
+                ),
+                json.dumps({"type": "turn.completed", "usage": {}}),
+            ]
+        )
+        return _FakeCodexPopen(
+            cmd,
+            proc_stdout=stdout,
+            final_message="Implemented and verified the fix.",
+            **kwargs,
+        )
+
+    with (
+        patch("hephaestus.agents.runtime.codex_approval_args", return_value=[]),
+        patch("hephaestus.agents.runtime._codex_extra_writable_dirs", return_value=[]),
+        patch("subprocess.Popen", side_effect=fake_popen),
+    ):
+        result = agent_runtime.run_codex_session(
+            "implement",
+            cwd=tmp_path,
+            timeout=30,
+            sandbox="workspace-write",
+        )
+
+    assert result.stdout == "Implemented and verified the fix."
+
+
 @pytest.mark.parametrize(
     "notice",
     [

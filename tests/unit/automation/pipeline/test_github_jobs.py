@@ -422,7 +422,43 @@ def test_enable_auto_merge_reads_the_gh_report(
 
     assert result.enabled is enabled
     assert result.already_enabled is already
-    assert calls == [["pr", "merge", "7", "--squash", "--auto"]]
+    assert calls == [["pr", "merge", "7", "--repo", "acme/repo", "--squash", "--auto"]]
+
+
+def test_disable_auto_merge_does_not_infer_the_repository_from_the_process_cwd() -> None:
+    """A repo-less coordinator can disable auto-merge for the selected repository."""
+    calls: list[list[str]] = []
+
+    def run(argv: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    github = PipelineGitHub("acme", repo="repo", command_runner=run)
+
+    assert github.disable_auto_merge(7) is True
+    assert calls == [["pr", "merge", "7", "--repo", "acme/repo", "--disable-auto"]]
+
+
+def test_auto_merge_without_repository_identity_does_not_invoke_gh(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An org-only accessor reports the missing scope instead of using the process cwd."""
+    calls: list[list[str]] = []
+
+    def run(argv: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    github = PipelineGitHub("acme", command_runner=run)
+
+    with caplog.at_level("WARNING"):
+        enabled = github.enable_auto_merge(7)
+        disabled = github.disable_auto_merge(7)
+
+    assert enabled.transport_error is True
+    assert disabled is False
+    assert calls == []
+    assert caplog.text.count("repo-scoped GitHub operation requires a repo") == 2
 
 
 class _DecompositionFakeGitHub:

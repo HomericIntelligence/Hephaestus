@@ -13,6 +13,7 @@ import subprocess
 import threading
 import time
 from collections.abc import Mapping
+from concurrent.futures import CancelledError
 from typing import Any, ClassVar
 from unittest.mock import patch
 
@@ -460,6 +461,18 @@ class TestFilterOpenIssues:
     def test_keeps_rows_on_transport_error(self) -> None:
         states = dict.fromkeys([1, 2, 3], RuntimeError("API unavailable"))
         assert self.select([1, 2, 3], states) == [1, 2, 3]
+
+    def test_cancellation_explains_shutdown_and_retains_the_issue(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        states = {1: CancelledError("GitHub operation was cancelled")}
+
+        with caplog.at_level(logging.WARNING):
+            assert self.select([1], states) == [1]
+
+        assert "GitHub read was cancelled during coordinator shutdown" in caplog.text
+        assert "retaining issue #1 for the next run" in caplog.text
+        assert "state is unknown" not in caplog.text
 
     def test_preserves_source_order(self) -> None:
         states = {1: "OPEN", 2: "CLOSED", 3: "OPEN", 4: "CLOSED", 5: "OPEN"}

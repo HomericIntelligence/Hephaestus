@@ -32,6 +32,7 @@ from typing import TextIO
 from zoneinfo import ZoneInfo
 
 from hephaestus.cli.localization import text
+from hephaestus.errors import OperationDeadlineExpired
 from hephaestus.git.gh.environment import gh_child_environment
 from hephaestus.utils.helpers import run_subprocess
 
@@ -431,7 +432,7 @@ def _throttle_remaining(deadline_s: float | None, shutdown: threading.Event | No
         return None
     budget = deadline_s - time.monotonic()
     if budget <= 0:
-        raise subprocess.TimeoutExpired("GitHub throttle deadline", 0)
+        raise OperationDeadlineExpired("GitHub throttle deadline", next_step="GitHub request")
     return budget
 
 

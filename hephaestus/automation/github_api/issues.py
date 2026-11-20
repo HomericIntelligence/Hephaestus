@@ -93,10 +93,24 @@ def issue_read_failure_category(error: BaseException) -> str:
     return "read-failed"
 
 
+def _issue_read_failure_cause(error: BaseException) -> str:
+    """Return structured cause metadata without command, path, or response content."""
+    if isinstance(error, subprocess.CalledProcessError):
+        return f"gh exited with status {error.returncode}"
+    if isinstance(error, subprocess.TimeoutExpired):
+        return f"subprocess timed out after {error.timeout} seconds"
+    if isinstance(error, json.JSONDecodeError):
+        return f"response JSON was invalid at line {error.lineno}, column {error.colno}"
+    if isinstance(error, OSError):
+        return f"{type(error).__name__} (errno={error.errno})"
+    return type(error).__name__
+
+
 def issue_read_error(issue_number: int, error: BaseException) -> RuntimeError:
-    """Build an issue-read error with a fixed failure category."""
+    """Build an issue-read error with a category and safe structured cause."""
     return RuntimeError(
-        f"Failed to fetch issue #{issue_number}: {issue_read_failure_category(error)}"
+        f"Failed to fetch issue #{issue_number}: {issue_read_failure_category(error)}; "
+        f"{_issue_read_failure_cause(error)}"
     )
 
 

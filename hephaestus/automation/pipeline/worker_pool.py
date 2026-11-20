@@ -280,6 +280,7 @@ from hephaestus.config.child_environments import (
     build_host_verification_env,
     build_python_phase_env,
 )
+from hephaestus.errors import OperationDeadlineExpired
 from hephaestus.git.config_safety import unsafe_local_git_config_key
 from hephaestus.git.gh.client import GitHubRateLimitError, GitHubUnavailableError
 from hephaestus.git.runtime import (
@@ -5204,7 +5205,9 @@ class WorkerPool:
             if request_deadline is not None:
                 deadline_s = min(deadline_s, request_deadline)
             if deadline_s <= started_s:
-                raise subprocess.TimeoutExpired("GitHub operation deadline", 0)
+                raise OperationDeadlineExpired(
+                    "GitHub operation deadline", next_step="GitHub request"
+                )
             with self._repo_lock(
                 job.repo,
                 deadline_s=deadline_s,
@@ -5226,7 +5229,15 @@ class WorkerPool:
             if failure is None:
                 raise
             failure_kind, retry_delay_s = failure
-            logger.warning("GitHub job failed: %s", failure_kind)
+            cause = bounded_pipeline_diagnostic(str(exc), limit=500)
+            logger.warning(
+                "GitHub job failed for %s: %s; cause=%s: %s; "
+                "returning the failure for bounded stage retry",
+                job.descr,
+                failure_kind,
+                type(exc).__name__,
+                cause,
+            )
             return JobResult(
                 ok=False,
                 error=failure_kind,
