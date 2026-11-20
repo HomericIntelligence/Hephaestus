@@ -9140,7 +9140,12 @@ class TestGitOps:
         completion_q: CompletionQueue,
         tmp_path: Path,
     ) -> None:
-        """A direct-scope worktree never falls back when its checkout moved."""
+        """A direct-scope worktree never falls back when its checkout moved.
+
+        Without a managed implementation writer lane that proves the pin, the
+        mismatch is deterministic local state: report the stale predicate so
+        the stage stops instead of spending the Git retry budget (#3672).
+        """
         pinned_sha = "a" * 40
         job = GitJob(
             repo="test/repo",
@@ -9167,8 +9172,125 @@ class TestGitOps:
             _, result = completion_q.get(timeout=10)
 
         assert result.ok is False
-        assert result.error == "direct scope checkout pin mismatch"
+        assert result.error == "direct_scope_stale_state:checkout_pin_mismatch"
+        assert result.value == {
+            "failure_kind": "direct_scope_stale_state",
+            "direct_scope_stale_state": {
+                "predicate": "checkout_pin_mismatch",
+                "branch": "7-auto",
+                "detail": f"checkout pin {pinned_sha} mismatch",
+            },
+            "direct_scope_reservation": {"branch": "7-auto", "base_sha": pinned_sha},
+        }
         mock_manager.assert_not_called()
+
+    def test_direct_pinned_impl_writer_lane_accepts_the_advanced_pin(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """A no-commit retry accepts the pin its own writer lane proves (#3672).
+
+        The implementation-start rebase advances the direct pin to the head the
+        writer published. A retry then runs while the main checkout still sits
+        at the original reservation base, so only the managed writer lane can
+        prove the advanced pin.
+        """
+        repo, first, second = _worker_repository(tmp_path)
+        source_manager = SourceWorkspaceManager(repo, repository="Hephaestus")
+        _git(repo, "reset", "--hard", first)
+        predecessor = source_manager.prepare(7, SourceLane.IMPLEMENTATION, first)
+        nonce = "a" * 32
+        branch = f"7-auto-impl-direct-{nonce}"
+        _git(predecessor.cwd, "checkout", "-b", branch, second)
+        receipt = source_manager._require_receipt(7, SourceLane.IMPLEMENTATION)
+        source_manager._write_receipt(
+            replace(
+                receipt,
+                revision=second,
+                generation=receipt.generation + 1,
+                detached=False,
+                branch=branch,
+            )
+        )
+        job = GitJob(
+            repo="Hephaestus",
+            op="create_worktree",
+            timeout_s=60,
+            expected_repository="HomericIntelligence/Hephaestus",
+            kwargs={
+                "issue_number": 7,
+                "branch_name": branch,
+                "repo_root": str(repo),
+                "refresh_base": False,
+                "base_sha": second,
+                "source_lane": "impl",
+                "direct_worktree_nonce": nonce,
+            },
+        )
+
+        with patch.object(
+            pool,
+            "_authenticated_remote_git_configuration",
+            return_value=({}, ("-c", "credential.helper=")),
+        ):
+            pool.submit(job, StageName.REPO)
+            _, result = completion_q.get(timeout=10)
+
+        assert result.ok is True
+        assert result.value["path"] == str(source_manager.path_for(7, SourceLane.IMPLEMENTATION))
+        assert result.value["impl_source_revision"] == second
+        assert result.value["direct_scope_reservation"] == {"branch": branch, "base_sha": second}
+
+    def test_direct_pinned_impl_writer_lane_must_hold_the_pinned_head(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """A writer lane at another head is not proof; the pin fails deterministically."""
+        repo, first, second = _worker_repository(tmp_path)
+        source_manager = SourceWorkspaceManager(repo, repository="Hephaestus")
+        _git(repo, "reset", "--hard", first)
+        source_manager.prepare(7, SourceLane.IMPLEMENTATION, first)
+        nonce = "a" * 32
+        branch = f"7-auto-impl-direct-{nonce}"
+        job = GitJob(
+            repo="Hephaestus",
+            op="create_worktree",
+            timeout_s=60,
+            expected_repository="HomericIntelligence/Hephaestus",
+            kwargs={
+                "issue_number": 7,
+                "branch_name": branch,
+                "repo_root": str(repo),
+                "refresh_base": False,
+                "base_sha": second,
+                "source_lane": "impl",
+                "direct_worktree_nonce": nonce,
+            },
+        )
+
+        with patch.object(
+            pool,
+            "_authenticated_remote_git_configuration",
+            return_value=({}, ("-c", "credential.helper=")),
+        ):
+            pool.submit(job, StageName.REPO)
+            _, result = completion_q.get(timeout=10)
+
+        assert result.ok is False
+        assert result.error == "direct_scope_stale_state:checkout_pin_mismatch"
+        assert result.value == {
+            "failure_kind": "direct_scope_stale_state",
+            "direct_scope_stale_state": {
+                "predicate": "checkout_pin_mismatch",
+                "branch": branch,
+                "detail": f"checkout pin {second} mismatch",
+            },
+            "direct_scope_reservation": {"branch": branch, "base_sha": second},
+        }
 
     def test_direct_pinned_worktree_reserves_remote_branch_before_agent_admission(
         self,

@@ -266,6 +266,7 @@ from hephaestus.automation.worktree_manager import (
     ADOPTED_HEAD_TRANSPORT_FAILED,
     ADOPTED_HEAD_VALIDATION_FAILED,
     BRANCH_WORKTREE_OWNED,
+    STALE_PREDICATE_CHECKOUT_PIN,
     BranchWorktreeOwnedError,
     DirectScopeStaleStateError,
     ImplementationWriterAuthority,
@@ -11676,6 +11677,7 @@ class WorkerPool:
                 repo_root=repo_root,
                 expected_repo=job.transport_repository,
                 timeout_s=job.timeout_s,
+                source_manager=source_manager,
             )
         except git_utils.DirectBranchReservationCollisionError as exc:
             # The post-failure remote probe proved another branch now owns
@@ -12380,6 +12382,46 @@ class WorkerPool:
             }
         return JobResult(ok=True, value=value)
 
+    @staticmethod
+    def _writer_lane_proves_checkout_pin(
+        source_manager: SourceWorkspaceManager,
+        *,
+        item_number: int,
+        branch_name: str,
+        base_sha: str,
+        repo_root: Path,
+        timeout_s: int,
+    ) -> bool:
+        """Return whether the managed writer lane proves the advanced checkout pin.
+
+        A no-commit retry re-enters the worktree wait after
+        ``_consume_initial_rebase_reservation`` advanced the direct pin to the
+        head the writer published during the implementation-start rebase. The
+        main checkout stays behind, so its HEAD never matches the advanced
+        pin. The retry may still accept the pin without re-probing when the
+        implementation writer's lane is the registered worktree that checks
+        out ``branch_name`` exactly at ``base_sha`` (#3672).
+        """
+        lane_path = source_manager.path_for(item_number, SourceLane.IMPLEMENTATION)
+        probe = WorktreeManager(
+            base_dir=WorktreeManager.default_base_dir(repo_root),
+            repo_root=repo_root,
+        )
+        try:
+            record = probe._registered_worktree_at_path(lane_path, timeout=timeout_s)
+        except Exception:
+            logger.warning(
+                "worktree inventory unavailable while proving checkout pin for branch %s",
+                branch_name,
+                exc_info=True,
+            )
+            return False
+        return (
+            record is not None
+            and record.get("branch") == f"refs/heads/{branch_name}"
+            and record.get("commit") == base_sha
+        )
+
     def _prepare_direct_scope_worktree(
         self,
         *,
@@ -12388,6 +12430,7 @@ class WorkerPool:
         repo_root: Path,
         expected_repo: str,
         timeout_s: int,
+        source_manager: SourceWorkspaceManager | None = None,
     ) -> tuple[str | None, str] | JobResult:
         """Validate and atomically reserve a direct-scope implementation branch."""
         base_sha = kwargs.pop("base_sha", None)
@@ -12402,7 +12445,41 @@ class WorkerPool:
             ["git", "rev-parse", "HEAD"], cwd=repo_root, timeout=timeout_s
         ).stdout.strip()
         if checkout_head != base_sha:
-            return JobResult(ok=False, error="direct scope checkout pin mismatch")
+            item_number = kwargs.get("issue_number")
+            proven = (
+                type(item_number) is int
+                and item_number > 0
+                and source_manager is not None
+                and self._writer_lane_proves_checkout_pin(
+                    source_manager,
+                    item_number=item_number,
+                    branch_name=branch_name,
+                    base_sha=base_sha,
+                    repo_root=repo_root,
+                    timeout_s=timeout_s,
+                )
+            )
+            if not proven:
+                logger.warning(
+                    "direct scope checkout pin %s does not match %s and the writer lane "
+                    "does not prove it for branch %s; failing deterministically",
+                    base_sha,
+                    checkout_head,
+                    branch_name,
+                )
+                return JobResult(
+                    ok=False,
+                    error=f"direct_scope_stale_state:{STALE_PREDICATE_CHECKOUT_PIN}",
+                    value={
+                        "failure_kind": "direct_scope_stale_state",
+                        "direct_scope_stale_state": {
+                            "predicate": STALE_PREDICATE_CHECKOUT_PIN,
+                            "branch": branch_name,
+                            "detail": f"checkout pin {base_sha} mismatch",
+                        },
+                        "direct_scope_reservation": {"branch": branch_name, "base_sha": base_sha},
+                    },
+                )
         if not branch_name:
             return JobResult(ok=False, error="direct scope branch name is missing")
         remote_env, remote_config = self._authenticated_remote_git_configuration(
