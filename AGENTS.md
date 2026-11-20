@@ -521,6 +521,12 @@ the results you report.
 
 ### Contribution sequence
 
+An explicit implementation request authorizes the routine delivery steps in
+this sequence. Create a tracking issue when the request does not identify one.
+This authorization covers staging the files you edited, signed commits, branch
+pushes, and pull-request creation. Destructive Git operations, history rewrites,
+merges, and changes outside the request require separate approval.
+
 1. Work on a feature branch. A dirty working tree is normal; do not reset,
    discard, or stash work you did not create.
 2. Rebase only for an actual conflict or a necessary dependency. Rebase with
