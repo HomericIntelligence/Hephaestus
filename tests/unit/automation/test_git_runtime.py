@@ -44,7 +44,6 @@ class TestRun:
             result = git_runtime.run([sensitive_argument])
 
         assert result is completed
-        assert "Running subprocess" in caplog.messages
         assert sensitive_argument not in caplog.text
 
     def test_failed_command_logs_only_redacted_summary(

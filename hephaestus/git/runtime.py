@@ -180,7 +180,6 @@ def run(
         input_text: Text to send through standard input. If this value is None, no text is sent.
 
     """
-    logger.debug("Running subprocess")
     timeout = remaining_operation_timeout(timeout)
     shutdown = shutdown or current_operation_shutdown()
     cancellation: dict[str, Any] = {"shutdown": shutdown} if shutdown is not None else {}
