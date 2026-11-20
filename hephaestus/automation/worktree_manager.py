@@ -269,6 +269,9 @@ class WorktreeManager:
         self._base_branch_resolved: str | None = None
         self._remote_git_env = dict(remote_git_env) if remote_git_env is not None else None
         self._remote_git_config = remote_git_config
+        # Git 2.36 (2022) added ``worktree list --porcelain -z``. Hosts with an
+        # older Git reject ``-z``; probe once per manager and reuse the answer.
+        self._worktree_list_z_supported: bool | None = None
         self._pending_implementation_adoptions: dict[
             Path, _ImplementationWriterAuthorityRecord
         ] = {}
@@ -2679,6 +2682,76 @@ class WorktreeManager:
             shutdown=shutdown,
         )
 
+    def _run_worktree_list(
+        self,
+        *,
+        z: bool,
+        timeout: int | None,
+        shutdown: threading.Event | None,
+    ) -> subprocess.CompletedProcess[str]:
+        """Run ``git worktree list --porcelain`` with the vetted ``-z`` flag.
+
+        Hosts with Git older than 2.36 reject ``-z``; probe them with this
+        runner and retry without it once.
+        """
+        execution_options = _timeout_kw(timeout)
+        if shutdown is not None:
+            execution_options["shutdown"] = shutdown
+        command: list[str] = ["git", "worktree", "list", "--porcelain"]
+        if z:
+            command.append("-z")
+        return run(command, cwd=self.repo_root, capture_output=True, **execution_options)
+
+    @staticmethod
+    def _parse_worktree_list_z(stdout: str) -> list[dict[str, str]]:
+        """Parse NUL-delimited ``worktree list --porcelain -z`` output."""
+        worktrees: list[dict[str, str]] = []
+        current: dict[str, str] = {}
+        for field in stdout.split("\0"):
+            if not field:
+                if current:
+                    worktrees.append(current)
+                    current = {}
+                continue
+            if field.startswith("worktree "):
+                current["path"] = field.split(" ", 1)[1]
+            elif field.startswith("branch "):
+                current["branch"] = field.split(" ", 1)[1]
+            elif field.startswith("HEAD "):
+                current["commit"] = field.split(" ", 1)[1]
+        if current:
+            worktrees.append(current)
+        return worktrees
+
+    @staticmethod
+    def _parse_worktree_list(stdout: str) -> list[dict[str, str]]:
+        """Parse newline-delimited ``worktree list --porcelain`` output.
+
+        One record per worktree, records separated by a blank line. Supports
+        old hosts without ``-z`` whose paths cannot contain newlines.
+        """
+        worktrees: list[dict[str, str]] = []
+        current: dict[str, str] = {}
+        for line in stdout.splitlines():
+            if not line:
+                if current:
+                    worktrees.append(current)
+                    current = {}
+                continue
+            if line.startswith("worktree "):
+                current["path"] = line.split(" ", 1)[1]
+            elif line.startswith("branch "):
+                current["branch"] = line.split(" ", 1)[1]
+            elif line.startswith("detached") or line.startswith("locked"):
+                continue
+            elif line.startswith("HEAD "):
+                value = line.split(" ", 1)[1]
+                if _is_full_commit_sha(value):
+                    current["commit"] = value
+        if current:
+            worktrees.append(current)
+        return worktrees
+
     def list_worktrees(
         self,
         *,
@@ -2697,38 +2770,20 @@ class WorktreeManager:
             List of worktree info dictionaries
 
         """
-        execution_options = _timeout_kw(timeout)
-        if shutdown is not None:
-            execution_options["shutdown"] = shutdown
+        support = self._worktree_list_z_supported
         try:
-            result = run(
-                ["git", "worktree", "list", "--porcelain", "-z"],
-                cwd=self.repo_root,
-                capture_output=True,
-                **execution_options,
-            )
-
-            worktrees = []
-            current: dict[str, str] = {}
-
-            for field in result.stdout.split("\0"):
-                if not field:
-                    if current:
-                        worktrees.append(current)
-                        current = {}
-                    continue
-
-                if field.startswith("worktree "):
-                    current["path"] = field.split(" ", 1)[1]
-                elif field.startswith("branch "):
-                    current["branch"] = field.split(" ", 1)[1]
-                elif field.startswith("HEAD "):
-                    current["commit"] = field.split(" ", 1)[1]
-
-            if current:
-                worktrees.append(current)
-
-            return worktrees
+            if support is True or support is None:
+                try:
+                    result = self._run_worktree_list(z=True, timeout=timeout, shutdown=shutdown)
+                    self._worktree_list_z_supported = True
+                    return self._parse_worktree_list_z(result.stdout)
+                except subprocess.CalledProcessError:
+                    if support is True:
+                        raise
+                    self._worktree_list_z_supported = False
+            # Git older than 2.36 does not accept ``-z``: retry once plain.
+            result = self._run_worktree_list(z=False, timeout=timeout, shutdown=shutdown)
+            return self._parse_worktree_list(result.stdout)
 
         except (InterruptedError, subprocess.TimeoutExpired):
             raise
