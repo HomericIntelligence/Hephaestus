@@ -49,6 +49,7 @@ from hephaestus.automation.protocol import (
     PLAN_COMMENT_MARKER,
     PLAN_REVIEW_CANONICAL_MARKER,
 )
+from hephaestus.automation.requirements_recovery import ATHENA_FINALIZED_PLAN_PREFIX
 from hephaestus.automation.review_journal import (
     IssueComment,
     journal_snapshot,
@@ -64,6 +65,7 @@ from hephaestus.automation.state_labels import (
     STATE_NEEDS_PLAN,
     STATE_PLAN_GO,
     STATE_PLAN_NO_GO,
+    STATE_SKIP,
 )
 from hephaestus.prompts import PromptCatalog
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
@@ -3104,3 +3106,93 @@ class TestDecompositionDryRun:
         assert "decomposition dry-run preview" in caplog.text
         assert "lossless-size" in caplog.text
         assert "state:needs-plan" in caplog.text
+
+
+def _finalized_body(content: str = "## Why\n\nUse the reviewed implementation plan.") -> str:
+    """Return a finalized planning body fixture."""
+    return (
+        f"{content}\n\n"
+        f"{ATHENA_FINALIZED_PLAN_PREFIX}R={'a' * 64} P=123456789:{'b' * 64} "
+        f"V=987654321:{'c' * 64} F={'d' * 64} -->"
+    )
+
+
+class TestFinalizedPlanAdmission:
+    """A durable Athena finalized plan is admitted without plan comments (#3665)."""
+
+    @staticmethod
+    def _bound_payload(body: str, body_digest: str) -> dict[str, Any]:
+        """Return the payload planning seeds for a verified finalized plan."""
+        return {
+            "issue_body": body,
+            "issue_body_digest": body_digest,
+            "athena_finalized_plan": True,
+        }
+
+    def test_finalized_plan_without_plan_comments_advances(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """The sealed planning epoch advances instead of forcing a new epoch."""
+        stage = PlanReviewStage()
+        body = _finalized_body()
+        github = FakeStageGitHub(
+            labels=[STATE_PLAN_GO],
+            issue_body=body,
+        )
+        item = make_work_item(
+            issue=1,
+            state="ENTER",
+            payload=self._bound_payload(body, github.gh_issue_json(1)["bodyDigest"]),
+        )
+
+        outcome = stage.on_enter(item, make_ctx(github=github))
+
+        assert outcome == StageOutcome(
+            Disposition.ADVANCE,
+            "Athena finalized plan remains approved",
+        )
+        assert github.mutation_log == []
+        assert "plan_text" not in item.payload
+        assert "plan_revision" not in item.payload
+
+    def test_finalized_plan_admission_respects_operator_skip(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """An operator state:skip wins over the sealed planning epoch."""
+        stage = PlanReviewStage()
+        body = _finalized_body()
+        github = FakeStageGitHub(labels=[STATE_SKIP], issue_body=body)
+        item = make_work_item(
+            issue=1,
+            state="ENTER",
+            payload=self._bound_payload(body, github.gh_issue_json(1)["bodyDigest"]),
+        )
+
+        outcome = stage.on_enter(item, make_ctx(github=github))
+
+        assert outcome == StageOutcome(Disposition.FAIL_BACK, "plan_missing")
+        assert github.mutation_log == []
+        assert github.labels[1] == {STATE_SKIP}
+
+    def test_finalized_plan_admission_rejects_drifted_body(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A live issue body without the finalize marker replans fail-closed."""
+        stage = PlanReviewStage()
+        github = FakeStageGitHub(
+            labels=[STATE_PLAN_GO],
+            issue_body="## Why\n\nThe operator removed the finalize record.",
+        )
+        item = make_work_item(
+            issue=1,
+            state="ENTER",
+            payload=self._bound_payload(
+                _finalized_body(),
+                github.gh_issue_json(1)["bodyDigest"],
+            ),
+        )
+
+        outcome = stage.on_enter(item, make_ctx(github=github))
+
+        assert outcome == StageOutcome(Disposition.FAIL_BACK, "plan_changed")
+        assert github.mutation_log == []

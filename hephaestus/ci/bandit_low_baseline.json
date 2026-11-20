@@ -1,8 +1,8 @@
 {
-  "generated_by": "PR #3653",
+  "generated_by": "PR #3668",
   "severity": "LOW",
   "counts": {
-    "B101": 58,
+    "B101": 59,
     "B105": 1,
     "B110": 1,
     "B112": 1,
@@ -66,7 +66,7 @@
     "hephaestus/automation/pipeline/repository_lock.py::B404": 1,
     "hephaestus/automation/pipeline/routing.py::B105": 1,
     "hephaestus/automation/pipeline/stages/implementation/implementation.py::B101": 1,
-    "hephaestus/automation/pipeline/stages/plan_review/plan_review.py::B101": 26,
+    "hephaestus/automation/pipeline/stages/plan_review/plan_review.py::B101": 27,
     "hephaestus/automation/pipeline/stages/plan_review/plan_review.py::B404": 1,
     "hephaestus/automation/pipeline/stages/planning/planning.py::B101": 17,
     "hephaestus/automation/pipeline/worker_pool.py::B101": 2,
