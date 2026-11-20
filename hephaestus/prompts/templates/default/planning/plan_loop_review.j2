@@ -47,4 +47,12 @@ addressed in the current plan.
 Cite plan sections and file paths for each finding. Do not include diffs.
 {{ full_sweep_suffix }}
 
+{% if verdict_followup %}
+# Verdict clarification
+
+Is this review a GO or NOGO? Answer GO only if the review says so.
+Classify the review above; do not perform a new review. End with exactly one
+final line: `state:plan-go` or `state:plan-no-go`.
+
+{% endif %}
 {{ output_format }}

@@ -2619,10 +2619,66 @@ def test_provider_failure_before_a_session_keeps_the_cycle_resumable(
     assert item.payload["plan_review_cycle_id"] == cycle_id
 
 
-def test_repeated_provider_failures_stay_bounded_and_resumable(
+def test_provider_failure_uses_fallback_then_default_then_holds(
     make_ctx: Any, make_work_item: Any, tmp_path: Path
 ) -> None:
-    """Provider failures still consume the reviewer failure budget (#3578)."""
+    """One failed job charges once and advances through the provider chain."""
+    github = FakeStageGitHub(labels=[STATE_NEEDS_PLAN])
+    github.comments[2766] = [render_current_plan("Plan v1")]
+    store = PlanReviewSessionStore(lambda: tmp_path)
+    ctx = make_ctx(
+        github=github,
+        plan_review_sessions=store,
+        config_overrides={
+            "reviewer_model": "primary-model",
+            "fallback_model": "fallback-model",
+        },
+    )
+    item = make_work_item(issue=2766, state="ENTER")
+    stage = PlanReviewStage()
+    assert stage.on_enter(item, ctx) is None
+    item.state = "REVIEW_WAIT"
+    outage = JobResult(ok=False, error="agent_error: provider.rate-limit: queue is full")
+
+    stage.on_job_done(item, outage, ctx)
+    assert "review_error_retries" not in item.payload
+    item.state = "EVAL"
+    first = stage.step(item, ctx)
+    assert isinstance(first, StageOutcome)
+    assert first.disposition is Disposition.RETRY
+    assert item.payload["review_model_override"] == "fallback-model"
+    assert item.payload["review_fallback_models"] == [""]
+    assert "review_error_retries" not in item.payload
+    fallback_request = stage.step(item, ctx)
+    assert isinstance(fallback_request, JobRequest)
+    assert fallback_request.job.model == "fallback-model"
+
+    stage.on_job_done(item, outage, ctx)
+    item.state = "EVAL"
+    second = stage.step(item, ctx)
+    assert isinstance(second, StageOutcome)
+    assert second.disposition is Disposition.RETRY
+    assert item.payload["review_model_override"] == ""
+    assert item.payload["review_fallback_models"] == []
+    default_request = stage.step(item, ctx)
+    assert isinstance(default_request, JobRequest)
+    assert default_request.job.model == ""
+
+    stage.on_job_done(item, outage, ctx)
+    item.state = "EVAL"
+    held = stage.step(item, ctx)
+    assert isinstance(held, StageOutcome)
+    assert held.disposition is Disposition.BLOCKED
+    assert "provider default" in held.note
+    assert "queue is full" in held.note
+    assert "review_error_retries" not in item.payload
+    assert not any(operation == "edit_labels" for operation, _args in github.mutation_log)
+
+
+def test_missing_verdict_requests_one_clarification_in_the_same_review(
+    make_ctx: Any, make_work_item: Any, tmp_path: Path
+) -> None:
+    """A review without a decision gets one follow-up, not a retry charge."""
     github = FakeStageGitHub(labels=[STATE_NEEDS_PLAN])
     github.comments[2766] = [render_current_plan("Plan v1")]
     store = PlanReviewSessionStore(lambda: tmp_path)
@@ -2630,23 +2686,46 @@ def test_repeated_provider_failures_stay_bounded_and_resumable(
     item = make_work_item(issue=2766, state="ENTER")
     stage = PlanReviewStage()
     assert stage.on_enter(item, ctx) is None
-    cycle_id = item.payload["plan_review_cycle_id"]
     item.state = "REVIEW_WAIT"
-    outage = JobResult(ok=False, error="agent_error: provider.rate-limit: queue is full")
+    first_request = stage.step(item, ctx)
+    assert isinstance(first_request, JobRequest)
+    stage.on_job_done(
+        item,
+        JobResult(
+            ok=True, value=ReviewVerdict(grade=None, verdict="ERROR", raw="The plan is sound.")
+        ),
+        ctx,
+    )
+    item.state = "EVAL"
 
-    for _ in range(plan_review.REVIEW_ERROR_RETRY_CAP):
-        stage.on_job_done(item, outage, ctx)
-        item.state = "REVIEW_WAIT"
+    outcome = stage.step(item, ctx)
 
-    # The next failure exceeds the cap and is recorded as a bounded failure,
-    # without marking the cycle recovery-required as a lost session would.
-    stage.on_job_done(item, outage, ctx)
+    assert isinstance(outcome, StageOutcome)
+    assert outcome.disposition is Disposition.RETRY
+    assert item.state == "REVIEW_WAIT"
+    assert "review_error_retries" not in item.payload
+    followup = stage.step(item, ctx)
+    assert isinstance(followup, JobRequest)
+    assert followup.job.prompt_kwargs["verdict_followup"] is True
+    prompt = followup.job.prompt_builder(**followup.job.prompt_kwargs)
+    assert "Is this review a GO or NOGO? Answer GO only if the review says so." in prompt
+    assert "The plan is sound." in prompt
+    assert "state:plan-go" in prompt
+    assert "state:plan-no-go" in prompt
 
-    assert item.payload["review_error_retries"] == plan_review.REVIEW_ERROR_RETRY_CAP + 1
-    assert item.payload["review_session_error"] == "review-provider-unavailable"
-    # Exhaustion is still bounded, but the cycle was never made unrecoverable
-    # by an outage that happened before any provider session existed.
-    assert store.load(cycle_id).state != "recovery-required"
+    stage.on_job_done(
+        item,
+        JobResult(
+            ok=True, value=ReviewVerdict(grade=None, verdict="ERROR", raw="Still no decision.")
+        ),
+        ctx,
+    )
+    item.state = "EVAL"
+    exhausted_followup = stage.step(item, ctx)
+    assert isinstance(exhausted_followup, StageOutcome)
+    assert exhausted_followup.disposition is Disposition.RETRY
+    assert item.payload["review_error_retries"] == 1
+    assert "review_verdict_followup_pending" not in item.payload
 
 
 def test_resumed_enter_item_keeps_the_provider_cause(

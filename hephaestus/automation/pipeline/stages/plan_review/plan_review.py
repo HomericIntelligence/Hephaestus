@@ -403,6 +403,57 @@ def _reviewer_failure(item: WorkItem, reason: str) -> StageOutcome:
     return StageOutcome(Disposition.RETRY, reason)
 
 
+def _selected_reviewer_model(item: WorkItem, ctx: StageContext) -> str:
+    """Return the active override or the configured reviewer model."""
+    if "review_model_override" in item.payload:
+        return str(item.payload["review_model_override"])
+    return stage_model(ctx, "reviewer", reviewer_model)
+
+
+def _provider_failure_outcome(item: WorkItem, ctx: StageContext) -> StageOutcome:
+    """Try each remaining reviewer model, then hold without a verdict label."""
+    cause = str(item.payload.get("review_provider_error") or "unknown provider error")
+    if "review_fallback_models" in item.payload:
+        remaining = [str(model) for model in item.payload["review_fallback_models"]]
+    else:
+        primary = _selected_reviewer_model(item, ctx)
+        seen = {parse_model_selection(primary)}
+        remaining = []
+        for candidate in (ctx.config.fallback_model, ""):
+            selection = parse_model_selection(candidate)
+            if selection not in seen:
+                seen.add(selection)
+                remaining.append(candidate)
+    if not remaining:
+        logger.error(
+            "plan_review:%s: reviewer provider unavailable after the fallback chain; "
+            "holding for operator recovery: %s",
+            item.issue,
+            cause,
+        )
+        return StageOutcome(
+            Disposition.BLOCKED,
+            f"review provider unavailable after configured fallback and provider default: {cause}",
+        )
+
+    selected = remaining.pop(0)
+    item.payload["review_model_override"] = selected
+    item.payload["review_fallback_models"] = remaining
+    if item.issue is not None:
+        ctx.plan_review_session_resets.add(item.issue)
+    item.state = REVIEW_WAIT
+    logger.warning(
+        "plan_review:%s: reviewer provider failed: %s; retrying with %s",
+        item.issue,
+        cause,
+        selected or "the provider default model",
+    )
+    return StageOutcome(
+        Disposition.RETRY,
+        f"review provider unavailable; retrying with {selected or 'provider default'}: {cause}",
+    )
+
+
 def _missing_plan_admission_outcome(
     item: WorkItem,
     labels: Sequence[str],
@@ -713,7 +764,7 @@ def _restore_review_conversation(
             reset = True
         if active is not None and not reset:
             selected_provider = agent_provider(ctx, "reviewer")
-            selected_model = stage_model(ctx, "reviewer", reviewer_model)
+            selected_model = _selected_reviewer_model(item, ctx)
             previous_model = _restore_reviewer_selection(
                 active.provider, active.reviewer_model, active.reviewer_config
             )
@@ -736,7 +787,7 @@ def _restore_review_conversation(
             )
         if active is None or reset:
             provider = agent_provider(ctx, "reviewer")
-            selected_model = stage_model(ctx, "reviewer", reviewer_model)
+            selected_model = _selected_reviewer_model(item, ctx)
             stored_model, selection_config = _durable_reviewer_selection(provider, selected_model)
             active = store.start_cycle(
                 repo=item.repo,
@@ -866,8 +917,9 @@ def _checkpoint_review_identity(item: WorkItem, result: JobResult, ctx: StageCon
         )
         item.payload["review_session_error"] = "review-provider-unavailable"
         item.payload["review_provider_error"] = reason[:500]
-        failure = _reviewer_failure(item, "review-provider-unavailable")
-        return failure.disposition is Disposition.FINISH_FAIL
+        # EVAL owns the single recovery decision for this failed job. Charging
+        # here as well consumed two retry units and hid the provider cause.
+        return False
     return False
 
 
@@ -893,6 +945,9 @@ def _review_session_checkpoint(
 def _record_review_value(item: WorkItem, value: object, ctx: StageContext) -> None:
     """Record a parsed review and its immutable transcript artifact."""
     item.payload["review_verdict"] = value
+    raw_review = getattr(value, "raw", "")
+    if getattr(value, "verdict", None) == "ERROR" and isinstance(raw_review, str):
+        item.payload["unclassified_review_text"] = raw_review.strip()
     cycle_id = str(item.payload.get("plan_review_cycle_id") or "")
     if ctx.plan_review_sessions is not None and cycle_id:
         ctx.plan_review_sessions.append_artifact(
@@ -1219,6 +1274,9 @@ class PlanReviewStage(Stage):
             # transient reviewer failure must not let the first ERROR of
             # a new cycle immediately exceed REVIEW_ERROR_RETRY_CAP.
             item.payload.pop("review_error_retries", None)
+            item.payload.pop("unclassified_review_text", None)
+            item.payload.pop("review_verdict_followup_attempted", None)
+            item.payload.pop("review_verdict_followup_pending", None)
         return None
 
     def step(self, item: WorkItem, ctx: StageContext) -> StepResult:
@@ -1270,6 +1328,19 @@ class PlanReviewStage(Stage):
 
     def _review_wait_step(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """Own the REVIEW_WAIT submission path and its restart reconciliation."""
+        if (
+            item.payload.get("review_session_error") == "review-provider-unavailable"
+            and "review_model_override" in item.payload
+        ):
+            session_outcome = _restore_review_conversation(
+                item,
+                ctx,
+                plan_text=str(item.payload.get("plan_text") or ""),
+                revision=int(item.payload.get("plan_revision") or 1),
+                has_prior_review=bool(item.payload.get("prior_review")),
+            )
+            if session_outcome is not None:
+                return session_outcome
         _retry_after_provider_unavailable(item)
         transition_outcome = _confirm_pending_amendment_transition(item, ctx)
         if transition_outcome is not None:
@@ -1324,6 +1395,7 @@ class PlanReviewStage(Stage):
             item.payload.get("plan_revision", 1),
         )
         workspace = planning_source_workspace_binding(item, ctx)
+        verdict_followup = bool(item.payload.pop("review_verdict_followup_pending", False))
         job = AgentJob(
             repo=item.repo,
             issue=item.issue,
@@ -1339,7 +1411,7 @@ class PlanReviewStage(Stage):
                     review_session.reviewer_config,
                 )
                 if review_session is not None
-                else stage_model(ctx, "reviewer", reviewer_model)
+                else _selected_reviewer_model(item, ctx)
             ),
             prompt_builder=get_plan_loop_review_prompt,
             cwd=_review_job_cwd(item, ctx, workspace),
@@ -1405,7 +1477,12 @@ class PlanReviewStage(Stage):
                 ),
                 "plan_revision": int(item.payload.get("plan_revision") or 1),
                 "plan_fingerprint": plan_fingerprint(str(item.payload.get("plan_text") or "")),
-                "review_transcript": transcript,
+                "review_transcript": (
+                    str(item.payload.get("unclassified_review_text") or "")
+                    if verdict_followup
+                    else transcript
+                ),
+                "verdict_followup": verdict_followup,
             },
             parse=parse_plan_review_verdict,  # verdict parsed in-worker
             descr="review",
@@ -1449,7 +1526,23 @@ class PlanReviewStage(Stage):
                 "NOGO",
             }:
                 item.payload.pop("accepted_plan_review", None)
-                return _reviewer_failure(item, "reviewer error")
+                raw_review = str(item.payload.get("unclassified_review_text") or "").strip()
+                if raw_review and not item.payload.get("review_verdict_followup_attempted"):
+                    item.payload["review_verdict_followup_attempted"] = True
+                    item.payload["review_verdict_followup_pending"] = True
+                    item.state = REVIEW_WAIT
+                    logger.warning(
+                        "plan_review:%s: review has no GO or NOGO; asking the reviewer "
+                        "to classify its own review once",
+                        item.issue,
+                    )
+                    return StageOutcome(Disposition.RETRY, "review verdict clarification requested")
+                return _reviewer_failure(
+                    item, "reviewer returned no GO or NOGO after clarification"
+                )
+            item.payload.pop("unclassified_review_text", None)
+            item.payload.pop("review_verdict_followup_attempted", None)
+            item.payload.pop("review_verdict_followup_pending", None)
             revision = int(item.payload.get("plan_revision") or 0)
             plan_comment_body = item.payload.get(_REVIEWED_PLAN_COMMENT_BODY)
             if not isinstance(plan_comment_body, str) or not plan_comment_body:
@@ -1466,6 +1559,8 @@ class PlanReviewStage(Stage):
             item.payload["accepted_plan_review"] = review
             item.payload.pop("review_publication_retries", None)
         if not isinstance(review, _AcceptedPlanReview):
+            if item.payload.get("review_session_error") == "review-provider-unavailable":
+                return _provider_failure_outcome(item, ctx)
             return _reviewer_failure(item, "no verdict found")
         verdict = review.verdict
 

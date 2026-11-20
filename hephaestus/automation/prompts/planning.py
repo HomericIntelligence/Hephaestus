@@ -91,6 +91,7 @@ def get_plan_loop_review_prompt(
     plan_revision: int = 1,
     plan_fingerprint: str = "",
     review_transcript: str = "",
+    verdict_followup: bool = False,
 ) -> str:
     """Build the iteration-aware plan-loop review prompt.
 
@@ -140,6 +141,7 @@ def get_plan_loop_review_prompt(
             else "_(no prior review transcript)_"
         ),
         full_sweep_suffix=full_sweep_suffix,
+        verdict_followup=verdict_followup,
         output_format=get_plan_review_output_format().strip(),
         untrusted_notice=fenced.untrusted_notice,
         terse_output_directive=get_terse_output_directive(
