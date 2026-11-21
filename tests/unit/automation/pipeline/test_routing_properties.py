@@ -44,7 +44,7 @@ _REASONS = [*_DECLARED_REASONS, "unknown_reason"]
 # (implementation -> plan_review), already_implementation_go_pr (-> merge_wait),
 # not_implementation_go / reviewed_head_missing / reviewed_head_drift
 # / merge_blocked_by_unresolved_threads / merge_blocked_by_failing_checks
-# (merge_wait -> pr_review / implementation), merge_conflicting
+# (merge_wait -> pr_review / implementation), merge_conflicting / merge_behind
 # (merge_wait -> implementation),
 # missing_worktree (-> implementation),
 # no_pr (-> finished), and merge-wait re-review routes all
@@ -75,6 +75,7 @@ _REASON_BUDGET: dict[str, str | None] = {
     "merge_blocked_by_unresolved_threads": None,
     "merge_blocked_by_failing_checks": None,
     "merge_conflicting": None,
+    "merge_behind": None,
     "resume_implementation": None,
     "resume_plan_review": None,
     "missing_worktree": None,

@@ -144,6 +144,7 @@ ROUTES: dict[StageName, Route] = {
             # the stage never reconciles a state owned by another run.
             "not_implementation_go": StageName.PR_REVIEW,
             "merge_conflicting": StageName.IMPLEMENTATION,
+            "merge_behind": StageName.IMPLEMENTATION,
             # A merge GitHub reports blocked by an unresolved review thread
             # needs review and implementation work, not terminal abandonment.
             "merge_blocked_by_unresolved_threads": StageName.PR_REVIEW,
