@@ -141,11 +141,11 @@ class DirtyDirectClaim:
 
     @classmethod
     def from_dict(cls, payload: object) -> Self:
-        """Parse the exact version 2 claim schema."""
+        """Parse the exact version 2 claim schema with optional path metadata."""
         if not isinstance(payload, dict) or set(payload) != {field.name for field in fields(cls)}:
             raise WorkspaceBindingError("dirty claim schema mismatch")
         paths = payload["allowed_paths"]
-        if not isinstance(paths, list) or not paths or any(not isinstance(p, str) for p in paths):
+        if not isinstance(paths, list) or any(not isinstance(p, str) for p in paths):
             raise WorkspaceBindingError("dirty claim scope is invalid")
         if any(
             not path

@@ -68,10 +68,7 @@ from hephaestus.agents.execution_policy import (
 )
 from hephaestus.agents.model_selection import AgentModelSelection, parse_model_selection
 from hephaestus.agents.pi_session import AgentSessionBinding
-from hephaestus.agents.runtime import (
-    agent_uses_configured_model_default,
-    requires_codex_implementation_isolation,
-)
+from hephaestus.agents.runtime import agent_uses_configured_model_default
 from hephaestus.agents.session_errors import AgentSessionLostError
 from hephaestus.agents.workspace import WorkspaceBinding
 from hephaestus.automation.agent_config import (
@@ -142,7 +139,6 @@ from hephaestus.automation.state_labels import (
 )
 from hephaestus.prompts import PromptCatalog
 
-from ...admission import parse_publication_scope_files
 from ...coordinator_sessions import agent_session_lifecycle
 from ...diagnostics import redact_diagnostic_text
 from ...github_jobs import (
@@ -330,17 +326,7 @@ _DECOMP_EPOCH_KEY = "decomposition_requirements_epoch"
 
 _DECOMPOSITION_REVIEW_GO_PREFIX = "decomposition-review: GO"
 
-_PLAN_SCOPE_INVALID = "plan_scope_invalid"
 _REVIEWED_PLAN_COMMENT_BODY = "reviewed_plan_comment_body"
-
-
-def _plan_scope_admission_failure(plan_text: str, ctx: StageContext) -> str | None:
-    """Return a Codex scope-admission failure for one exact plan."""
-    if not requires_codex_implementation_isolation(agent_provider(ctx, "implementer")):
-        return None
-    if parse_publication_scope_files(plan_text):
-        return None
-    return _PLAN_SCOPE_INVALID
 
 
 def _fleet_finalized_plan_outcome(item: WorkItem, ctx: StageContext) -> StageOutcome:
@@ -357,21 +343,7 @@ def _fleet_finalized_plan_outcome(item: WorkItem, ctx: StageContext) -> StageOut
         or hashlib.sha256(body.encode()).hexdigest() != item.payload.get("_fleet_plan_sha256")
     ):
         return StageOutcome(Disposition.BLOCKED, "fleet_finalized_plan_changed")
-    if failure := _plan_scope_admission_failure(body, ctx):
-        return StageOutcome(Disposition.BLOCKED, failure)
     return StageOutcome(Disposition.ADVANCE, "Admitted finalized plan remains approved")
-
-
-def _plan_scope_nogo_verdict() -> ReviewVerdict:
-    """Build the host review record for a plan with no valid implementation scope."""
-    body = (
-        "Host validation rejected implementation admission because the canonical plan has no "
-        "valid implementation file scope. Diagnostic: plan_scope_invalid. Use a `## Files to "
-        "Modify`, `## Files to Create`, or `## File Changes` section. Start each file "
-        "declaration with a backticked repository-relative path. Correct the canonical plan "
-        "and resubmit it for review."
-    )
-    return ReviewVerdict(grade=None, verdict="NOGO", raw=f"{body}\n\n{STATE_PLAN_NO_GO}")
 
 
 @dataclass(frozen=True)
@@ -1271,23 +1243,6 @@ class PlanReviewStage(Stage):
                 return _missing_plan_admission_outcome(item, labels)
 
             if is_exclusive_plan_state(labels, STATE_PLAN_GO):
-                if _plan_scope_admission_failure(snapshot.current_plan_body, ctx):
-                    expected_review = _AcceptedPlanReview(
-                        verdict=_plan_scope_nogo_verdict(),
-                        revision=snapshot.revision,
-                        plan_comment_body=snapshot.current_plan_body,
-                        # The existing GO label is the restart authority.
-                        # Retract it if the plan identity changes before the
-                        # blocking write.
-                        label_proposed=True,
-                    )
-                    item.payload["plan_text"] = snapshot.current_plan
-                    item.payload["plan_revision"] = snapshot.revision
-                    item.payload[_REVIEWED_PLAN_COMMENT_BODY] = snapshot.current_plan_body
-                    item.payload["accepted_plan_review"] = expected_review
-                    item.payload.pop("review_publication_retries", None)
-                    item.state = EVAL
-                    return None
                 item.payload["plan_text"] = snapshot.current_plan
                 item.payload["plan_revision"] = snapshot.revision
                 item.payload[_REVIEWED_PLAN_COMMENT_BODY] = snapshot.current_plan_body
@@ -1575,7 +1530,7 @@ class PlanReviewStage(Stage):
             item.payload["retry_delay_s"] = float(2 ** (retries - 1))
         return outcome
 
-    def _eval(self, item: WorkItem, ctx: StageContext) -> StepResult:  # noqa: C901
+    def _eval(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """Publish one accepted review without charging its retries again."""
         if item.issue is None:  # guarded by step(); kept for type narrowing
             return StageOutcome(Disposition.FINISH_FAIL, "no issue number")
@@ -1628,14 +1583,6 @@ class PlanReviewStage(Stage):
 
         if identity_outcome := self._review_identity_outcome(item, ctx, review):
             return identity_outcome
-        if verdict.is_go:
-            scoped = self._scope_admission_review(item, ctx, review)
-            if isinstance(scoped, StageOutcome):
-                return scoped
-            if scoped is not None:
-                review = scoped
-                verdict = review.verdict
-                item.payload["accepted_plan_review"] = review
         if review.charged_round is None:
             round_done = int(item.payload.get("review_round", 0)) + 1
             review = replace(review, charged_round=round_done)
@@ -2520,34 +2467,6 @@ class PlanReviewStage(Stage):
         return StageOutcome(
             Disposition.FAIL_BACK, "plan_changed" if snapshot.current_plan else "plan_missing"
         )
-
-    def _scope_admission_review(
-        self, item: WorkItem, ctx: StageContext, review: _AcceptedPlanReview
-    ) -> StageOutcome | _AcceptedPlanReview | None:
-        """Turn a Codex GO into a NOGO when its reviewed plan has no scope."""
-        assert item.issue is not None  # noqa: S101 - EVAL validates the issue
-        if not requires_codex_implementation_isolation(agent_provider(ctx, "implementer")):
-            return None
-        snapshot = journal_snapshot(ctx.github.issue_comments(item.issue))
-        if (
-            not snapshot.current_plan
-            or snapshot.revision != review.revision
-            or snapshot.current_plan_body != review.plan_comment_body
-        ):
-            return self._review_identity_outcome(
-                item,
-                ctx,
-                review,
-                snapshot=snapshot,
-            )
-        if reason := _plan_scope_admission_failure(snapshot.current_plan_body, ctx):
-            logger.warning(
-                "plan_review:%s: implementation admission rejected: %s",
-                item.issue,
-                reason,
-            )
-            return replace(review, verdict=_plan_scope_nogo_verdict())
-        return None
 
     def _complete_go(
         self, item: WorkItem, ctx: StageContext, review: _AcceptedPlanReview

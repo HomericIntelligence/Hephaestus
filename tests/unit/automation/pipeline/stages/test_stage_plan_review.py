@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 from pathlib import Path
@@ -52,6 +53,7 @@ from hephaestus.automation.protocol import (
 from hephaestus.automation.requirements_recovery import ATHENA_FINALIZED_PLAN_PREFIX
 from hephaestus.automation.review_journal import (
     IssueComment,
+    PlanDiscoveryStatus,
     journal_snapshot,
     plan_fingerprint,
     render_current_plan,
@@ -246,78 +248,64 @@ def test_amend_history_excludes_superseded_review_artifacts() -> None:
 class TestPlanReviewStageOnEnter:
     """on_enter cycle-relative counter reset (attempts are per-lifetime)."""
 
-    @pytest.mark.parametrize(
-        ("replacement_plan", "replacement_revision"),
-        [
-            (
-                "## Exact file scope and ownership\n- `tests/unit/two.py`",
-                1,
-            ),
-            (
-                "## Exact file scope and ownership\n- `tests/unit/one.py`",
-                2,
-            ),
-            (None, None),
-        ],
-    )
-    def test_on_enter_revalidates_scope_plan_identity_before_blocking(
+    def test_on_enter_advances_codex_go_without_file_sections(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A Codex GO needs the canonical plan and its label, not a file-section grammar."""
+        stage = PlanReviewStage()
+        github = FakeStageGitHub(labels=[STATE_PLAN_GO])
+        plan = "## Objective\nReview the implementation and report findings; change no files."
+        _seed_canonical_plan(github, 1, plan)
+        item = make_work_item(issue=1, state="ENTER")
+        ctx = make_ctx(github=github, config_overrides={"agent": "codex"})
+
+        outcome = stage.on_enter(item, ctx)
+
+        assert outcome == StageOutcome(Disposition.ADVANCE, "plan already approved")
+        assert item.payload["plan_text"] == plan
+        assert item.payload["plan_revision"] == 1
+        assert github.mutation_log == []
+
+    def test_fleet_finalized_non_mutating_plan_advances(
         self,
         make_ctx: Any,
         make_work_item: Any,
         monkeypatch: pytest.MonkeyPatch,
-        replacement_plan: str | None,
-        replacement_revision: int | None,
     ) -> None:
-        """A restart scope decision cannot block a plan that changes or disappears."""
-        stage = PlanReviewStage()
-        github = FakeStageGitHub(labels=[STATE_PLAN_GO])
-        plan = "## Exact file scope and ownership\n- `tests/unit/one.py`"
-        _seed_canonical_plan(github, 1, plan)
-        matching_comments = github.issue_comments(1)
-        replacement_comments = (
-            [
-                IssueComment(
-                    body=body,
-                    author_login="hephaestus[bot]",
-                    viewer_did_author=True,
-                )
-                for body in (
-                    render_current_plan(replacement_plan, revision=replacement_revision),
-                    render_pending_review(revision=replacement_revision),
-                )
-            ]
-            if replacement_plan is not None and replacement_revision is not None
-            else []
+        """A sealed read-only plan does not need to invent implementation files."""
+        body = "## Objective\nReview the current behavior and report findings; change no files."
+        current = SimpleNamespace(
+            finalized_body=True,
+            plan=SimpleNamespace(
+                status=PlanDiscoveryStatus.FOUND,
+                plan_text=body,
+            ),
         )
-        reads = iter([matching_comments, replacement_comments])
+        monkeypatch.setattr(plan_review, "read_current_plan", lambda *_args: current)
+        item = make_work_item(
+            issue=1,
+            state="ENTER",
+            payload={
+                "_fleet_attempt_digest": "attempt",
+                "_fleet_plan_sha256": hashlib.sha256(body.encode()).hexdigest(),
+                "issue_body": body,
+            },
+        )
 
-        def sequenced_comments(_issue_number: int) -> list[IssueComment]:
-            return next(reads, replacement_comments)
+        outcome = PlanReviewStage().on_enter(
+            item,
+            make_ctx(config_overrides={"agent": "codex"}),
+        )
 
-        monkeypatch.setattr(github, "issue_comments", sequenced_comments)
-        item = make_work_item(issue=1, state="ENTER")
-        original_attempts = dict(item.attempts)
-        ctx = make_ctx(github=github, config_overrides={"agent": "codex"})
+        assert outcome == StageOutcome(
+            Disposition.ADVANCE,
+            "Admitted finalized plan remains approved",
+        )
 
-        assert stage.on_enter(item, ctx) is None
-        assert item.state == "EVAL"
-        assert github.mutation_log == []
-        assert item.payload["plan_text"] == plan
-        assert item.payload["plan_revision"] == 1
-
-        outcome = stage.step(item, ctx)
-
-        reason = "plan_changed" if replacement_plan is not None else "plan_missing"
-        assert outcome == StageOutcome(Disposition.FAIL_BACK, reason)
-        assert github.labels[1] == {STATE_NEEDS_PLAN}
-        assert [entry[0] for entry in github.mutation_log] == ["edit_labels"]
-        assert item.attempts == original_attempts
-        assert item.payload.get("review_round", 0) == 0
-
-    def test_on_enter_advances_codex_go_with_accepted_scope_heading(
+    def test_on_enter_advances_codex_go_with_file_sections(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """A Codex restart keeps a valid exact file scope unchanged."""
+        """A Codex restart also accepts a plan that declares implementation files."""
         stage = PlanReviewStage()
         github = FakeStageGitHub(labels=[STATE_PLAN_GO])
         _seed_canonical_plan(
@@ -338,16 +326,16 @@ class TestPlanReviewStageOnEnter:
         assert outcome == StageOutcome(Disposition.ADVANCE, "plan already approved")
         assert github.mutation_log == []
 
-    def test_on_enter_keeps_non_codex_go_with_unsupported_scope_heading(
+    def test_on_enter_advances_non_codex_go_without_file_sections(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """Providers without Codex claims keep the existing restart route."""
+        """The same minimal plan contract applies without a Codex claim."""
         stage = PlanReviewStage()
         github = FakeStageGitHub(labels=[STATE_PLAN_GO])
         _seed_canonical_plan(
             github,
             1,
-            "## Exact file scope and ownership\n- `tests/unit/one.py`",
+            "## Objective\nReview the implementation; change no files.",
         )
         item = make_work_item(issue=1, state="ENTER")
 
@@ -1867,29 +1855,34 @@ class TestPlanReviewStageOnJobDone:
         assert caplog.messages == [f"plan_review:3: job failed: {expected_reason}"]
 
 
-class TestPlanScopeAdmission:
-    """Codex plan GO requires the implementation scope grammar."""
+class TestPlanReviewAdmission:
+    """A canonical plan, an explicit verdict, and its label control admission."""
 
-    def test_codex_go_without_a_valid_scope_becomes_nogo(
+    def test_codex_go_for_non_mutating_plan_without_revision_marker_advances(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """A GO for a plan with no file scope is recorded as a NOGO and amended."""
+        """A GO review without revision metadata approves a plan with no file sections."""
         stage = PlanReviewStage()
         github = FakeStageGitHub(labels=[STATE_NEEDS_PLAN])
-        _seed_canonical_plan(github, 1, "## Objective\nNo file scope.")
+        _seed_canonical_plan(
+            github,
+            1,
+            "## Objective\nReview the current behavior and report findings; change no files.",
+        )
         item = _review_item(make_work_item, github, issue=1, state="EVAL")
         item.payload["review_verdict"] = _verdict("GO")
+        assert "revision=" not in item.payload["review_verdict"].raw
 
         outcome = stage.step(
             item,
             make_ctx(github=github, config_overrides={"agent": "codex"}),
         )
 
-        assert outcome == Continue(next_state="AMEND_WAIT")
-        assert github.labels[1] == {STATE_PLAN_NO_GO}
-        assert any("plan_scope_invalid" in str(comment) for comment in github.comments[1])
+        assert outcome == StageOutcome(Disposition.ADVANCE, "plan approved")
+        assert github.labels[1] == {STATE_PLAN_GO}
+        assert not any("plan_scope_invalid" in str(comment) for comment in github.comments[1])
 
-    def test_fresh_codex_go_rejects_a_line_ending_change_after_validation(
+    def test_fresh_go_rejects_a_line_ending_change_before_publication(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
         """A byte change to the reviewed canonical plan invalidates the verdict."""
@@ -1909,7 +1902,7 @@ class TestPlanScopeAdmission:
         assert outcome == StageOutcome(Disposition.FAIL_BACK, "plan_changed")
         assert github.mutation_log == []
 
-    def test_fresh_codex_go_returns_to_planning_when_the_canonical_plan_changes(
+    def test_fresh_go_returns_to_planning_when_the_canonical_plan_changes(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
         """A review cannot authorize a later canonical plan revision."""
@@ -1938,7 +1931,7 @@ class TestPlanScopeAdmission:
             ("## Files to Modify\n- `tests/unit/two.py`", "plan_changed"),
         ],
     )
-    def test_scope_admission_uses_its_captured_plan_identity(
+    def test_go_publication_rechecks_its_captured_plan_identity(
         self,
         make_ctx: Any,
         make_work_item: Any,
@@ -1946,7 +1939,7 @@ class TestPlanScopeAdmission:
         replacement_plan: str | None,
         expected_reason: str,
     ) -> None:
-        """A transient identity mismatch cannot bypass scope admission."""
+        """A plan change during review publication cannot receive its GO label."""
         stage = PlanReviewStage()
         github = FakeStageGitHub(labels=[STATE_NEEDS_PLAN])
         plan = "## Files to Modify\n- `tests/unit/one.py`"
@@ -1975,11 +1968,7 @@ class TestPlanScopeAdmission:
         def sequenced_comments(_issue_number: int) -> list[IssueComment]:
             return next(reads, matching_comments)
 
-        def unexpected_scope_parse(_plan: str) -> tuple[str, ...]:
-            raise AssertionError("scope parser received an identity-mismatched plan")
-
         monkeypatch.setattr(github, "issue_comments", sequenced_comments)
-        monkeypatch.setattr(plan_review, "parse_publication_scope_files", unexpected_scope_parse)
 
         outcome = stage.step(
             item,
@@ -1987,7 +1976,7 @@ class TestPlanScopeAdmission:
         )
 
         assert outcome == StageOutcome(Disposition.FAIL_BACK, expected_reason)
-        assert github.mutation_log == []
+        assert [entry[0] for entry in github.mutation_log] == ["gh_issue_upsert_comment"]
 
 
 class TestDurableWriteOrdering:
