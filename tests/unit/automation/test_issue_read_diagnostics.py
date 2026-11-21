@@ -11,6 +11,7 @@ from hephaestus.automation.pipeline.routing import StageName
 from hephaestus.automation.pipeline.summary import RunStats, print_summary
 from hephaestus.automation.pipeline.work_item import ItemKind, ItemResult, WorkItem
 from hephaestus.automation.pipeline_github import PipelineGitHub
+from hephaestus.git.gh.rate_limit import OperationDeadlineExpired
 
 
 @pytest.mark.parametrize("scoped", [False, True], ids=["legacy", "scoped"])
@@ -35,6 +36,11 @@ from hephaestus.automation.pipeline_github import PipelineGitHub
             subprocess.TimeoutExpired("secret-command", 30, stderr="secret-token"),
             "subprocess-timeout",
             "subprocess timed out after 30 seconds",
+        ),
+        (
+            OperationDeadlineExpired("GitHub operation deadline"),
+            "subprocess-timeout",
+            "absolute monotonic deadline expired before the next GitHub request",
         ),
         (
             subprocess.CalledProcessError(1, "secret-command", stderr="secret-token"),

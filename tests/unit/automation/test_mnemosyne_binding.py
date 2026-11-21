@@ -127,6 +127,33 @@ def test_resolution_fallback_reports_the_resolution_cause(
     assert "canonical local checkout will be used" in caplog.text
 
 
+def test_resolution_fallback_redacts_and_bounds_resolver_diagnostics(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A canonical local fallback does not log resolver credentials or raw output."""
+    root = tmp_path / "knowledge"
+    root.mkdir()
+
+    def unavailable() -> MnemosyneTarget:
+        raise MnemosyneResolutionError(
+            ("x" * 2_000) + "\nGitHub query failed: token=review-probe-secret"
+        )
+
+    service = MnemosyneBindingService(
+        root=root,
+        resolver=unavailable,
+        git=FakeGit(),
+        remote_git_config=(),
+    )
+
+    with caplog.at_level(logging.WARNING, logger=mnemosyne_binding.__name__):
+        service.bind(contract=_contract(), sync=False)
+
+    assert "review-probe-secret" not in caplog.text
+    assert "token=<redacted-value>" in caplog.text
+    assert len(caplog.text) < 1_000
+
+
 def test_default_root_uses_agent_brain_knowledge(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

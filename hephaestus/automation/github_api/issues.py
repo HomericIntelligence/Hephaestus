@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import hephaestus.automation.github_api as _api
+from hephaestus.git.gh.rate_limit import OperationDeadlineExpired
 from hephaestus.utils.helpers import strip_null_bytes
 
 from ..comment_identity import (
@@ -97,6 +98,8 @@ def _issue_read_failure_cause(error: BaseException) -> str:
     """Return structured cause metadata without command, path, or response content."""
     if isinstance(error, subprocess.CalledProcessError):
         return f"gh exited with status {error.returncode}"
+    if isinstance(error, OperationDeadlineExpired):
+        return str(error)
     if isinstance(error, subprocess.TimeoutExpired):
         return f"subprocess timed out after {error.timeout} seconds"
     if isinstance(error, json.JSONDecodeError):
