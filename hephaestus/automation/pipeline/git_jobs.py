@@ -88,7 +88,6 @@ class FirstPublicationRecord:
             raise ValueError("The first-publication source binding is invalid.")
         if self.allowed_paths is not None and (
             type(self.allowed_paths) is not tuple
-            or not self.allowed_paths
             or len(self.allowed_paths) > 4096
             or any(
                 type(path) is not str or len(path) > 4096 or not is_safe_scope_retraction_path(path)

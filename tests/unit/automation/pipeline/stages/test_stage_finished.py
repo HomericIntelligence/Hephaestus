@@ -576,13 +576,14 @@ class TestCleanup:
         preserved: list[tuple[str, int, str]],
         make_ctx: Any,
     ) -> None:
-        """A terminal failure cannot strand a deterministic branch at its base SHA."""
+        """A terminal failure releases only the reservation this attempt created."""
         ctx = make_ctx()
         item = _item(passed=False, worktree="/wt/issue-42", state="CLEANUP")
         item.branch = "42-auto-impl"
         item.payload["_direct_scope_reservation"] = {
             "branch": "42-auto-impl",
             "base_sha": "a" * 40,
+            "created_by_this_attempt": True,
         }
 
         release = stage.step(item, ctx)
@@ -593,6 +594,7 @@ class TestCleanup:
         assert release.job.kwargs == {
             "branch": "42-auto-impl",
             "base_sha": "a" * 40,
+            "created_by_this_attempt": True,
             "repo_root": str(ctx.paths.repo_root),
         }
         assert release.on_done_state == "CLEANUP"
@@ -606,13 +608,14 @@ class TestCleanup:
     def test_passed_direct_scope_releases_before_removing_worktree(
         self, stage: FinishedStage, make_ctx: Any
     ) -> None:
-        """The release runs for every unpublished direct item, including a passing no-op."""
+        """The release runs for every unpublished reservation this attempt created."""
         ctx = make_ctx()
         item = _item(passed=True, worktree="/wt/issue-42", state="CLEANUP")
         item.branch = "42-auto-impl"
         item.payload["_direct_scope_reservation"] = {
             "branch": "42-auto-impl",
             "base_sha": "a" * 40,
+            "created_by_this_attempt": True,
         }
 
         first = stage.step(item, ctx)
@@ -626,6 +629,24 @@ class TestCleanup:
         assert isinstance(second, JobRequest)
         assert isinstance(second.job, GitJob)
         assert second.job.op == "remove_worktree"
+
+    def test_finished_preserves_a_recovered_remote_reservation(
+        self, stage: FinishedStage, make_ctx: Any
+    ) -> None:
+        """Cleanup has no delete authority over a branch recovered from another run."""
+        item = _item(passed=True, worktree="", state="CLEANUP")
+        item.branch = "42-auto-impl"
+        item.payload["_direct_scope_reservation"] = {
+            "branch": "42-auto-impl",
+            "base_sha": "a" * 40,
+            "created_by_this_attempt": False,
+        }
+
+        result = stage.step(item, make_ctx())
+
+        assert result == Continue(next_state="DONE")
+        assert item.payload["_direct_scope_reservation_release_attempted"] is True
+        assert "_learning_cleanup_succeeded" not in item.payload
 
     def test_reservation_cleanup_rejects_a_different_item_branch(
         self, stage: FinishedStage, make_ctx: Any
@@ -655,6 +676,7 @@ class TestCleanup:
         item.payload["_direct_scope_reservation"] = {
             "branch": "42-auto-impl",
             "base_sha": "a" * 40,
+            "created_by_this_attempt": True,
         }
 
         first = stage.step(item, ctx)

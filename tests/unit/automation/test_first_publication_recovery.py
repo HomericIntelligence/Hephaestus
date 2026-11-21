@@ -40,6 +40,7 @@ from tests.unit.automation.test_rebase_recovery import (
 _ACCEPTED_PUSH_FAULTS = frozenset(
     {
         "published",
+        "scope",
         "unknown-outcome",
         "completion-before",
         "completion-after",
@@ -238,7 +239,7 @@ def test_first_publication_failure_distinguishes_confirmed_absence(
                 result = pool._publish_first_writer(job, "writer", worktree, head)
         else:
             result = pool._run_git(job)
-        assert result.ok is (fault in {"published", "unknown-outcome"})
+        assert result.ok is (fault in {"published", "scope", "unknown-outcome"})
         assert _git(worktree, "rev-parse", "HEAD") == head
         assert _git(worktree, "rev-parse", "HEAD^{tree}") == tree
         assert _git(worktree, "status", "--porcelain") == ""
@@ -415,29 +416,21 @@ def _assert_fresh_worker_discovers_publication(
         if recovery_case in {
             "recovery-deadline",
             "recovery-completion-deadline",
-            "recovery-scope-changed",
-            "recovery-hidden-path",
         }:
             assert not recovered.ok
             assert records[0].read_bytes() == content
-            if recovery_case in {"recovery-deadline", "recovery-completion-deadline"}:
-                assert recovered.error == "timeout"
-                assert "Controlled publication transport failure." in recovered.stderr_tail
-                assert recovered.process_failure is not None
-                assert (
-                    recovered.process_failure.exception_class == "SourceWorkspacePreparationError"
+            assert recovered.error == "timeout"
+            assert "Controlled publication transport failure." in recovered.stderr_tail
+            assert recovered.process_failure is not None
+            assert recovered.process_failure.exception_class == "SourceWorkspacePreparationError"
+            if recovery_case == "recovery-completion-deadline":
+                assert len(resumed_evidence.push_calls) == 1
+                assert resumed_evidence.remote_reads_after_push == 2
+                assert "completion probe stdout" in recovered.stdout_tail
+                assert "completion probe timeout" in recovered.stderr_tail
+                assert recovered.stderr_tail.index("Controlled publication") < (
+                    recovered.stderr_tail.index("completion probe timeout")
                 )
-                if recovery_case == "recovery-completion-deadline":
-                    assert len(resumed_evidence.push_calls) == 1
-                    assert resumed_evidence.remote_reads_after_push == 2
-                    assert "completion probe stdout" in recovered.stdout_tail
-                    assert "completion probe timeout" in recovered.stderr_tail
-                    assert recovered.stderr_tail.index("Controlled publication") < (
-                        recovered.stderr_tail.index("completion probe timeout")
-                    )
-            else:
-                assert not resumed_evidence.push_calls
-                assert recovered.error is not None and "scope" in recovered.error
             assert manager._require_receipt(9, SourceLane.IMPLEMENTATION) == receipt
             assert _git(receipt.path, "rev-parse", "HEAD") == head
             return
@@ -764,11 +757,14 @@ def _assert_publication_failure(
         )
         return
     if fault == "scope":
-        assert not push_calls
-        assert not absent_reads
-        assert result.error == "implementation changed paths outside approved scope"
-        assert result.value == {"scope_violation_unexpected_paths": ["local.txt"]}
-        assert not (manager.state_dir / "first-publications").exists()
+        assert result.ok
+        assert len(push_calls) == 1
+        assert absent_reads
+        records = list((manager.state_dir / "first-publications").glob("9-*.json"))
+        assert len(records) == 1
+        retained = json.loads(records[0].read_bytes())
+        assert retained["phase"] == "complete"
+        assert retained["allowed_paths"] == ["different.txt"]
         return
     if fault == "malformed":
         assert not push_calls

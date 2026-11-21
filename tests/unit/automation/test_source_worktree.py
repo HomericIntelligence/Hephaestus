@@ -270,9 +270,9 @@ def test_bounded_prepare_includes_final_workspace_validation(
     assert not manager._receipt_path(42, SourceLane.REVIEW).exists()
 
 
-@pytest.mark.parametrize("change", ["generation", "lane", "item", "path", "unrelated_file"])
+@pytest.mark.parametrize("change", ["generation", "lane", "item", "path"])
 def test_dirty_operation_rejects_source_drift(tmp_path: Path, change: str) -> None:
-    """A dirty operation must keep the exact source receipt and file scope."""
+    """A dirty operation must keep the exact source receipt and content snapshot."""
     from hephaestus.agents.workspace import DirtySourceOperation
 
     repo, _, second = _repository(tmp_path)
@@ -287,8 +287,6 @@ def test_dirty_operation_rejects_source_drift(tmp_path: Path, change: str) -> No
         binding = replace(binding, item_number=43)
     elif change == "path":
         binding = replace(binding, cwd=repo)
-    else:
-        (binding.cwd / "unrelated.txt").write_text("outside the approved scope\n")
 
     with pytest.raises(SourceWorkspaceError):
         with manager.acquire(
@@ -298,23 +296,43 @@ def test_dirty_operation_rejects_source_drift(tmp_path: Path, change: str) -> No
             pytest.fail("source drift received a lease")
 
 
-def test_dirty_operation_lease_yields_the_worktree_and_keeps_changes(
-    tmp_path: Path,
+@pytest.mark.parametrize("allowed_paths", [(), ("tracked.txt",)], ids=["empty", "out-of-plan"])
+def test_test_fix_lease_ignores_plan_paths_and_keeps_changes(
+    tmp_path: Path, allowed_paths: tuple[str, ...]
 ) -> None:
-    """A dirty-operation lease grants the worktree and leaves the edits intact."""
+    """Test repair keeps its source lease with empty or out-of-plan edits."""
     from hephaestus.agents.workspace import DirtySourceOperation
 
     repo, _, second = _repository(tmp_path)
     manager = SourceWorkspaceManager(repo, repository="example/project")
     binding = manager.prepare(42, SourceLane.IMPLEMENTATION, second, branch="writer")
     (binding.cwd / "tracked.txt").write_text("candidate\n")
+    (binding.cwd / "unrelated.txt").write_text("test repair needs this file too\n")
 
     with manager.acquire(
-        binding, source_operation=DirtySourceOperation("test-fix", ("tracked.txt",))
+        binding, source_operation=DirtySourceOperation("test-fix", allowed_paths)
     ) as leased:
         assert leased == binding.cwd
 
     assert (binding.cwd / "tracked.txt").read_text() == "candidate\n"
+    assert (binding.cwd / "unrelated.txt").read_text() == "test repair needs this file too\n"
+
+
+def test_acquire_repairs_a_moved_worktree_registration(tmp_path: Path) -> None:
+    """A valid lane resumes after its path moves back to the recorded location."""
+    repo, _, second = _repository(tmp_path)
+    manager = SourceWorkspaceManager(repo, repository="example/project")
+    binding = manager.prepare(42, SourceLane.IMPLEMENTATION, second, branch="writer")
+    moved = binding.cwd.with_name("moved-writer")
+    binding.cwd.rename(moved)
+    _git(repo, "worktree", "repair", str(moved))
+    moved.rename(binding.cwd)
+    assert not manager._path_is_registered_to_repository(binding.cwd)
+
+    with manager.acquire(binding) as leased:
+        assert leased == binding.cwd
+
+    assert manager._path_is_registered_to_repository(binding.cwd)
 
 
 @pytest.mark.parametrize("changed_pin", ["head", "index", "content"])
@@ -1094,8 +1112,8 @@ def test_direct_writer_replaces_owned_attached_source_before_rebinding(
     )
 
 
-def test_direct_worker_preserves_existing_writer_without_receipt(tmp_path: Path) -> None:
-    """A direct worker rejects an existing writer that has no receipt."""
+def test_direct_worker_preserves_existing_writer_without_terminalizing(tmp_path: Path) -> None:
+    """A recoverable writer failure preserves the lane without terminal evidence."""
     repo, first, second = _repository(tmp_path)
     source_manager = SourceWorkspaceManager(repo, repository="example/project")
     writer = source_manager.path_for(9, SourceLane.IMPLEMENTATION)
@@ -1141,17 +1159,19 @@ def test_direct_worker_preserves_existing_writer_without_receipt(tmp_path: Path)
 
     create_worktree.assert_not_called()
     assert result.ok is False
-    assert result.error == "source_workspace_terminal"
+    assert result.error is not None
+    assert result.error.startswith("worktree creation failed:")
+    assert result.error != "source_workspace_terminal"
     assert isinstance(result.value, dict)
-    assert result.value["failure_kind"] == "source_workspace_terminal"
-    assert result.value["source_workspace_preserve"] is True
-    assert result.value["source_workspace_terminal"] is None
+    assert "source_workspace_terminal" not in result.value
     assert result.value["path"] == str(writer)
     assert result.value["direct_scope_reservation"] == {
         "branch": "writer-branch",
         "base_sha": second,
+        "created_by_this_attempt": False,
     }
     assert writer.exists()
+    assert not (source_manager.state_dir / "9-impl-terminal.json").exists()
     assert _git(writer, "rev-parse", "HEAD") == first
     assert _git(writer, "branch", "--show-current") == ""
 
@@ -1410,22 +1430,19 @@ def test_direct_worker_serializes_unproven_recovery_for_unreadable_receipt(
 
     create_worktree.assert_not_called()
     assert result.ok is False
-    assert result.error == "source_workspace_terminal"
+    assert result.error is not None
+    assert result.error.startswith("worktree creation failed:")
     assert isinstance(result.value, dict)
-    assert result.value["failure_kind"] == "source_workspace_terminal"
-    assert result.value["source_workspace_preserve"] is True
+    assert result.value["source_workspace_creation_failure"] == "writer_transition"
     assert result.value["path"] == str(predecessor.cwd)
-    reference_value = result.value["source_workspace_terminal"]
+    assert "source_workspace_terminal" not in result.value
+    assert not (source_manager.state_dir / "9-impl-terminal.json").exists()
     if receipt_kind == "symlink":
-        assert reference_value is None
         assert receipt_path.is_symlink()
-    else:
-        reference = source_worktree.SourceWorkspaceTerminalReference.from_dict(reference_value)
-        terminal = source_manager.read_terminal_failure(9, reference)
-        assert terminal.cause == "source_workspace_recovery_receipt_invalid"
     assert result.value["direct_scope_reservation"] == {
         "branch": "writer-branch",
         "base_sha": second,
+        "created_by_this_attempt": False,
     }
     assert predecessor.cwd.exists()
 
@@ -1450,12 +1467,11 @@ def test_direct_worker_serializes_unproven_recovery_for_unreadable_receipt(
 
     outcome = stage.step(item, context)
 
-    assert outcome == StageOutcome(
-        Disposition.FINISH_FAIL, "source_workspace_terminal: Preserve the writer."
-    )
-    assert item.payload["source_workspace_preserve"] is True
-    assert item.payload["source_workspace_terminal"] == reference_value
-    assert item.worktree == str(predecessor.cwd)
+    assert isinstance(outcome, StageOutcome)
+    assert outcome.disposition is Disposition.RETRY
+    assert "source_workspace_preserve" not in item.payload
+    assert "source_workspace_terminal" not in item.payload
+    assert predecessor.cwd.exists()
 
 
 def test_direct_writer_preserves_attached_source_with_durable_obligations(
@@ -2875,9 +2891,7 @@ def test_direct_writer_transition_revalidates_predecessor_branch_before_removal(
         remote_git_config=("-c", "protocol.file.allow=always"),
     )
 
-    with pytest.raises(
-        source_worktree.SourceWorkspaceTerminalError, match="changed after authorization"
-    ) as terminal:
+    with pytest.raises(WorktreeCreationReceiptError, match="changed after authorization"):
         with source_manager.implementation_writer_handoff(9) as handoff:
             source_manager.authorize_direct_implementation_writer_transition(
                 9,
@@ -2896,8 +2910,8 @@ def test_direct_writer_transition_revalidates_predecessor_branch_before_removal(
                 implementation_writer_handoff=handoff,
             )
 
-    assert isinstance(terminal.value.__cause__, WorktreeCreationReceiptError)
     assert source_manager._transition_path(9).exists()
+    assert not (source_manager.state_dir / "9-impl-terminal.json").exists()
     assert predecessor.cwd.exists()
     assert _git(predecessor.cwd, "symbolic-ref", "--short", "HEAD") == "foreign-predecessor"
     assert _git(predecessor.cwd, "rev-parse", "HEAD") == first
@@ -3419,8 +3433,8 @@ def test_worker_rejects_uncertain_local_publication_receipt(tmp_path: Path, fail
     )
 
 
-def test_terminal_failure_preserves_journal_on_handoff_exception(tmp_path: Path) -> None:
-    """A failed handoff keeps the journal for terminal verification."""
+def test_handoff_failure_preserves_journal_without_terminalizing(tmp_path: Path) -> None:
+    """A failed handoff keeps the journal for the next recovery attempt."""
     repo, first, second = _repository(tmp_path)
     manager = SourceWorkspaceManager(repo, repository="example/project")
     manager.prepare(9, SourceLane.IMPLEMENTATION, first)
@@ -3431,7 +3445,7 @@ def test_terminal_failure_preserves_journal_on_handoff_exception(tmp_path: Path)
             )
             raise RuntimeError("terminal failure")
     assert manager._transition_path(9).exists()
-    assert (manager.state_dir / "9-impl-terminal.json").exists()
+    assert not (manager.state_dir / "9-impl-terminal.json").exists()
 
 
 def _terminal_failed_transition(
@@ -3868,23 +3882,18 @@ def test_terminal_source_unreadable_preserves_existing_bytes(
     assert receipt.read_bytes() == before
 
 
-def test_terminal_context_rejects_and_preserves_broken_journal_link(tmp_path: Path) -> None:
-    """An invalid journal link still requires terminal state preservation."""
+def test_broken_journal_link_stops_handoff_without_terminalizing(tmp_path: Path) -> None:
+    """An invalid journal link remains available for diagnosis and recovery."""
     repo, first, _ = _repository(tmp_path)
     manager = SourceWorkspaceManager(repo, repository="example/project")
     manager.prepare(9, SourceLane.IMPLEMENTATION, first)
     journal = manager._transition_path(9)
     journal.symlink_to(manager.state_dir / "absent.json")
-    with pytest.raises(source_worktree.SourceWorkspaceTerminalError) as raised:
+    with pytest.raises(SourceWorkspaceError, match="refusing invalid source workspace transition"):
         with manager.implementation_writer_handoff(9):
             pytest.fail("An invalid journal must stop the handoff.")
     assert journal.is_symlink()
-    reference = raised.value.terminal_reference
-    assert reference is not None
-    assert (
-        manager.read_terminal_failure(9, reference).cause
-        == "source_workspace_recovery_receipt_invalid"
-    )
+    assert not (manager.state_dir / "9-impl-terminal.json").exists()
 
 
 def test_terminal_failure_does_not_restore_removed_predecessor(tmp_path: Path) -> None:

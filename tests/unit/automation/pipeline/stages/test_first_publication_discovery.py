@@ -44,15 +44,14 @@ from tests.unit.automation.test_first_publication_process import (
 @pytest.mark.parametrize(
     "state", ["GATE", "IMPLEMENT_WAIT", "TESTFIX_WAIT", "COMMIT_PUSH_WAIT", "ENTER"]
 )
-def test_pre_intent_commit_cannot_authorize_writer_restart(
+def test_pre_intent_commit_cannot_authorize_writer_restart(  # noqa: C901
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_ctx: Any, make_work_item: Any, state: str
 ) -> None:
-    """Unpublished H never authorizes publication; recovery is local-only.
+    """Unpublished work resumes its exact physical-lane state before publication.
 
-    Post-#3650 (fix for issue #3649): recoverable resume states flow
-    ``discover_first_publication -> create_worktree -> discover_pending_rebase -> rebase``
-    where the rebase is the implementation-start, local-only rebase and must not publish
-    (``publish_rebased_head: false``). ENTER fails closed with ``rebase_recovery_unavailable:``.
+    Stable and legacy receipts no longer erase a non-rebase resume state. ENTER
+    and GATE keep a local-only rebase route; implementation states resume their
+    saved work instead of discarding the started lane.
     """
 
     class PlanGitHub(FakeStageGitHub):
@@ -61,7 +60,7 @@ def test_pre_intent_commit_cannot_authorize_writer_restart(
 
     pool = None
     try:
-        job = _publication_job(tmp_path, monkeypatch)
+        job = _publication_job(tmp_path, monkeypatch, branch="9-auto-impl")
         assert job.workspace is not None
         root = Path(job.kwargs["repo_root"])
         manager = SourceWorkspaceManager(root, repository=job.repo)
@@ -78,7 +77,7 @@ def test_pre_intent_commit_cannot_authorize_writer_restart(
         )
         item = make_work_item(repo="project", issue=9, state=state)
         if state != "ENTER":
-            item.branch = "writer"
+            item.branch = "9-auto-impl"
             item.worktree = str(receipt.path)
             item.payload.update(
                 _impl_source_workspace=job.workspace.to_dict(),
@@ -101,13 +100,7 @@ def test_pre_intent_commit_cannot_authorize_writer_restart(
         for _ in range(16):
             result = stage.step(item, ctx)
             if isinstance(result, StageOutcome):
-                assert pre_intent_observed
-                assert result.disposition is Disposition.BLOCKED
-                assert result.note.startswith("rebase_recovery_unavailable:") or (
-                    result.note == "first_publication_pre_intent_recovery_required"
-                )
-                assert state == "ENTER"
-                break
+                pytest.fail(f"Physical-lane recovery was blocked unexpectedly: {result}")
             if isinstance(result, Continue):
                 item.state = result.next_state
                 continue
@@ -115,6 +108,26 @@ def test_pre_intent_commit_cannot_authorize_writer_restart(
             if isinstance(result.job, GitHubJob):
                 _complete_plan_scope_read(stage, item, ctx, result)
                 continue
+            if pre_intent_observed and state in {
+                "IMPLEMENT_WAIT",
+                "TESTFIX_WAIT",
+                "COMMIT_PUSH_WAIT",
+            }:
+                assert pre_intent_observed
+                assert (
+                    result.on_done_state
+                    == {
+                        "IMPLEMENT_WAIT": "TEST_WAIT",
+                        "TESTFIX_WAIT": "TEST_WAIT",
+                        "COMMIT_PUSH_WAIT": "PR_CREATE",
+                    }[state]
+                )
+                if state == "COMMIT_PUSH_WAIT":
+                    assert isinstance(result.job, GitJob)
+                    assert result.job.op == "commit_push"
+                else:
+                    assert not isinstance(result.job, GitJob)
+                break
             assert isinstance(result.job, GitJob), "Unpublished H must not start another writer."
             assert result.job.op in {
                 "discover_first_publication",
@@ -123,13 +136,12 @@ def test_pre_intent_commit_cannot_authorize_writer_restart(
                 "rebase",
             }, "Unpublished H must not authorize publication or rebase."
             if result.job.op == "rebase":
-                assert state != "ENTER"
                 assert result.job.kwargs.get("publish_rebased_head") is False, (
                     "Recovery rebase must never publish the head"
                 )
                 assert result.job.kwargs.get("rebase_reason") == "implementation_start"
                 assert result.job.kwargs.get("issue_number") == 9
-                assert result.job.kwargs.get("branch") == "writer"
+                assert result.job.kwargs.get("branch") == "9-auto-impl"
                 break
             completed = pool._run_git(result.job)
             if result.job.op == "discover_first_publication":
@@ -144,7 +156,7 @@ def test_pre_intent_commit_cannot_authorize_writer_restart(
         assert _git(receipt.path, "rev-parse", "HEAD") == job.workspace.revision
         assert _git(receipt.path, "rev-parse", "HEAD^{tree}") == tree
         assert _git(receipt.path, "status", "--porcelain") == ""
-        assert _git(root, "ls-remote", "origin", "refs/heads/writer") == ""
+        assert _git(root, "ls-remote", "origin", "refs/heads/9-auto-impl") == ""
         assert not list((manager.state_dir / "first-publications").glob("9-*.json"))
         assert ctx.github.mutation_log == []
     finally:
@@ -311,14 +323,24 @@ def test_pre_intent_rebase_route_rejects_changed_restart_context(
     assert ctx.github.mutation_log == []
 
 
+@pytest.mark.parametrize(
+    "receipt_branch",
+    ["7-auto-impl", f"7-auto-impl-direct-{'a' * 32}"],
+    ids=["stable", "legacy-nonce"],
+)
 def test_retained_publication_refreshes_scope_and_dispatches_owned_recovery(
-    make_ctx: Any, make_work_item: Any
+    make_ctx: Any, make_work_item: Any, receipt_branch: str
 ) -> None:
-    """Recover the retained source without preparing or implementing it again."""
-    _recovery_request(make_ctx, make_work_item)
+    """A stable request accepts either physical receipt branch identity."""
+    _recovery_request(make_ctx, make_work_item, receipt_branch=receipt_branch)
 
 
-def _recovery_request(make_ctx: Any, make_work_item: Any) -> tuple[Any, Any, Any, GitJob]:
+def _recovery_request(
+    make_ctx: Any,
+    make_work_item: Any,
+    *,
+    receipt_branch: str = f"7-auto-impl-direct-{'a' * 32}",
+) -> tuple[Any, Any, Any, GitJob]:
     """Drive discovery and a fresh scope read through the actual stage."""
 
     class PlanGitHub(FakeStageGitHub):
@@ -331,13 +353,14 @@ def _recovery_request(make_ctx: Any, make_work_item: Any) -> tuple[Any, Any, Any
         config_overrides={"run_pre_pr_tests": True, "pre_pr_test_argv": ("controlled", "focused")},
     )
     item = make_work_item(issue=7, state="GATE")
+    item.branch = "7-auto-impl"
     request = stage.step(item, ctx)
     assert isinstance(request, JobRequest)
     assert isinstance(request.job, GitJob)
     result = _no_candidate(request.job)
     assert isinstance(result.value, dict)
     retained = deepcopy(item)
-    retained.branch = "7-retained"
+    retained.branch = receipt_branch
     binding = _writer_binding(retained, path=str(Path(ctx.paths.repo_root) / "build/retained"))
     receipt = _writer_receipt(retained, binding)
     result.value.update(

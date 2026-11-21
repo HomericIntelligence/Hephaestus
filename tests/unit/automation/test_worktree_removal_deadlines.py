@@ -19,7 +19,6 @@ from hephaestus.automation import worktree_manager
 from hephaestus.automation.source_worktree import (
     SourceWorkspaceError,
     SourceWorkspaceManager,
-    SourceWorkspaceTerminalError,
     _PreparationDeadline,
 )
 from hephaestus.automation.worktree_manager import WorktreeManager
@@ -425,7 +424,7 @@ def test_partial_staged_deletion_failure_stops_then_restores_predecessor(
         worktree_manager, "run_subprocess", partially_delete_then_fail, raising=False
     )
 
-    with pytest.raises(SourceWorkspaceTerminalError) as raised:
+    with pytest.raises(RuntimeError) as raised:
         with source.implementation_writer_handoff(42) as handoff:
             source.authorize_adopted_implementation_writer_transition(
                 42, branch="adopted-writer", expected_head=second, handoff=handoff
@@ -440,12 +439,11 @@ def test_partial_staged_deletion_failure_stops_then_restores_predecessor(
 
     assert len(fallback_targets) == 1
     assert len(deletion_failures) == 1
-    creation_failure = raised.value.__cause__
-    assert type(creation_failure) is RuntimeError
-    assert creation_failure.__cause__ is deletion_failures[0]
+    assert type(raised.value) is RuntimeError
+    assert raised.value.__cause__ is deletion_failures[0]
     assert deletion_failures[0].cmd[-1] == str(fallback_targets[0])
     assert deletion_failures[0].stderr == "directory deletion failed"
-    assert raised.value.terminal_reference is not None
+    assert not (source.state_dir / "42-impl-terminal.json").exists()
     assert fallback_targets[0] != predecessor.cwd
     assert fallback_targets[0].is_dir()
     assert not (fallback_targets[0] / "tracked.txt").exists()

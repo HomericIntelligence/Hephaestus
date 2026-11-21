@@ -1216,6 +1216,8 @@ def _release_branch_reservation(
             ok=False,
             error="release_branch_reservation requires branch, base_sha, and repo_root",
         )
+    if job.kwargs.get("created_by_this_attempt") is not True:
+        return JobResult(ok=True, value=True)
     released = delete_reserved_branch_if_unchanged(
         branch_name,
         base_sha,

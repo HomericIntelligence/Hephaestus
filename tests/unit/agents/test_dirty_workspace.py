@@ -41,6 +41,13 @@ def test_dirty_claim_round_trip_is_closed() -> None:
         DirtyDirectClaim.from_dict({**claim.to_dict(), "permit": True})
 
 
+def test_dirty_claim_allows_an_empty_informational_scope() -> None:
+    """A non-mutating plan can carry no declared implementation paths."""
+    claim = replace(_claim(), allowed_paths=())
+
+    assert DirtyDirectClaim.from_dict(claim.to_dict()) == claim
+
+
 @pytest.mark.parametrize("path", ["", "../file", "/file", "./file", "a//b", ".git/config"])
 def test_dirty_claim_rejects_unsafe_scope(path: str) -> None:
     """Reject unsafe scope paths in serialized claims."""
@@ -82,6 +89,18 @@ def test_dirty_source_workspace_is_accepted(tmp_path: Path) -> None:
     assert validate_workspace_binding(binding) == path
 
 
+def test_dirty_source_workspace_accepts_an_empty_informational_scope(tmp_path: Path) -> None:
+    """An empty plan scope does not bypass or block the valid source-lane binding."""
+    path, binding = _dirty_source_binding(tmp_path)
+    assert binding.dirty_claim is not None
+    binding = replace(
+        binding,
+        dirty_claim=replace(binding.dirty_claim, allowed_paths=()),
+    )
+
+    assert validate_workspace_binding(binding) == path
+
+
 def test_dirty_workspace_accepted_after_round_trip_through_json(tmp_path: Path) -> None:
     """A deserialized dirty binding works without a process-local permit."""
     path, binding = _dirty_source_binding(tmp_path)
@@ -115,9 +134,17 @@ def test_workspace_on_a_different_branch_is_accepted(tmp_path: Path) -> None:
     assert validate_workspace_binding(binding) == path
 
 
-def test_workspace_revision_change_is_still_refused(tmp_path: Path) -> None:
-    """A moved HEAD remains a real error, distinct from a dirty tree."""
+@pytest.mark.parametrize("allowed_paths", [("tracked.txt",), ()])
+def test_workspace_revision_change_is_still_refused(
+    tmp_path: Path, allowed_paths: tuple[str, ...]
+) -> None:
+    """A moved HEAD remains a real error with or without plan path metadata."""
     path, binding = _dirty_source_binding(tmp_path)
+    assert binding.dirty_claim is not None
+    binding = replace(
+        binding,
+        dirty_claim=replace(binding.dirty_claim, allowed_paths=allowed_paths),
+    )
     (path / "extra.txt").write_text("x\n")
     _git(path, "add", "extra.txt")
     _git(path, "commit", "-m", "advance")

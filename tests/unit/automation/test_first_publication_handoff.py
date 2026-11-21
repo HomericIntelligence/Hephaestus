@@ -120,24 +120,25 @@ def test_discovery_does_not_replace_fresh_recovery_admission(
             pool.shutdown()
 
 
-def test_stale_retained_branch_reports_no_retainable_rebase(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+def test_retained_receipt_branch_supersedes_the_new_request_branch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A retained receipt from an older run reports no retainable rebase."""
+    """A legacy nonce branch remains discoverable after stable naming starts."""
     job = _publication_job(tmp_path, monkeypatch)
     root = Path(job.kwargs["repo_root"])
     manager = SourceWorkspaceManager(root, repository=job.repo)
     receipt = manager._require_receipt(9, SourceLane.IMPLEMENTATION)
     stale = replace(
         job,
-        kwargs={**job.kwargs, "branch": "9-auto-impl-direct-stale"},
+        kwargs={**job.kwargs, "branch": "9-auto-impl"},
     )
-    deadline = _PreparationDeadline(30.0, time.monotonic, threading.Event())
+    deadline = _PreparationDeadline(time.monotonic() + 30.0, time.monotonic, threading.Event())
     pool = _pool(root, monkeypatch)
-
-    with caplog.at_level("WARNING", logger="hephaestus.automation.pipeline.worker_pool"):
+    try:
+        expected = pool._first_publication_pre_intent(job, manager, deadline)
         retained = pool._first_publication_pre_intent(stale, manager, deadline)
+    finally:
+        pool.shutdown()
 
-    assert retained is False
-    assert receipt.branch != "9-auto-impl-direct-stale"
-    assert any("stale receipt" in record.getMessage() for record in caplog.records)
+    assert receipt.branch != "9-auto-impl"
+    assert retained == expected

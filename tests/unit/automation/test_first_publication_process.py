@@ -57,7 +57,9 @@ def _pool(root: Path, patch: pytest.MonkeyPatch) -> WorkerPool:
     return pool
 
 
-def _publication_job(tmp_path: Path, patch: pytest.MonkeyPatch) -> GitJob:
+def _publication_job(
+    tmp_path: Path, patch: pytest.MonkeyPatch, *, branch: str = "writer"
+) -> GitJob:
     """Prepare one signed source commit without publication intent."""
     root, _, base = _worker_repository(tmp_path)
     pool = _pool(root, patch)
@@ -71,7 +73,7 @@ def _publication_job(tmp_path: Path, patch: pytest.MonkeyPatch) -> GitJob:
                 kwargs={
                     "repo_root": str(root),
                     "issue_number": 9,
-                    "branch_name": "writer",
+                    "branch_name": branch,
                     "source_lane": "impl",
                 },
             )
@@ -85,7 +87,7 @@ def _publication_job(tmp_path: Path, patch: pytest.MonkeyPatch) -> GitJob:
             capture_output=True,
         )
         with manager.implementation_local_commit(
-            9, branch="writer", path=receipt.path, expected_binding=manager._binding(receipt)
+            9, branch=branch, path=receipt.path, expected_binding=manager._binding(receipt)
         ) as record:
             (receipt.path / "local.txt").write_text("Local change.\n", encoding="utf-8")
             _git(receipt.path, "add", "local.txt")
@@ -116,7 +118,7 @@ def _publication_job(tmp_path: Path, patch: pytest.MonkeyPatch) -> GitJob:
                 "issue_number": 9,
                 "source_lane": "impl",
                 "worktree_path": str(binding.cwd),
-                "branch": "writer",
+                "branch": branch,
                 "agent": "codex",
                 "allowed_paths": ("local.txt",),
                 "scope_history_base_sha": base,

@@ -80,6 +80,26 @@ def test_unusable_plan_path_keeps_the_usable_publication_scope(
     assert publication["allowed_paths"] == ("hephaestus/example.py",)
 
 
+def test_empty_publication_scope_is_valid_plan_metadata(
+    make_ctx: Callable[..., Any], make_work_item: Callable[..., Any]
+) -> None:
+    """An approved plan without path entries does not block Codex publication."""
+    ctx = make_ctx(
+        config_overrides={
+            "agent": "codex",
+            "codex_isolation_adapter": "test-adapter",
+            "codex_isolation_deployment_lock": Path("/deployment/lock.json"),
+            "codex_isolation_deployment_lock_sha256": "a" * 64,
+        }
+    )
+    item = make_work_item()
+    _complete_publication_scope(item, ctx, "No file section is necessary for this plan.\n")
+
+    publication = _codex_publication_kwargs(item, ctx, "b" * 40)
+
+    assert publication == {"allowed_paths": (), "scope_history_base_sha": "b" * 40}
+
+
 def test_publication_scope_preserves_hidden_and_extensionless_paths(
     make_ctx: Callable[..., Any], make_work_item: Callable[..., Any]
 ) -> None:

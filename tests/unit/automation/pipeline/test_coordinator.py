@@ -508,10 +508,10 @@ def test_dirty_recovery_completion_is_stored_before_recovery_state_routing(
 class TestQuiescence:
     """Full-run tests driving seeded items to the finished ledger."""
 
-    def test_fresh_direct_issue_uses_a_unique_branch_per_source_run(
+    def test_direct_issue_reuses_one_stable_branch_across_source_runs(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A closed predecessor cannot reserve a later direct run's branch name."""
+        """Independent sessions select the same issue branch and no nonce payload."""
         base_sha = "a" * 40
         config = PipelineConfig(
             org="org",
@@ -525,48 +525,27 @@ class TestQuiescence:
             "hephaestus.automation.pipeline.admission._filter_open_issues",
             lambda _repo, issues, **_kwargs: list(issues),
         )
-        nonce_one = uuid.UUID(int=1)
-        nonce_two = uuid.UUID(int=2)
+        nonces = iter((uuid.UUID(int=1), uuid.UUID(int=2)))
         monkeypatch.setattr(
             "hephaestus.automation.pipeline.coordinator_sources.uuid.uuid4",
-            lambda: nonce_one,
+            lambda: next(nonces),
         )
-        first = Coordinator(
-            config,
-            github=FakeStageGitHub(labels=["state:plan-go"]),
-            **fake_worker_factories(FakeWorkerPool(), None),
-            install_signals=False,
-        )
-        first._begin_direct_issue_source("repo-a", base_sha)
-        first_source = first._direct_issue_source
-        assert first_source is not None
-        assert first._drain_direct_issue_source() == 1
-        first_item = first.queues[StageName.IMPLEMENTATION].snapshot()[0]
+        items = []
+        for _ in range(2):
+            coordinator = Coordinator(
+                config,
+                github=FakeStageGitHub(labels=["state:plan-go"]),
+                **fake_worker_factories(FakeWorkerPool(), None),
+                install_signals=False,
+            )
+            coordinator._begin_direct_issue_source("repo-a", base_sha)
+            assert coordinator._direct_issue_source is not None
+            assert coordinator._drain_direct_issue_source() == 1
+            items.append(coordinator.queues[StageName.IMPLEMENTATION].snapshot()[0])
 
-        monkeypatch.setattr(
-            "hephaestus.automation.pipeline.coordinator_sources.uuid.uuid4",
-            lambda: nonce_two,
-        )
-        second = Coordinator(
-            config,
-            github=FakeStageGitHub(labels=["state:plan-go"]),
-            **fake_worker_factories(FakeWorkerPool(), None),
-            install_signals=False,
-        )
-        second._begin_direct_issue_source("repo-a", base_sha)
-        second_source = second._direct_issue_source
-        assert second_source is not None
-        assert second._drain_direct_issue_source() == 1
-        second_item = second.queues[StageName.IMPLEMENTATION].snapshot()[0]
-
-        assert first_source.run_nonce == nonce_one.hex
-        assert second_source.run_nonce == nonce_two.hex
-        assert first_item.branch == f"617-auto-impl-direct-{nonce_one.hex}"
-        assert second_item.branch == f"617-auto-impl-direct-{nonce_two.hex}"
-        assert first_item.branch != second_item.branch
-        assert first_item.payload["_direct_scope_base_sha"] == base_sha
-        assert first_item.payload["_direct_scope_worktree_nonce"] == nonce_one.hex
-        assert second_item.payload["_direct_scope_worktree_nonce"] == nonce_two.hex
+        assert [item.branch for item in items] == ["617-auto-impl", "617-auto-impl"]
+        assert all(item.payload["_direct_scope_base_sha"] == base_sha for item in items)
+        assert all("_direct_scope_worktree_nonce" not in item.payload for item in items)
 
     def test_direct_issue_with_open_replacement_pr_does_not_allocate_a_fresh_branch(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

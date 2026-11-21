@@ -53,6 +53,16 @@ def _store(common: Path) -> FirstPublicationStore:
     )
 
 
+@pytest.mark.parametrize("allowed_paths", [None, ()], ids=["none", "empty"])
+def test_empty_scope_metadata_survives_the_closed_record_schema(
+    tmp_path: Path, allowed_paths: tuple[str, ...] | None
+) -> None:
+    """Plan paths remain optional metadata in a durable publication record."""
+    record = replace(_record(tmp_path), allowed_paths=allowed_paths)
+
+    assert FirstPublicationRecord.from_dict(record.to_dict()) == record
+
+
 def test_complete_record_survives_reopen_for_lost_callback(tmp_path: Path) -> None:
     """Completion remains discoverable but cannot replace a different operation."""
     common = tmp_path / "common"

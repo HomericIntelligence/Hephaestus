@@ -149,12 +149,7 @@ from ...jobs import (
     WORKTREE_MATERIALIZED_KEY,
     _writer_publication_matches_refresh,
 )
-from ...scope_retraction import (
-    SCOPE_VIOLATION_PATHS_KEY,
-    is_safe_scope_retraction_path,
-    scope_retraction_paths_for_threads,
-    validated_scope_violation_paths,
-)
+from ...scope_retraction import is_safe_scope_retraction_path, scope_retraction_paths_for_threads
 from ...stage_base import (
     GIT_JOB_TIMEOUT_S,
     AgentJob,
@@ -271,7 +266,6 @@ def _codex_publication_kwargs(
         type(captured) is not _CodexPublicationScope
         or captured.repository != (ctx.org, item.repo)
         or captured.issue != item.issue
-        or not captured.paths
     ):
         return StageOutcome(Disposition.FINISH_FAIL, "codex_publication_scope_claims_invalid")
     return {
@@ -920,6 +914,14 @@ def _store_impl_source_metadata(item: WorkItem, value: dict[str, Any]) -> None:
     item.payload["_impl_source_receipt"] = receipt
 
 
+def _is_physical_implementation_branch(issue: int, branch: str) -> bool:
+    """Accept the stable issue branch or its legacy nonce form."""
+    return (
+        branch == issue_auto_impl_branch_name(issue)
+        or re.fullmatch(rf"{issue}-auto-impl-direct-[0-9a-f]{{32}}", branch) is not None
+    )
+
+
 def _existing_impl_receipt(item: WorkItem) -> SourceWorkspaceReceipt:
     """Read the immutable receipt for the stage's current source binding."""
     binding = _existing_impl_workspace(item)
@@ -1001,6 +1003,8 @@ def _add_direct_publication_base(item: WorkItem, kwargs: dict[str, object]) -> S
         if not is_full_commit_sha(direct_base_sha):
             return StageOutcome(Disposition.FINISH_FAIL, "direct_scope_base_pin_invalid")
         kwargs["expected_remote_sha"] = direct_base_sha
+        if DIRECT_SCOPE_RESERVATION_KEY in item.payload:
+            kwargs["direct_scope_reservation"] = item.payload[DIRECT_SCOPE_RESERVATION_KEY]
     return None
 
 
@@ -1333,10 +1337,16 @@ class ImplementationStage(Stage):
             # remote head instead (the anti-clobber reset of
             # _prepare_worktree_for_existing_pr :649/:693, so re-running
             # never discards pushed commits). Values coordinator-vetted.
-            "refresh_base": not adopted and direct_base_sha is None,
+            "refresh_base": (
+                not adopted
+                and direct_base_sha is None
+                and not item.payload.get("implementation_started")
+            ),
             "repo_root": str(ctx.paths.repo_root),
             "source_lane": "impl",
         }
+        if item.payload.get("implementation_started") and not adopted:
+            kwargs["preserve_started_lane"] = True
         if (
             item.pr is None
             and not adopted
@@ -2000,32 +2010,13 @@ class ImplementationStage(Stage):
                 raise ValueError("The pending rebase handoff is invalid.")
             return True
         context = ImplementationStage._publication_resume_context(item)
-        if (
-            not context["publication_manual_rebase"]
-            and context["publication_resume_state"] not in _REBASE_RESUME_STATES
-        ):
-            # A non-rebase resume state means the item was interrupted
-            # mid-implementation before first publication. The nonce rule
-            # makes that lane unresumable by any future run, so retaining
-            # the stale key would block the item identically on every
-            # relaunch (#3649). Clear it, bind the cleared context, and let
-            # discovery take a fresh decision; the old lane bytes stay in
-            # place for operator adoption.
-            logger.warning(
-                "implementation:%s: first-publication resume state %r is not a "
-                "rebase state and no manual rebase owner exists; clearing the "
-                "stale nonce-bound resume state for a fresh discovery decision",
-                item.issue,
-                context["publication_resume_state"],
-            )
-            item.payload.pop("first_publication_resume_state", None)
-            item.payload.pop("manual_rebase_required", None)
-            context = ImplementationStage._publication_resume_context(item)
         item.payload[_PUBLICATION_REBASE_RESUME] = context
         return True
 
     @staticmethod
-    def _receive_first_publication_discovery(item: WorkItem, result: JobResult) -> bool:
+    def _receive_first_publication_discovery(  # noqa: C901
+        item: WorkItem, result: JobResult
+    ) -> bool:
         """Consume a matching discovery result before generic source metadata."""
         value = result.value if isinstance(result.value, dict) else {}
         pending = item.payload.get(_PUBLICATION_DISCOVERY_PENDING)
@@ -2074,19 +2065,28 @@ class ImplementationStage(Stage):
                     raise ValueError("The first-publication candidate is invalid.")
                 binding = _strict_recovery_workspace(value["source_workspace"])
                 receipt = SourceWorkspaceReceipt.from_dict(value["source_receipt"])
+                issue = _issue_number(item)
+                stable_branch = issue_auto_impl_branch_name(issue)
+                receipt_branch = receipt.branch
+                if not isinstance(receipt_branch, str):
+                    raise ValueError("The first-publication source identity changed.")
                 if (
                     binding.reusable_root != Path(pending.kwargs["repo_root"])
                     or binding.item_number != item.issue
                     or binding.schema_version != 1
                     or binding.detached
-                    or not isinstance(receipt.branch, str)
+                    or not _is_physical_implementation_branch(issue, receipt_branch)
                     or receipt.to_binding(binding.reusable_root) != binding
-                    or (item.branch and receipt.branch != item.branch)
+                    or (
+                        item.branch
+                        and item.branch != stable_branch
+                        and receipt_branch != item.branch
+                    )
                 ):
                     raise ValueError("The first-publication source identity changed.")
                 recovered = replace(
                     item,
-                    branch=receipt.branch,
+                    branch=receipt_branch,
                     worktree=str(binding.cwd),
                     payload=dict(item.payload),
                 )
@@ -3143,8 +3143,8 @@ class ImplementationStage(Stage):
         pretest_kwargs: dict[str, Any] = {}
         try:
             pretest_kwargs["workspace"] = _existing_impl_workspace(item)
-            allowed_paths, _scope_digest = _pretest_scope(item, ctx)
-            pretest_kwargs["source_operation"] = DirtySourceOperation("test-fix", allowed_paths)
+            _pretest_scope(item, ctx)
+            pretest_kwargs["source_operation"] = DirtySourceOperation("test-fix")
         except (KeyError, TypeError, ValueError, RuntimeError):
             return StageOutcome(Disposition.FINISH_FAIL, "test_fix_source_authority_unavailable")
         logger.info("implementation:%d: requesting test-fix job", issue)
@@ -3506,20 +3506,7 @@ class ImplementationStage(Stage):
             # PR_CREATE reports incomplete work with the agent summary.
             item.payload["no_commits"] = True
             return
-        if "outside approved scope" in error_text:
-            # A deterministic scope-policy rejection is not a transient Git
-            # failure: do not retry the identical commit, and report the
-            # specific cause. The worktree is preserved for correction.
-            item.payload["scope_violation"] = True
-            item.payload["scope_violation_summary"] = _git_failure_fallback(result)
-            evidence = result.value if isinstance(result.value, dict) else {}
-            unexpected = validated_scope_violation_paths(evidence.get(SCOPE_VIOLATION_PATHS_KEY))
-            if unexpected is None:
-                item.payload.pop(SCOPE_VIOLATION_PATHS_KEY, None)
-            else:
-                item.payload[SCOPE_VIOLATION_PATHS_KEY] = unexpected
-            item.payload.pop("git_error_retries", None)
-            return
+
         logger.warning("implementation:%s: commit+push failed: %s", item.issue, result.error)
         _store_publication_failure_diagnostic(item, result)
         item.payload["git_error"] = True
@@ -3747,7 +3734,9 @@ class ImplementationStage(Stage):
                 reservation = result_value.get("direct_scope_reservation")
                 if (
                     isinstance(reservation, dict)
-                    and set(reservation) == {"branch", "base_sha"}
+                    and {"branch", "base_sha"}.issubset(reservation)
+                    and set(reservation).issubset({"branch", "base_sha", "created_by_this_attempt"})
+                    and type(reservation.get("created_by_this_attempt", False)) is bool
                     and isinstance(reservation.get("branch"), str)
                     and is_full_commit_sha(reservation.get("base_sha"))
                     and reservation.get("branch") == item.branch
@@ -3797,6 +3786,9 @@ class ImplementationStage(Stage):
                     item.payload[DIRECT_SCOPE_RESERVATION_KEY] = {
                         "branch": item.branch,
                         "base_sha": direct_base_sha,
+                        "created_by_this_attempt": reservation.get(
+                            "created_by_this_attempt", False
+                        ),
                     }
                 else:
                     item.payload.pop(DIRECT_SCOPE_RESERVATION_KEY, None)
@@ -3896,6 +3888,7 @@ class ImplementationStage(Stage):
                 item.payload[DIRECT_SCOPE_RESERVATION_KEY] = {
                     "branch": item.branch,
                     "base_sha": direct_base_sha,
+                    "created_by_this_attempt": reservation.get("created_by_this_attempt", False),
                 }
             for key in (
                 "worktree_dirty",
@@ -3953,11 +3946,19 @@ class ImplementationStage(Stage):
             )
             if requires_fresh_direct_reservation:
                 reservation = value.get("direct_scope_reservation")
+                stable_resume = (
+                    item.issue is not None
+                    and item.branch == issue_auto_impl_branch_name(item.issue)
+                    and is_full_commit_sha(source_revision)
+                    and isinstance(reservation, dict)
+                    and reservation.get("base_sha") == source_revision
+                )
                 if (
                     not is_full_commit_sha(direct_base_sha)
                     or not isinstance(reservation, dict)
                     or reservation.get("branch") != item.branch
-                    or reservation.get("base_sha") != direct_base_sha
+                    or (reservation.get("base_sha") != direct_base_sha and not stable_resume)
+                    or type(reservation.get("created_by_this_attempt", False)) is not bool
                 ):
                     logger.warning(
                         "implementation:%s: direct worktree result omitted or corrupted its "
@@ -3967,9 +3968,12 @@ class ImplementationStage(Stage):
                     item.worktree = ""
                     item.payload["git_error"] = True
                     return
+                accepted_base = source_revision if stable_resume else direct_base_sha
+                item.payload[DIRECT_SCOPE_BASE_SHA_KEY] = accepted_base
                 item.payload[DIRECT_SCOPE_RESERVATION_KEY] = {
                     "branch": item.branch,
-                    "base_sha": direct_base_sha,
+                    "base_sha": accepted_base,
+                    "created_by_this_attempt": reservation.get("created_by_this_attempt", False),
                 }
         else:
             item.payload["git_error"] = True
@@ -4486,30 +4490,7 @@ class ImplementationStage(Stage):
         if lock_failure in _TERMINAL_GIT_LOCK_FAILURES:
             item.payload.pop("git_error_retries", None)
             return StageOutcome(Disposition.FINISH_FAIL, lock_failure)
-        if item.payload.pop("scope_violation", None):
-            summary = item.payload.pop("scope_violation_summary", "")
-            safe_summary = summary if isinstance(summary, str) and summary else ""
-            unexpected = validated_scope_violation_paths(
-                item.payload.pop(SCOPE_VIOLATION_PATHS_KEY, None)
-            )
-            # A remediation turn is driven by the review threads and answers
-            # them through the address-review prompt, which cannot carry this
-            # directive. That lane keeps today's terminal scope result.
-            if (
-                unexpected is not None
-                and not item.payload.get("implementation_remediation")
-                and _scope_correction_is_valid(item, ctx)
-            ):
-                item.payload[_SCOPE_CORRECTION_PATHS] = unexpected
-                logger.info(
-                    "implementation:%s: routing one bounded scope correction",
-                    item.issue,
-                )
-                return Continue(next_state=IMPLEMENT_WAIT)
-            terminal_note = (
-                f"scope_violation: {safe_summary}" if safe_summary else "scope_violation"
-            )
-            return StageOutcome(Disposition.FINISH_FAIL, terminal_note)
+
         if item.payload.pop("git_error", None):
             # Push failed: transient git/network trouble — RETRY the stage
             # without burning the implement budget, bounded by

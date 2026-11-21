@@ -14,13 +14,13 @@ from typing import Any
 
 import hephaestus.automation.pipeline.coordinator_types as ct
 import hephaestus.automation.pipeline.seeding as _seeding
+from hephaestus.automation.git_utils import issue_auto_impl_branch_name
 from hephaestus.automation.host_capabilities import ValidatedSigningProvider, select_quota_backend
 from hephaestus.automation.pipeline.athena_executor_scope import (
     pipeline_requires_athena_executor,
 )
 from hephaestus.automation.pipeline.direct_scope_keys import (
     DIRECT_SCOPE_BASE_SHA_KEY,
-    DIRECT_SCOPE_WORKTREE_NONCE_KEY,
     is_full_commit_sha,
 )
 from hephaestus.automation.pipeline.host_capabilities import WorkerCapabilities
@@ -381,10 +381,11 @@ class Coordinator(
     def _direct_issue_identity(
         self, repo: str, issue: int, run_nonce: str
     ) -> tuple[int | None, str]:
-        """Resolve a direct issue's existing PR or new implementation branch."""
+        """Resolve a direct issue's existing PR or its stable implementation branch."""
+        del run_nonce  # The source cursor nonce never identifies durable issue work.
         github = self._ctx_for_repo(repo).github
         existing_pr = github.find_pr_for_issue(issue)
-        branch = "" if existing_pr is not None else f"{issue}-auto-impl-direct-{run_nonce}"
+        branch = "" if existing_pr is not None else issue_auto_impl_branch_name(issue)
         return existing_pr, branch
 
     def _prepare_direct_item(
@@ -403,14 +404,9 @@ class Coordinator(
             item.payload["existing_pr"] = True
         if is_full_commit_sha(base_sha):
             item.payload[DIRECT_SCOPE_BASE_SHA_KEY] = base_sha
-            if (
-                run_nonce
-                and item.kind is ItemKind.ISSUE
-                and item.pr is None
-                and item.issue is not None
-            ):
-                item.branch = f"{item.issue}-auto-impl-direct-{run_nonce}"
-                item.payload[DIRECT_SCOPE_WORKTREE_NONCE_KEY] = run_nonce
+            if item.kind is ItemKind.ISSUE and item.pr is None and item.issue is not None:
+                item.branch = issue_auto_impl_branch_name(item.issue)
+        del run_nonce  # Direct issue identity does not vary between source cursors.
         if (
             self.config.update_plan
             and item.stage is StageName.PLANNING

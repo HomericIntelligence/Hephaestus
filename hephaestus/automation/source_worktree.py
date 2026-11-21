@@ -236,8 +236,8 @@ def normalize_source_workspace_creation_failure(value: object) -> SourceWorkspac
     return SourceWorkspaceCreationFailure.UNKNOWN
 
 
-class SourceWorkspaceTerminalError(SourceWorkspaceError):
-    """Carry a creation failure through the locked terminal capture."""
+class SourceWorkspaceCreationError(SourceWorkspaceError):
+    """Carry a recoverable writer-creation failure and its safe category."""
 
     def __init__(
         self,
@@ -247,15 +247,25 @@ class SourceWorkspaceTerminalError(SourceWorkspaceError):
         requested_base_sha: str | None = None,
         recovery: SourceWorkspaceRecovery | None = None,
         creation_failure: SourceWorkspaceCreationFailure = SourceWorkspaceCreationFailure.UNKNOWN,
+        requested_reservation_created: bool = False,
     ) -> None:
-        """Keep the request and failure without granting recovery authority."""
+        """Keep request details for a later lane-locked recovery attempt."""
         super().__init__(message, recovery=recovery)
         self.requested_branch = requested_branch
         self.requested_base_sha = requested_base_sha
+        self.requested_reservation_created = requested_reservation_created
         self.creation_failure = normalize_source_workspace_creation_failure(creation_failure)
-        self.terminal_reference: SourceWorkspaceTerminalReference | None = None
         self.path: Path | None = None
         self.preserve = True
+
+
+class SourceWorkspaceTerminalError(SourceWorkspaceCreationError):
+    """Read and write legacy terminal evidence for existing callers."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        """Initialize legacy evidence state without making creation terminal."""
+        super().__init__(*args, **kwargs)
+        self.terminal_reference: SourceWorkspaceTerminalReference | None = None
 
 
 def _terminal_digest_valid(value: object) -> bool:
@@ -805,9 +815,6 @@ class SourceWorkspaceManager:
                 yield handoff
             except BaseException as exc:
                 terminal = exc if isinstance(exc, SourceWorkspaceTerminalError) else None
-                journal_path = self._transition_path(item_number)
-                if terminal is None and (journal_path.exists() or journal_path.is_symlink()):
-                    terminal = SourceWorkspaceTerminalError(str(exc))
                 if terminal is not None:
                     terminal.path = self.path_for(item_number, SourceLane.IMPLEMENTATION)
                     try:
@@ -816,8 +823,6 @@ class SourceWorkspaceManager:
                         )
                     except (OSError, ValueError, SourceWorkspaceError):
                         terminal.terminal_reference = None
-                    if terminal is not exc:
-                        raise terminal from exc
                 raise
             else:
                 self._reconcile_writer_transition(item_number, finalize_exact_successor=False)
@@ -1506,6 +1511,16 @@ class SourceWorkspaceManager:
                     ),
                 ),
             )
+        if old.revision != physical_revision:
+            logger.warning(
+                "source workspace %s advanced from receipt revision %s to %s; "
+                "recording the lane head before reuse",
+                expected_path,
+                old.revision,
+                physical_revision,
+            )
+            old = replace(old, revision=physical_revision)
+            self._write_receipt(old)
         target_ref_revision = self._validate_transition_target_ref(
             old,
             branch=branch,
@@ -1574,8 +1589,10 @@ class SourceWorkspaceManager:
         """Return the exact permitted pre-transition local target revision."""
         target_ref_revision = self._local_branch_revision(branch)
         if transition == "direct":
-            allowed_target_revision = predecessor.revision if predecessor.branch == branch else None
-            if target_ref_revision != allowed_target_revision:
+            allowed_target_revisions = (
+                {predecessor.revision, target_revision} if predecessor.branch == branch else {None}
+            )
+            if target_ref_revision not in allowed_target_revisions:
                 raise SourceWorkspaceError("direct implementation writer target branch is invalid")
         elif target_ref_revision not in {None, predecessor.revision, target_revision}:
             raise SourceWorkspaceError("adopted implementation writer target branch is invalid")
@@ -1992,7 +2009,7 @@ class SourceWorkspaceManager:
                 if binding.schema_version == 1 and not self._path_is_registered_to_repository(
                     receipt.path, deadline=deadline
                 ):
-                    raise SourceWorkspaceError("source workspace registration changed")
+                    self._repair_worktree_registration(receipt.path, deadline=deadline)
                 if source_operation is not None:
                     validated = self._validate_dirty_operation(
                         receipt, binding, source_operation, deadline
@@ -2018,12 +2035,16 @@ class SourceWorkspaceManager:
                 if (
                     claim is None
                     or claim.state != "armed"
-                    or dirty_plan_identity
-                    != DirtyPlanIdentity(
+                    or dirty_plan_identity is None
+                    or (
                         claim.plan_revision,
                         claim.plan_fingerprint,
                         claim.review_fingerprint,
-                        claim.allowed_paths,
+                    )
+                    != (
+                        dirty_plan_identity.revision,
+                        dirty_plan_identity.plan_fingerprint,
+                        dirty_plan_identity.review_fingerprint,
                     )
                 ):
                     raise SourceWorkspaceError("dirty direct plan identity changed")
@@ -2088,10 +2109,6 @@ class SourceWorkspaceManager:
         )
         if operation.content_snapshot and snapshot.snapshot != dict(operation.content_snapshot):
             raise SourceWorkspaceError("dirty source content changed")
-        if operation.kind == "test-fix" and not set(snapshot.changed_paths).issubset(
-            operation.allowed_paths
-        ):
-            raise SourceWorkspaceError("dirty source contains unrelated files")
         if operation.kind != "rebase-conflict":
             return binding
         manager = WorktreeManager(repo_root=self.repo_root, base_dir=self.base_dir)
@@ -2854,7 +2871,8 @@ class SourceWorkspaceManager:
             or (
                 journal.predecessor.branch == journal.successor.branch
                 and not journal.predecessor.detached
-                and journal.target_ref_revision != journal.predecessor.revision
+                and journal.target_ref_revision
+                not in {journal.predecessor.revision, journal.successor.revision}
             )
             or (
                 journal.transition == "direct"
@@ -3027,6 +3045,7 @@ class SourceWorkspaceManager:
             return common_path.resolve(strict=True) == self.common_dir
         except (InterruptedError, SourceWorkspacePreparationError):
             raise
+
         except RuntimeError:
             # A failed worktree inventory is evidence about Git, not about the
             # path: surface the real cause instead of reporting "not registered".
@@ -3034,6 +3053,25 @@ class SourceWorkspaceManager:
         except OSError:
             # A missing or broken path is genuinely not bound to the repository.
             return False
+
+    def _repair_worktree_registration(
+        self, path: Path, *, deadline: _PreparationDeadline | None = None
+    ) -> None:
+        """Repair a valid lane registration without changing its checkout."""
+        if path.is_symlink() or path.resolve(strict=True) != path:
+            raise SourceWorkspaceError("source workspace registration path is invalid")
+        common = _git(path, "rev-parse", "--git-common-dir", deadline=deadline)
+        common_path = Path(common.stdout.strip())
+        if not common_path.is_absolute():
+            common_path = path / common_path
+        if common_path.resolve(strict=True) != self.common_dir:
+            raise SourceWorkspaceError("source workspace belongs to a different repository")
+        try:
+            _git(self.repo_root, "worktree", "repair", str(path), deadline=deadline)
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise SourceWorkspaceError("source workspace registration repair failed") from exc
+        if not self._path_is_registered_to_repository(path, deadline=deadline):
+            raise SourceWorkspaceError("source workspace registration repair is unconfirmed")
 
     def _require_registered_transition_path(self, path: Path) -> None:
         """Require one recovery path to use this repository metadata."""

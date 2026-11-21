@@ -2513,10 +2513,10 @@ class TestGitErrorRetryCap:
         assert outcome.disposition == Disposition.FINISH_FAIL
         assert outcome.note == "git_error: remote hung up"
 
-    def test_scope_rejection_skips_git_retry_and_reports_the_cause(
+    def test_plan_scope_metadata_does_not_create_a_special_failure_route(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """An approved-scope rejection is terminal, not a transient Git failure."""
+        """Plan-path diagnostics use the ordinary bounded Git retry policy."""
         stage = ImplementationStage()
         ctx = make_ctx()
         item = make_work_item(issue=1, state="COMMIT_PUSH_WAIT")
@@ -2531,14 +2531,14 @@ class TestGitErrorRetryCap:
         outcome = stage.step(item, ctx)
 
         assert isinstance(outcome, StageOutcome)
-        assert outcome.disposition == Disposition.FINISH_FAIL
+        assert outcome.disposition == Disposition.RETRY
         assert outcome.note == (
-            "scope_violation: commit paths outside approved scope: docs/adr/9999.md"
+            "commit_push failed: commit paths outside approved scope: docs/adr/9999.md"
         )
         assert "scope_violation" not in item.payload
         assert "scope_violation_summary" not in item.payload
-        assert "git_error" not in item.payload
-        assert "git_error_retries" not in item.payload
+        assert "scope_correction_paths" not in item.payload
+        assert item.payload["git_error_retries"] == 2
 
     def test_transient_push_failure_retries_without_scope_violation(
         self, make_ctx: Any, make_work_item: Any
@@ -2557,13 +2557,14 @@ class TestGitErrorRetryCap:
         assert "scope_violation" not in item.payload
         assert item.payload["git_error_retries"] == 1
 
-    def test_scope_violation_summary_uses_the_shared_redacted_fallback(
+    def test_plan_scope_diagnostic_uses_the_shared_redacted_fallback(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """The terminal scope note carries the bounded, redacted failure summary."""
+        """The generic Git failure path retains its bounded redacted summary."""
         stage = ImplementationStage()
         ctx = make_ctx()
         item = make_work_item(issue=1, state="COMMIT_PUSH_WAIT")
+        item.payload["git_error_retries"] = GIT_ERROR_RETRY_CAP
         result = JobResult(
             ok=False,
             error="commit paths outside approved scope: " + "x" * 1000,
@@ -2575,13 +2576,14 @@ class TestGitErrorRetryCap:
 
         assert isinstance(outcome, StageOutcome)
         assert outcome.disposition == Disposition.FINISH_FAIL
-        assert outcome.note == f"scope_violation: {_git_failure_fallback(result)}"
-        assert len(outcome.note) <= len("scope_violation: ") + 500
+        assert outcome.note.startswith("git_error: commit paths outside approved scope: ")
+        assert item.payload["git_failure_summary"] == _git_failure_fallback(result)
+        assert len(item.payload["git_failure_summary"]) <= 500
 
-    def test_scope_violation_routes_one_bounded_correction(
+    def test_out_of_plan_diagnostic_does_not_route_a_scope_correction(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """A valid route sends the exact evidence to one correction turn."""
+        """Out-of-plan evidence never creates another agent correction turn."""
         stage = ImplementationStage()
         ctx = make_ctx()
         item = make_work_item(issue=1, state="COMMIT_PUSH_WAIT")
@@ -2597,66 +2599,44 @@ class TestGitErrorRetryCap:
         item.state = "PR_CREATE"
         outcome = stage.step(item, ctx)
 
-        assert isinstance(outcome, Continue)
-        assert outcome.next_state == "IMPLEMENT_WAIT"
-        # Routing reads the budget only: the refused turn already counted its
-        # attempt, so the correction's own completion counts the next one.
+        assert isinstance(outcome, StageOutcome)
+        assert outcome.disposition == Disposition.RETRY
+        assert item.state == "COMMIT_PUSH_WAIT"
         assert item.attempts["implement"] == 1
-        assert "git_error_retries" not in item.payload
-
-        item.state = outcome.next_state
-        request = stage.step(item, ctx)
-
-        assert isinstance(request, JobRequest)
-        assert isinstance(request.job, AgentJob)
-        assert request.on_done_state == "TEST_WAIT"
-        assert request.job.prompt_kwargs["scope_correction_paths"] == ("docs/adr/9999.md",)
+        assert item.payload["git_error_retries"] == 1
         assert "scope_correction_paths" not in item.payload
-        prompt = build_implementation_prompt(**request.job.prompt_kwargs)
-        assert "Publication Scope Correction" in prompt
-        assert "docs/adr/9999.md" in prompt
+        assert "scope_violation_unexpected_paths" not in item.payload
 
-        stage.on_job_done(item, JobResult(ok=True, value="corrected"), ctx)
-
-        assert item.attempts["implement"] == 2
-
-    def test_second_scope_violation_after_a_correction_is_terminal(
+    def test_repeated_plan_scope_diagnostic_uses_the_git_retry_cap(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """The correction is bounded: a second refusal keeps the scope note."""
+        """Repeated diagnostics never bypass the ordinary retry budget."""
         stage = ImplementationStage()
         ctx = make_ctx()
         item = make_work_item(issue=1, state="COMMIT_PUSH_WAIT")
         _prepared_writer(item)
         item.attempts["implement"] = 1
+        item.payload["git_error_retries"] = GIT_ERROR_RETRY_CAP
         result = JobResult(
             ok=False,
             error="implementation changed paths outside approved scope",
             value={"scope_violation_unexpected_paths": ["docs/adr/9999.md"]},
         )
 
-        stage.on_job_done(item, result, ctx)
-        item.state = "PR_CREATE"
-        routed = stage.step(item, ctx)
-        assert isinstance(routed, Continue)
-        item.state = "IMPLEMENT_WAIT"
-        stage.on_job_done(item, JobResult(ok=True, value="corrected"), ctx)
-        assert item.attempts["implement"] == 2
-
-        item.state = "COMMIT_PUSH_WAIT"
         stage.on_job_done(item, result, ctx)
         item.state = "PR_CREATE"
         outcome = stage.step(item, ctx)
 
         assert isinstance(outcome, StageOutcome)
         assert outcome.disposition == Disposition.FINISH_FAIL
-        assert outcome.note.startswith("scope_violation")
+        assert outcome.note == "git_error: implementation changed paths outside approved scope"
         assert "implement_exhausted" not in outcome.note
+        assert "scope_correction_paths" not in item.payload
 
-    def test_scope_violation_without_budget_keeps_the_terminal_note(
+    def test_out_of_plan_diagnostic_does_not_consume_implement_budget(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """An exhausted budget keeps today's exact scope result."""
+        """An exhausted implement budget does not create a scope gate."""
         stage = ImplementationStage()
         ctx = make_ctx()
         item = make_work_item(issue=1, state="COMMIT_PUSH_WAIT")
@@ -2673,15 +2653,15 @@ class TestGitErrorRetryCap:
         outcome = stage.step(item, ctx)
 
         assert isinstance(outcome, StageOutcome)
-        assert outcome.disposition == Disposition.FINISH_FAIL
-        assert outcome.note.startswith("scope_violation")
+        assert outcome.disposition == Disposition.RETRY
+        assert outcome.note.startswith("commit_push failed:")
         assert "implement_exhausted" not in outcome.note
         assert "scope_correction_paths" not in item.payload
 
-    def test_scope_violation_without_a_workspace_keeps_the_terminal_note(
+    def test_out_of_plan_diagnostic_does_not_require_a_workspace(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """A missing writer binding leaves nothing to correct."""
+        """Plan metadata has no separate correction or workspace gate."""
         stage = ImplementationStage()
         ctx = make_ctx()
         item = make_work_item(issue=1, state="COMMIT_PUSH_WAIT")
@@ -2697,14 +2677,14 @@ class TestGitErrorRetryCap:
         outcome = stage.step(item, ctx)
 
         assert isinstance(outcome, StageOutcome)
-        assert outcome.disposition == Disposition.FINISH_FAIL
-        assert outcome.note.startswith("scope_violation")
+        assert outcome.disposition == Disposition.RETRY
+        assert outcome.note.startswith("commit_push failed:")
         assert "scope_correction_paths" not in item.payload
 
-    def test_remediation_scope_violation_keeps_the_terminal_note(
+    def test_remediation_plan_diagnostic_uses_the_generic_git_retry(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """The address-review lane keeps today's terminal scope result."""
+        """The address-review lane has no terminal plan-scope route."""
         stage = ImplementationStage()
         ctx = make_ctx()
         item = make_work_item(issue=1, pr=1001, state="COMMIT_PUSH_WAIT")
@@ -2723,8 +2703,8 @@ class TestGitErrorRetryCap:
         outcome = stage.step(item, ctx)
 
         assert isinstance(outcome, StageOutcome)
-        assert outcome.disposition == Disposition.FINISH_FAIL
-        assert outcome.note.startswith("scope_violation")
+        assert outcome.disposition == Disposition.RETRY
+        assert outcome.note.startswith("commit_push failed:")
         assert "scope_correction_paths" not in item.payload
 
     @pytest.mark.parametrize(
@@ -2739,10 +2719,10 @@ class TestGitErrorRetryCap:
             {"scope_violation_unexpected_paths": [f"src/file_{index}.py" for index in range(51)]},
         ],
     )
-    def test_scope_violation_without_valid_evidence_stays_terminal(
+    def test_out_of_plan_result_shape_never_routes_a_correction(
         self, value: object, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """Malformed or missing evidence never routes a correction."""
+        """Every result shape uses the same generic retry without scope state."""
         stage = ImplementationStage()
         ctx = make_ctx()
         item = make_work_item(issue=1, state="COMMIT_PUSH_WAIT")
@@ -2759,14 +2739,14 @@ class TestGitErrorRetryCap:
         outcome = stage.step(item, ctx)
 
         assert isinstance(outcome, StageOutcome)
-        assert outcome.disposition == Disposition.FINISH_FAIL
-        assert outcome.note.startswith("scope_violation")
+        assert outcome.disposition == Disposition.RETRY
+        assert outcome.note.startswith("commit_push failed:")
         assert "scope_correction_paths" not in item.payload
 
-    def test_scope_violation_evidence_is_bounded_and_redacted(
+    def test_out_of_plan_evidence_does_not_create_scope_payload(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """The published evidence keeps a bounded, sorted, closed shape."""
+        """Out-of-plan evidence stays diagnostic instead of creating scope state."""
         stage = ImplementationStage()
         ctx = make_ctx()
         item = make_work_item(issue=1, state="COMMIT_PUSH_WAIT")
@@ -2785,10 +2765,9 @@ class TestGitErrorRetryCap:
 
         stage.on_job_done(item, result, ctx)
 
-        assert item.payload["scope_violation_unexpected_paths"] == (
-            "src/a.py",
-            "src/b.py",
-        )
+        assert "scope_violation_unexpected_paths" not in item.payload
+        assert item.payload["git_error"] is True
+        assert "scope_correction_paths" not in item.payload
 
     @pytest.mark.parametrize("error", ["lock_timeout", "lock_metadata_error"])
     def test_push_lock_failure_finishes_without_git_retry(
@@ -3031,6 +3010,28 @@ class TestWorktreeAndAdvise:
         assert "sync_restored_writer_before_rebase" not in item.payload
         assert "rebase_complete" not in item.payload
 
+    def test_started_worktree_preserves_its_stable_lane(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A started stable branch resumes at its lane head after origin moves."""
+        stage = ImplementationStage()
+        item = make_work_item(issue=1, state="WORKTREE_WAIT")
+        item.branch = "1-auto-impl"
+        item.payload.update({"implementation_started": True, "dirty_direct_checked": True})
+
+        result = stage.step(item, make_ctx())
+
+        assert isinstance(result, JobRequest)
+        assert isinstance(result.job, GitJob)
+        assert result.job.kwargs == {
+            "issue_number": 1,
+            "branch_name": "1-auto-impl",
+            "refresh_base": False,
+            "repo_root": "/tmp/repo",
+            "source_lane": "impl",
+            "preserve_started_lane": True,
+        }
+
     def test_direct_scope_worktree_uses_its_bootstrap_pin_without_refresh(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
@@ -3208,7 +3209,72 @@ class TestWorktreeAndAdvise:
         assert item.payload["_direct_scope_reservation"] == {
             "branch": "1-auto-impl",
             "base_sha": "a" * 40,
+            "created_by_this_attempt": False,
         }
+
+    def test_stable_worktree_accepts_the_validated_resumed_source_head(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A stable resume advances the coordinator base with its source receipt."""
+        stage = ImplementationStage()
+        item = make_work_item(issue=1, state="WORKTREE_WAIT")
+        item.branch = "1-auto-impl"
+        item.payload["_direct_scope_base_sha"] = "a" * 40
+        reservation = {
+            "branch": "1-auto-impl",
+            "base_sha": "b" * 40,
+            "created_by_this_attempt": False,
+        }
+
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=True,
+                value=_worktree_receipt(
+                    item,
+                    path="/tmp/wt",
+                    revision="b" * 40,
+                    direct_scope_reservation=reservation,
+                ),
+            ),
+            make_ctx(),
+        )
+
+        assert item.worktree == "/tmp/wt"
+        assert "git_error" not in item.payload
+        assert item.payload["_direct_scope_base_sha"] == "b" * 40
+        assert item.payload["_direct_scope_reservation"] == reservation
+
+    def test_legacy_nonce_worktree_requires_its_original_reservation_base(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A legacy nonce reservation cannot move its original base pin."""
+        stage = ImplementationStage()
+        item = make_work_item(issue=1, state="WORKTREE_WAIT")
+        item.branch = "1-auto-impl-direct-" + "c" * 32
+        item.payload["_direct_scope_base_sha"] = "a" * 40
+
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=True,
+                value=_worktree_receipt(
+                    item,
+                    path="/tmp/wt",
+                    revision="b" * 40,
+                    direct_scope_reservation={
+                        "branch": item.branch,
+                        "base_sha": "b" * 40,
+                        "created_by_this_attempt": True,
+                    },
+                ),
+            ),
+            make_ctx(),
+        )
+
+        assert item.worktree == ""
+        assert item.payload["git_error"] is True
+        assert item.payload["_direct_scope_base_sha"] == "a" * 40
 
     def test_direct_ownership_failure_preserves_remote_reservation_receipt(
         self, make_ctx: Any, make_work_item: Any
@@ -3240,6 +3306,7 @@ class TestWorktreeAndAdvise:
         assert item.payload["_direct_scope_reservation"] == {
             "branch": "1-auto-impl",
             "base_sha": "a" * 40,
+            "created_by_this_attempt": False,
         }
 
     def test_writer_receipt_result_persists_final_source_revision(
@@ -3471,6 +3538,7 @@ class TestWorktreeAndAdvise:
         assert item.payload["_direct_scope_reservation"] == {
             "branch": "1-auto-impl",
             "base_sha": "a" * 40,
+            "created_by_this_attempt": False,
         }
         assert item.payload["git_error"] is True
 
@@ -6715,8 +6783,53 @@ def test_dirty_agent_job_keeps_current_source_authority(
     assert result.job.workspace == binding
     assert result.job.source_operation is not None
     assert result.job.source_operation.kind == operation
-    if operation != "inspect":
+    if operation == "rebase-conflict":
         assert result.job.source_operation.allowed_paths == ("a.py",)
+    elif operation == "test-fix":
+        assert result.job.source_operation.allowed_paths == ()
+    _validate_source_operation_job(result.job)
+
+
+def test_test_fix_admits_an_empty_plan_path_manifest(
+    tmp_path: Path, make_ctx: Any, make_work_item: Any
+) -> None:
+    """An approved plan without file entries cannot block test repair."""
+    from hephaestus.agents.workspace import WorkspaceBinding
+
+    class EmptyPlanGitHub(_PlannedWriterGitHub):
+        def discover_plan(self, issue_number: int) -> PlanDiscoveryResult:
+            return PlanDiscoveryResult.found("No file section is necessary.\n")
+
+    item = make_work_item(issue=1, pr=1001, state="TESTFIX_WAIT")
+    item.worktree = str(tmp_path / "build" / ".worktrees" / "auto-1-impl")
+    item.branch = "fixture-branch"
+    binding = WorkspaceBinding.source(
+        cwd=Path(item.worktree),
+        reusable_root=tmp_path,
+        repository=item.repo,
+        ownership_key="fixture:1:impl",
+        item_number=1,
+        lane=SourceLane.IMPLEMENTATION,
+        revision="a" * 40,
+        generation=7,
+        detached=False,
+    )
+    item.payload.update(
+        {
+            "_impl_source_workspace": binding.to_dict(),
+            "_impl_source_revision": binding.revision,
+            "_impl_source_receipt": _writer_receipt(item, binding),
+        }
+    )
+    stage = ImplementationStage()
+
+    result = _step_after_plan_scope(stage, item, make_ctx(github=EmptyPlanGitHub()))
+
+    assert isinstance(result, JobRequest) and isinstance(result.job, AgentJob)
+    assert result.job.workspace == binding
+    assert result.job.source_operation is not None
+    assert result.job.source_operation.kind == "test-fix"
+    assert result.job.source_operation.allowed_paths == ()
     _validate_source_operation_job(result.job)
 
 
