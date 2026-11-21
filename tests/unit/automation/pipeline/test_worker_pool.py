@@ -132,11 +132,11 @@ from hephaestus.automation.pipeline.worker_pool import (
 from hephaestus.automation.prompts.pr_review import PrReviewPromptSizeError
 from hephaestus.automation.repo_intake import RepoIntakeError, RepoIntakeManager
 from hephaestus.automation.source_worktree import (
+    SourceWorkspaceCreationError,
     SourceWorkspaceError,
     SourceWorkspaceManager,
     SourceWorkspaceRecovery,
     SourceWorkspaceRecoveryKind,
-    SourceWorkspaceTerminalError,
 )
 from hephaestus.automation.verified_runner import build_verified_runner_argv
 from hephaestus.automation.worktree_manager import (
@@ -9601,10 +9601,10 @@ class TestGitOps:
                 failed = pool._run_git(job)
 
             assert failed.ok is False
-            assert failed.error == "source_workspace_terminal"
+            assert failed.error is not None and failed.error.startswith("worktree creation failed:")
             assert isinstance(failed.value, dict)
-            assert failed.value["source_workspace_preserve"] is True
-            assert failed.value["source_workspace_terminal"] is not None
+            assert "source_workspace_preserve" not in failed.value
+            assert "source_workspace_terminal" not in failed.value
             pending = SourceWorkspaceManager(repo, repository="Hephaestus")
             assert (pending.state_dir / "7-impl-transition.json").is_file()
             old_receipt = pending._read_receipt(7, SourceLane.IMPLEMENTATION)
@@ -9624,76 +9624,91 @@ class TestGitOps:
         assert _git(predecessor.cwd, "symbolic-ref", "--short", "HEAD") == branch
         assert _git(predecessor.cwd, "rev-parse", "HEAD") == target_revision
 
-    def test_direct_pinned_impl_writer_recovers_an_exact_prior_direct_writer(
+    @pytest.mark.parametrize(
+        ("branch", "expected"),
+        [
+            ("7-auto-impl", True),
+            (f"7-auto-impl-direct-{'a' * 32}", True),
+            ("7-auto-impl-direct-stale", False),
+            ("8-auto-impl", False),
+        ],
+    )
+    def test_direct_writer_identity_accepts_stable_and_legacy_branches(
+        self, branch: str, expected: bool
+    ) -> None:
+        """Stable naming and existing nonce lanes name the same issue writer."""
+        assert worker_pool_module._is_direct_writer_branch(7, branch) is expected
+
+    @pytest.mark.parametrize("remove_lane", [False, True], ids=["registered", "missing"])
+    def test_stable_direct_writer_reuses_its_branch_and_work_after_main_moves(
         self,
         pool: WorkerPool,
         completion_q: CompletionQueue,
         tmp_path: Path,
+        remove_lane: bool,
     ) -> None:
-        """A fresh cursor can replace its clean, receipt-owned direct writer."""
+        """A later run keeps committed lane work instead of resetting to the new base."""
         repo, _, base_revision = _worker_repository(tmp_path)
-        first_nonce = "a" * 32
-        first_branch = f"7-auto-impl-direct-{first_nonce}"
-        first_job = GitJob(
-            repo="Hephaestus",
-            op="create_worktree",
-            timeout_s=60,
-            expected_repository="HomericIntelligence/Hephaestus",
-            kwargs={
-                "issue_number": 7,
-                "branch_name": first_branch,
-                "repo_root": str(repo),
-                "source_lane": "impl",
-                "base_sha": base_revision,
-                "direct_worktree_nonce": first_nonce,
-            },
-        )
-        second_nonce = "b" * 32
-        second_branch = f"7-auto-impl-direct-{second_nonce}"
-        second_job = GitJob(
-            repo="Hephaestus",
-            op="create_worktree",
-            timeout_s=60,
-            expected_repository="HomericIntelligence/Hephaestus",
-            kwargs={
-                "issue_number": 7,
-                "branch_name": second_branch,
-                "repo_root": str(repo),
-                "source_lane": "impl",
-                "base_sha": base_revision,
-                "direct_worktree_nonce": second_nonce,
-            },
-        )
+        branch = "7-auto-impl"
+
+        def create_job(base_sha: str) -> GitJob:
+            return GitJob(
+                repo="Hephaestus",
+                op="create_worktree",
+                timeout_s=60,
+                expected_repository="HomericIntelligence/Hephaestus",
+                kwargs={
+                    "issue_number": 7,
+                    "branch_name": branch,
+                    "repo_root": str(repo),
+                    "source_lane": "impl",
+                    "base_sha": base_sha,
+                },
+            )
 
         with patch.object(
             pool,
             "_authenticated_remote_git_configuration",
             return_value=({}, ("-c", "credential.helper=")),
         ):
-            pool.submit(first_job, StageName.REPO)
+            pool.submit(create_job(base_revision), StageName.REPO)
             _, first_result = completion_q.get(timeout=10)
-            pool.submit(second_job, StageName.REPO)
+            assert first_result.ok is True, first_result.error
+            writer_path = Path(first_result.value["path"])
+            (writer_path / "lane-work.txt").write_text("keep me\n", encoding="utf-8")
+            _git(writer_path, "add", "lane-work.txt")
+            _git(writer_path, "commit", "-m", "keep lane work")
+            work_head = _git(writer_path, "rev-parse", "HEAD")
+            _git(repo, "commit", "--allow-empty", "-m", "main moved")
+            moved_base = _git(repo, "rev-parse", "HEAD")
+            assert moved_base != work_head
+            _git(repo, "push", "--force", "origin", f"{moved_base}:refs/heads/{branch}")
+            assert _git(repo, "ls-remote", "origin", f"refs/heads/{branch}").startswith(moved_base)
+            if remove_lane:
+                _git(repo, "worktree", "remove", str(writer_path))
+                assert not writer_path.exists()
+
+            pool.submit(create_job(moved_base), StageName.REPO)
             _, second_result = completion_q.get(timeout=10)
 
-        assert first_result.ok is True
-        assert second_result.ok is True
+        assert second_result.ok is True, second_result.error
         source_manager = SourceWorkspaceManager(repo, repository="Hephaestus")
         receipt = source_manager._read_receipt(7, SourceLane.IMPLEMENTATION)
         assert receipt is not None
-        assert second_result.value == {
-            "path": first_result.value["path"],
-            "impl_source_revision": base_revision,
-            "source_workspace": source_manager._binding(receipt).to_dict(),
-            "source_receipt": receipt.to_dict(),
-            "direct_scope_reservation": {
-                "branch": second_branch,
-                "base_sha": base_revision,
-            },
-        }
+        assert receipt.path == writer_path
         assert receipt.detached is False
-        assert receipt.branch == second_branch
-        assert receipt.revision == base_revision
-        assert _git(receipt.path, "symbolic-ref", "--short", "HEAD") == second_branch
+        assert receipt.branch == branch
+        assert receipt.revision == work_head
+        assert second_result.value["path"] == str(writer_path)
+        assert second_result.value["impl_source_revision"] == work_head
+        assert second_result.value["direct_scope_reservation"] == {
+            "branch": branch,
+            "base_sha": work_head,
+        }
+        assert _git(writer_path, "symbolic-ref", "--short", "HEAD") == branch
+        assert _git(writer_path, "rev-parse", "HEAD") == work_head
+        assert (writer_path / "lane-work.txt").read_text(encoding="utf-8") == "keep me\n"
+        assert _git(writer_path, "status", "--porcelain") == ""
 
     def test_direct_pinned_impl_writer_preserves_a_wrong_prior_direct_branch(
         self,
@@ -9751,19 +9766,18 @@ class TestGitOps:
         assert first_result.ok is True
         assert second_result.ok is False
         assert second_result.error is not None
-        assert second_result.error == "source_workspace_terminal"
-        assert second_result.error == "source_workspace_terminal"
+        assert second_result.error.startswith("worktree creation failed:")
         assert _git(writer_path, "symbolic-ref", "--short", "HEAD") == "unrelated-writer"
 
     @pytest.mark.parametrize("mutation", ["dirty", "attached", "revision-drift"])
-    def test_direct_pinned_impl_writer_preserves_invalid_predecessor(
+    def test_direct_pinned_impl_writer_recovers_or_preserves_predecessor(
         self,
         pool: WorkerPool,
         completion_q: CompletionQueue,
         tmp_path: Path,
         mutation: str,
     ) -> None:
-        """A worker rejects and preserves an invalid detached predecessor."""
+        """An unsafe predecessor stays preserved without a terminal result."""
         repo, predecessor_revision, base_revision = _worker_repository(tmp_path)
         source_manager = SourceWorkspaceManager(repo, repository="Hephaestus")
         predecessor = source_manager.prepare(7, SourceLane.IMPLEMENTATION, predecessor_revision)
@@ -9809,18 +9823,29 @@ class TestGitOps:
             pool.submit(job, StageName.REPO)
             _, result = completion_q.get(timeout=10)
 
+        if mutation == "revision-drift":
+            assert result.ok is True, result.error
+            resumed = source_manager._read_receipt(7, SourceLane.IMPLEMENTATION)
+            assert resumed is not None
+            assert resumed.revision == base_revision
+            assert resumed.detached is False
+            assert resumed.branch == branch
+            assert _git(predecessor.cwd, "rev-parse", "HEAD") == base_revision
+            assert _git(predecessor.cwd, "branch", "--show-current") == branch
+            return
+
         assert result.ok is False
         assert result.error is not None
-        assert result.error == "source_workspace_terminal"
+        assert result.error.startswith("worktree creation failed:")
         assert isinstance(result.value, dict)
         assert result.value["path"] == str(predecessor.cwd)
-        assert result.value["source_workspace_preserve"] is True
-        assert result.value["failure_kind"] == "source_workspace_terminal"
+        assert "source_workspace_preserve" not in result.value
+        assert "failure_kind" not in result.value
         assert result.value["direct_scope_reservation"] == {
             "branch": branch,
             "base_sha": base_revision,
         }
-        assert result.value["source_workspace_terminal"] is not None
+        assert "source_workspace_terminal" not in result.value
         preserved = source_manager._read_receipt(7, SourceLane.IMPLEMENTATION)
         assert preserved is not None
         assert preserved.revision == predecessor_revision
@@ -9895,9 +9920,9 @@ class TestGitOps:
             _, result = completion_q.get(timeout=10)
 
         assert result.ok is False
-        assert result.error == "source_workspace_terminal"
+        assert result.error is not None and result.error.startswith("worktree creation failed:")
         assert isinstance(result.value, dict)
-        assert result.value["source_workspace_preserve"] is True
+        assert "source_workspace_preserve" not in result.value
         preserved = source_manager._read_receipt(7, SourceLane.IMPLEMENTATION)
         assert preserved is not None
         assert preserved.path == predecessor.cwd
@@ -9944,9 +9969,9 @@ class TestGitOps:
             _, result = completion_q.get(timeout=10)
 
         assert result.ok is False
-        assert result.error == "source_workspace_terminal"
+        assert result.error is not None and result.error.startswith("worktree creation failed:")
         assert isinstance(result.value, dict)
-        assert result.value["source_workspace_preserve"] is True
+        assert "source_workspace_preserve" not in result.value
 
     def test_implementation_source_lane_rejects_missing_clean_writer_path(
         self,
@@ -10547,10 +10572,10 @@ class TestGitOps:
             _, result = completion_q.get(timeout=10)
 
         worktree_manager.create_worktree.assert_not_called()
-        assert result.error == "source_workspace_terminal"
+        assert result.error is not None and result.error.startswith("worktree creation failed:")
         assert isinstance(result.value, dict)
-        assert result.value["source_workspace_preserve"] is True
-        assert result.value["source_workspace_terminal"] is None
+        assert "source_workspace_preserve" not in result.value
+        assert "source_workspace_terminal" not in result.value
         assert result.value["direct_scope_reservation"] == {"branch": "7-auto", "base_sha": pin}
 
     def test_direct_writer_change_after_authorization_returns_typed_recovery(
@@ -10643,11 +10668,11 @@ class TestGitOps:
             _, result = completion_q.get(timeout=10)
 
         assert result.ok is False
-        assert result.error == "source_workspace_terminal"
+        assert result.error is not None and result.error.startswith("worktree creation failed:")
         assert isinstance(result.value, dict)
         assert result.value["path"] == str(predecessor.cwd)
-        assert result.value["source_workspace_preserve"] is True
-        assert result.value["source_workspace_terminal"] is not None
+        assert "source_workspace_preserve" not in result.value
+        assert "source_workspace_terminal" not in result.value
         assert result.value["direct_scope_reservation"] == {
             "branch": "writer-branch",
             "base_sha": second,
@@ -10688,10 +10713,10 @@ class TestGitOps:
             _, result = completion_q.get(timeout=10)
 
         assert result.ok is False
-        assert result.error == "source_workspace_terminal"
+        assert result.error is not None and result.error.startswith("worktree creation failed:")
         assert isinstance(result.value, dict)
-        assert result.value["source_workspace_preserve"] is True
-        assert result.value["source_workspace_terminal"] is None
+        assert "source_workspace_preserve" not in result.value
+        assert "source_workspace_terminal" not in result.value
 
     def test_adopted_writer_head_drift_prevents_authority_mint_and_claim(
         self,
@@ -10815,9 +10840,9 @@ class TestGitOps:
             _, result = completion_q.get(timeout=10)
 
         assert result.ok is False
-        assert result.error == "source_workspace_terminal"
+        assert result.error is not None and result.error.startswith("worktree creation failed:")
         assert isinstance(result.value, dict)
-        assert result.value["source_workspace_preserve"] is True
+        assert "source_workspace_preserve" not in result.value
 
     def test_create_implementation_source_lane_returns_typed_receipt_write_failure(
         self,
@@ -10849,9 +10874,9 @@ class TestGitOps:
             _, result = completion_q.get(timeout=10)
 
         assert result.ok is False
-        assert result.error == "source_workspace_terminal"
+        assert result.error is not None and result.error.startswith("worktree creation failed:")
         assert isinstance(result.value, dict)
-        assert result.value["source_workspace_preserve"] is True
+        assert "source_workspace_preserve" not in result.value
 
     def test_direct_writer_receipt_failure_keeps_remote_reservation(
         self,
@@ -10885,7 +10910,7 @@ class TestGitOps:
 
         assert result.ok is False
         assert isinstance(result.value, dict)
-        assert result.value["source_workspace_preserve"] is True
+        assert "source_workspace_preserve" not in result.value
 
     def test_create_isolated_worktree_syncs_only_detached_checkout(
         self,
@@ -11487,14 +11512,14 @@ class TestGitOps:
 
         assert fetched == [expected_head, expected_head]
         assert not result.ok
-        assert result.error == "source_workspace_terminal"
-        assert result.value["failure_kind"] == "source_workspace_terminal"
+        assert result.error is not None and result.error.startswith("worktree creation failed:")
+        assert "failure_kind" not in result.value
         assert result.value["source_workspace_creation_failure"] == "writer_receipt"
         assert _run_git(writer, "rev-parse", "HEAD").stdout.strip() == intake.revision
         assert (writer / "tracked.txt").read_text(encoding="utf-8") == "base\n"
         assert receipt.read_bytes() == old_receipt
         assert (state / "602-impl-transition.json").is_file()
-        assert (state / "602-impl-terminal.json").is_file()
+        assert not (state / "602-impl-terminal.json").exists()
         assert _run_git(intake.path, "status", "--porcelain").stdout == ""
 
     @pytest.mark.parametrize("operation", ["inspect", "stash"])
@@ -20952,7 +20977,7 @@ def test_direct_writer_creation_failure_does_not_rollback_reservation(pool: Work
     manager.create_worktree.side_effect = RuntimeError("creation stopped")
     with (
         patch.object(pool, "_rollback_direct_scope_reservation") as rollback,
-        pytest.raises(SourceWorkspaceTerminalError) as raised,
+        pytest.raises(SourceWorkspaceCreationError) as raised,
     ):
         pool._create_managed_worktree(
             manager=manager,
@@ -21033,9 +21058,13 @@ def test_writer_creation_category_crosses_worker_boundary(
     rollback.assert_not_called()
     release.assert_not_called()
     assert evidence.read_bytes() == b"keep this state\n"
-    assert result.ok is False and result.error == "source_workspace_terminal"
+    assert (
+        result.ok is False
+        and result.error is not None
+        and result.error.startswith("worktree creation failed:")
+    )
     assert isinstance(result.value, dict)
-    assert result.value["source_workspace_preserve"] is True
+    assert "source_workspace_preserve" not in result.value
     reservation = None if base is None else {"branch": "7-auto", "base_sha": base}
     assert ("direct_scope_reservation" in result.value) is (base is not None)
     assert result.value.get("direct_scope_reservation") == reservation
@@ -21061,7 +21090,7 @@ def test_writer_creation_category_crosses_worker_boundary(
         )
         item.payload[DIRECT_SCOPE_BASE_SHA_KEY] = "a" * 40
         ImplementationStage._on_worktree_done(item, result, repository="test/repo")
-        assert item.payload["source_workspace_preserve"] is True
+        assert "source_workspace_preserve" not in item.payload
         assert not item.payload.get("git_error_retries")
 
 
@@ -21122,9 +21151,13 @@ def test_post_success_writer_validation_failure_is_terminal(
         caplog.at_level(logging.DEBUG),
     ):
         result = pool._git_create_worktree(job)
-    assert not result.ok and result.error == "source_workspace_terminal"
+    assert (
+        not result.ok
+        and result.error is not None
+        and result.error.startswith("worktree creation failed:")
+    )
     assert result.value["source_workspace_creation_failure"] == expected
-    assert result.value["source_workspace_preserve"] is True
+    assert "source_workspace_preserve" not in result.value
     assert result.value["path"] == str(writer)
     assert result.value["direct_scope_reservation"] == {
         "branch": "7-auto",
@@ -21189,28 +21222,21 @@ def test_writer_terminal_wrapper_keeps_only_a_closed_creation_category(
         patch.object(pool, "_git_create_worktree_with_handoff", producer),
     ):
         result = pool._git_create_worktree(job)
-    assert not result.ok and result.error == "source_workspace_terminal"
-    assert result.value["source_workspace_preserve"] is True
+    assert (
+        not result.ok
+        and result.error is not None
+        and result.error.startswith("worktree creation failed:")
+    )
+    assert "source_workspace_preserve" not in result.value
     assert "private exception probe" not in json.dumps(result.value)
     assert result.value.get("source_workspace_creation_failure") == expected
 
 
-@pytest.mark.parametrize(
-    "mutation",
-    [
-        "none",
-        "phase",
-        "source_bytes",
-        "source_missing",
-        "terminal_cause",
-        "O_NOFOLLOW",
-        "O_NONBLOCK",
-    ],
-)
-def test_failed_writer_terminal_evidence_reaches_both_outcome_stores(
-    pool: WorkerPool, tmp_path: Path, mutation: str, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("mutation", ["none", "phase", "source_bytes", "source_missing"])
+def test_failed_writer_recovery_evidence_has_no_terminal_result(
+    pool: WorkerPool, tmp_path: Path, mutation: str
 ) -> None:
-    """A real handoff failure stays preserved after terminal evidence changes."""
+    """A failed writer leaves recovery evidence without a terminal outcome."""
     from types import SimpleNamespace
 
     from hephaestus.automation.issue_waves import WAVE_LEASE_PAYLOAD, IssueWaveStore
@@ -21218,7 +21244,6 @@ def test_failed_writer_terminal_evidence_reaches_both_outcome_stores(
         DIRECT_SCOPE_BASE_SHA_KEY,
         DIRECT_SCOPE_RESERVATION_KEY,
     )
-    from hephaestus.automation.pipeline.stage_base import Continue
     from hephaestus.automation.pipeline.stages.finished import FinishedStage
     from hephaestus.automation.pipeline.stages.implementation import ImplementationStage
     from hephaestus.automation.pipeline.work_item import ItemKind, ItemResult, WorkItem
@@ -21226,7 +21251,7 @@ def test_failed_writer_terminal_evidence_reaches_both_outcome_stores(
     repo, predecessor_sha, target_sha = _worker_repository(tmp_path)
     manager = SourceWorkspaceManager(repo, repository="Hephaestus")
     _git(repo, "reset", "--hard", predecessor_sha)
-    predecessor = manager.prepare(7, SourceLane.IMPLEMENTATION, predecessor_sha)
+    manager.prepare(7, SourceLane.IMPLEMENTATION, predecessor_sha)
     _git(repo, "reset", "--hard", target_sha)
     branch = "7-auto-impl-direct-" + "f" * 32
     job = GitJob(
@@ -21252,7 +21277,7 @@ def test_failed_writer_terminal_evidence_reaches_both_outcome_stores(
     rollback.assert_not_called()
     assert not failure.ok
     assert isinstance(failure.value, dict)
-    assert failure.value["source_workspace_terminal"] is not None
+    assert "source_workspace_terminal" not in failure.value
     journal_path = manager.state_dir / "7-impl-transition.json"
     source_path = manager.state_dir / "7-impl.json"
     terminal_path = manager.state_dir / "7-impl-terminal.json"
@@ -21264,10 +21289,6 @@ def test_failed_writer_terminal_evidence_reaches_both_outcome_stores(
         source_path.write_bytes(source_path.read_bytes() + b"\n")
     elif mutation == "source_missing":
         source_path.unlink()
-    elif mutation == "terminal_cause":
-        terminal = json.loads(terminal_path.read_text())
-        terminal["cause"] = "source_workspace_legacy_unproven"
-        terminal_path.write_text(json.dumps(terminal))
     evidence_paths = (journal_path, source_path, terminal_path)
     evidence_before = {
         path: path.read_bytes() if path.exists() else None for path in evidence_paths
@@ -21297,39 +21318,17 @@ def test_failed_writer_terminal_evidence_reaches_both_outcome_stores(
     ledger: list[ItemResult] = []
     preserved: list[tuple[str, int, str]] = []
     finished = FinishedStage(ledger, preserved, [])
-    if mutation in {"O_NOFOLLOW", "O_NONBLOCK"}:
-        import os
-
-        from hephaestus.automation import source_worktree
-
-        monkeypatch.setattr(
-            source_worktree,
-            "os",
-            SimpleNamespace(**{k: v for k, v in vars(os).items() if k != mutation}),
-        )
     finished.step(item, ctx)
     checkpoint = store.load()
     assert checkpoint is not None
     assert checkpoint.current_wave.outcomes[0].reason == ledger[0].reason
-    expected = (
-        "source_workspace_transition_incomplete"
-        if mutation == "none"
-        else "source_workspace_recovery_receipt_invalid"
-    )
-    assert ledger[0].reason.startswith(expected + ":")
-    item.state = "CLEANUP"
-    cleanup = finished.step(item, ctx)
-    assert isinstance(cleanup, Continue) and cleanup.next_state == "DONE"
-    assert not item.payload.get("_direct_scope_reservation_release_attempted")
-    assert item.payload[DIRECT_SCOPE_RESERVATION_KEY] == reservation
+    assert ledger[0].reason == "pending terminal check"
     assert journal_path.exists()
-    assert ("Hephaestus", 7, str(predecessor.cwd)) in preserved
     assert {
         path: path.read_bytes() if path.exists() else None for path in evidence_paths
     } == evidence_before
     assert failure.value.get("source_workspace_creation_failure") == "worktree_create"
-    assert item.payload.get("source_workspace_creation_failure") == "worktree_create"
-    assert "creation_failure=worktree_create" in ledger[0].reason
+    assert not terminal_path.exists()
 
 
 def test_ordinary_review_keeps_valid_git_filenames(pool: WorkerPool, tmp_path: Path) -> None:

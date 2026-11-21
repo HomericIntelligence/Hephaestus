@@ -245,6 +245,7 @@ from hephaestus.automation.review_journal import (
 )
 from hephaestus.automation.source_worktree import (
     FleetAttemptFence,
+    SourceWorkspaceCreationError,
     SourceWorkspaceCreationFailure,
     SourceWorkspaceError,
     SourceWorkspaceManager,
@@ -252,7 +253,6 @@ from hephaestus.automation.source_worktree import (
     SourceWorkspacePreparationError,
     SourceWorkspaceReceipt,
     SourceWorkspaceRecovery,
-    SourceWorkspaceTerminalError,
     _PreparationDeadline,
     _terminal_json_object,
     _terminal_read_bytes,
@@ -4482,8 +4482,11 @@ def _codex_implementation_request(
 
 
 def _is_direct_writer_branch(issue: int, branch: str) -> bool:
-    """Return whether one branch names the direct writer of an issue."""
-    return re.fullmatch(rf"{issue}-auto-impl-direct-[0-9a-f]{{32}}", branch) is not None
+    """Accept the stable issue branch and legacy nonce branches for recovery."""
+    return (
+        branch == git_utils.issue_auto_impl_branch_name(issue)
+        or re.fullmatch(rf"{issue}-auto-impl-direct-[0-9a-f]{{32}}", branch) is not None
+    )
 
 
 def _repo_lock_path(repo: str, lock_dir: Path | None = None) -> Path:
@@ -7072,17 +7075,15 @@ class WorkerPool:
         manager._reject_foreign_owner(receipt, issue, SourceLane.IMPLEMENTATION)
         if receipt.detached:
             return False
-        if job.kwargs.get("branch") and job.kwargs["branch"] != receipt.branch:
-            # A retained receipt from an older run carries a stale branch name.
-            # It cannot be reused for this run's publication, so treat it as
-            # "no retainable rebase" instead of failing the whole item.
-            logger.warning(
-                "first-publication source branch differs from the retained receipt "
-                "(%s != %s); ignoring the stale receipt",
-                job.kwargs["branch"],
-                receipt.branch,
-            )
+        requested_branch = job.kwargs.get("branch")
+        if (
+            requested_branch
+            and requested_branch != receipt.branch
+            and not _is_direct_writer_branch(issue, str(requested_branch))
+        ):
             return False
+        # Stable and legacy automation branches name the same durable issue
+        # writer. The receipt supplies the exact retained branch for recovery.
         if (
             receipt.path.is_symlink()
             or not manager._path_is_registered_to_repository(receipt.path, deadline=deadline)
@@ -7121,7 +7122,11 @@ class WorkerPool:
             or candidate.scheduler_repository != job.repo
             or candidate.workspace != binding
             or candidate.branch != receipt.branch
-            or (job.kwargs.get("branch") and job.kwargs["branch"] != receipt.branch)
+            or (
+                job.kwargs.get("branch")
+                and job.kwargs["branch"] != receipt.branch
+                and not _is_direct_writer_branch(candidate.issue_number, str(job.kwargs["branch"]))
+            )
             or not manager._physical_matches_receipt(receipt, deadline=deadline)
         ):
             raise ValueError("The first-publication candidate does not match the current source.")
@@ -10991,8 +10996,12 @@ class WorkerPool:
         manager._reject_foreign_owner(original, issue, SourceLane.IMPLEMENTATION)
         if original.schema_version != 1:
             return None
-        if self._dirty_predecessor_is_gone(manager, original, deadline):
-            logger.warning("dirty direct predecessor #%s is gone; preparing a fresh writer", issue)
+        if self._dirty_predecessor_unavailable(manager, original, deadline):
+            logger.warning(
+                "dirty direct predecessor #%s has no recoverable checkout; "
+                "preparing its stable branch",
+                issue,
+            )
             return JobResult(ok=True, value={"dirty_direct_not_applicable": True})
         try:
             dirty = manager._is_dirty(original.path)
@@ -11023,18 +11032,22 @@ class WorkerPool:
         return manager._read_receipt(issue, SourceLane.IMPLEMENTATION)
 
     @staticmethod
-    def _dirty_predecessor_is_gone(
+    def _dirty_predecessor_unavailable(
         manager: SourceWorkspaceManager,
         original: SourceWorkspaceReceipt | None,
         deadline: _PreparationDeadline,
     ) -> bool:
-        """Return whether the recorded writer checkout no longer exists."""
-        return (
-            original is None
-            or original.path.is_symlink()
-            or not original.path.exists()
-            or not manager._path_is_registered_to_repository(original.path, deadline=deadline)
-        )
+        """Recover a moved registration; report only an unusable checkout absent."""
+        if original is None or original.path.is_symlink() or not original.path.exists():
+            return True
+        if manager._path_is_registered_to_repository(original.path, deadline=deadline):
+            return False
+        try:
+            manager._repair_worktree_registration(original.path, deadline=deadline)
+        except (OSError, RuntimeError, SourceWorkspaceError, subprocess.SubprocessError) as exc:
+            logger.warning("dirty direct registration cannot be repaired: %r", exc)
+            return True
+        return not manager._path_is_registered_to_repository(original.path, deadline=deadline)
 
     def _git_claim_dirty_direct_continuation(self, job: GitJob) -> JobResult:  # noqa: C901
         """Claim an existing dirty direct writer without a new reservation."""
@@ -11060,9 +11073,11 @@ class WorkerPool:
                 original = (
                     self._release_dirty_claim_if_unadvanced(manager, issue, original) or original
                 )
-                if self._dirty_predecessor_is_gone(manager, original, deadline):
+                if self._dirty_predecessor_unavailable(manager, original, deadline):
                     logger.warning(
-                        "dirty direct predecessor #%s is gone; preparing a fresh writer", issue
+                        "dirty direct predecessor #%s has no recoverable checkout; "
+                        "preparing its stable branch",
+                        issue,
                     )
                     return JobResult(ok=True, value={"dirty_direct_not_applicable": True})
                 if original.schema_version != 1 or original.branch is None:
@@ -11498,7 +11513,7 @@ class WorkerPool:
         result: JobResult,
         message: str,
         category: SourceWorkspaceCreationFailure,
-    ) -> SourceWorkspaceTerminalError:
+    ) -> SourceWorkspaceCreationError:
         """Keep safe request and path evidence for a rejected success result."""
         value = result.value if isinstance(result.value, dict) else {}
         reservation = value.get("direct_scope_reservation")
@@ -11512,7 +11527,7 @@ class WorkerPool:
             if isinstance(reservation, dict)
             else kwargs.get("base_sha") or kwargs.get("implementation_adoption_head")
         )
-        failure = SourceWorkspaceTerminalError(
+        failure = SourceWorkspaceCreationError(
             message,
             requested_branch=branch if isinstance(branch, str) else None,
             requested_base_sha=base_sha if isinstance(base_sha, str) else None,
@@ -11618,8 +11633,8 @@ class WorkerPool:
                         )
                     )
                 ):
-                    raise SourceWorkspaceTerminalError(
-                        "writer creation failed",
+                    raise SourceWorkspaceCreationError(
+                        f"writer creation failed: {result.error or 'unknown failure'}",
                         requested_branch=reservation.get("branch")
                         if isinstance(reservation, dict)
                         else None,
@@ -11631,16 +11646,12 @@ class WorkerPool:
                         ),
                     )
                 return result
-        except SourceWorkspaceTerminalError as exc:
+        except SourceWorkspaceCreationError as exc:
+            creation_failure = normalize_source_workspace_creation_failure(exc.creation_failure)
+            if exc.path is None:
+                exc.path = source_manager.path_for(item_number, SourceLane.IMPLEMENTATION)
             value = {
-                "failure_kind": "source_workspace_terminal",
-                "source_workspace_creation_failure": normalize_source_workspace_creation_failure(
-                    exc.creation_failure
-                ).value,
-                "source_workspace_preserve": True,
-                "source_workspace_terminal": exc.terminal_reference.to_dict()
-                if exc.terminal_reference is not None
-                else None,
+                "source_workspace_creation_failure": creation_failure.value,
                 "path": str(exc.path) if exc.path is not None else "",
             }
             if exc.requested_branch is not None and exc.requested_base_sha is not None:
@@ -11648,7 +11659,11 @@ class WorkerPool:
                     "branch": exc.requested_branch,
                     "base_sha": exc.requested_base_sha,
                 }
-            return JobResult(ok=False, error="source_workspace_terminal", value=value)
+            return JobResult(
+                ok=False,
+                error=f"worktree creation failed: {creation_failure.value}",
+                value=value,
+            )
         except SourceWorkspacePreparationError:
             return JobResult(ok=False, error="timeout")
         except SourceWorkspaceError as exc:
@@ -11782,10 +11797,10 @@ class WorkerPool:
                         base_sha=cast(str, base_sha),
                         handoff=implementation_writer_handoff,
                     )
-            except SourceWorkspaceTerminalError:
+            except SourceWorkspaceCreationError:
                 raise
             except (subprocess.CalledProcessError, OSError, SourceWorkspaceError) as exc:
-                failure = SourceWorkspaceTerminalError(
+                failure = SourceWorkspaceCreationError(
                     "implementation writer transition authorization failed",
                     requested_branch=branch_name,
                     requested_base_sha=base_sha,
@@ -11846,8 +11861,8 @@ class WorkerPool:
             timeout_s=job.timeout_s,
         )
         if not result.ok and base_sha is not None and implementation_writer_handoff is not None:
-            raise SourceWorkspaceTerminalError(
-                "writer preparation failed",
+            raise SourceWorkspaceCreationError(
+                f"writer preparation failed: {result.error or 'unknown failure'}",
                 requested_branch=branch_name,
                 requested_base_sha=base_sha,
                 creation_failure=normalize_source_workspace_creation_failure(
@@ -11948,11 +11963,11 @@ class WorkerPool:
             if reuse_dirty_lane:
                 create_kwargs["reuse_dirty_lane"] = True
             return manager.create_worktree(**create_kwargs, timeout=timeout_s)
-        except SourceWorkspaceTerminalError:
+        except SourceWorkspaceCreationError:
             raise
         except (RemoteGitRefreshError, subprocess.CalledProcessError) as exc:
             if base_sha is not None and kwargs.get("implementation_writer_handoff") is not None:
-                raise SourceWorkspaceTerminalError(
+                raise SourceWorkspaceCreationError(
                     "worktree remote refresh failed",
                     requested_branch=branch_name,
                     requested_base_sha=base_sha,
@@ -12001,7 +12016,7 @@ class WorkerPool:
             )
         except Exception as exc:
             if base_sha is not None and kwargs.get("implementation_writer_handoff") is not None:
-                raise SourceWorkspaceTerminalError(
+                raise SourceWorkspaceCreationError(
                     "worktree creation failed",
                     requested_branch=branch_name,
                     requested_base_sha=base_sha,
@@ -12187,7 +12202,7 @@ class WorkerPool:
                 f"for job.repo={repo!r}"
             )
             if base_sha is not None and implementation_writer_handoff is not None:
-                raise SourceWorkspaceTerminalError(
+                raise SourceWorkspaceCreationError(
                     "implementation writer path is invalid",
                     requested_branch=branch_name,
                     requested_base_sha=base_sha,
@@ -12302,11 +12317,11 @@ class WorkerPool:
                     authority=writer_authority,
                     handoff=implementation_writer_handoff,
                 )
-        except SourceWorkspaceTerminalError:
+        except SourceWorkspaceCreationError:
             raise
         except Exception as exc:
             if base_sha is not None and implementation_writer_handoff is not None:
-                raise SourceWorkspaceTerminalError(
+                raise SourceWorkspaceCreationError(
                     "worktree post-create preparation failed",
                     requested_branch=branch_name,
                     requested_base_sha=base_sha,
@@ -12382,6 +12397,7 @@ class WorkerPool:
             }
         return JobResult(ok=True, value=value)
 
+
     @staticmethod
     def _writer_lane_proves_checkout_pin(
         source_manager: SourceWorkspaceManager,
@@ -12422,6 +12438,116 @@ class WorkerPool:
             and record.get("commit") == base_sha
         )
 
+    def _stable_direct_local_head(
+        self,
+        source_manager: SourceWorkspaceManager,
+        issue: int,
+        branch_name: str,
+        timeout_s: int,
+    ) -> str | None:
+        """Return the attached stable lane head or its detached local branch."""
+        path = source_manager.path_for(issue, SourceLane.IMPLEMENTATION)
+        if path.exists() and not path.is_symlink():
+            try:
+                if source_manager._path_is_registered_to_repository(path):
+                    branch = source_manager._head_branch(path)
+                    head = source_manager._head_revision(path)
+                    if branch == f"refs/heads/{branch_name}" and _is_full_commit_sha(head):
+                        return head
+            except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+                logger.warning("stable direct lane inspection failed for #%s: %r", issue, exc)
+        local = git_utils.run(
+            ["git", "rev-parse", "--verify", f"refs/heads/{branch_name}"],
+            cwd=source_manager.repo_root,
+            check=False,
+            timeout=timeout_s,
+        )
+        if local.returncode == 0 and _is_full_commit_sha(local.stdout.strip()):
+            return local.stdout.strip()
+        return None
+
+    def _stable_direct_resume_head(
+        self,
+        source_manager: SourceWorkspaceManager | None,
+        issue: object,
+        branch_name: str,
+        *,
+        remote_env: dict[str, str],
+        remote_config: tuple[str, ...],
+        timeout_s: int,
+    ) -> str | JobResult | None:
+        """Find existing stable-branch work before reserving a new branch."""
+        if (
+            source_manager is None
+            or type(issue) is not int
+            or branch_name != git_utils.issue_auto_impl_branch_name(issue)
+        ):
+            return None
+        repo_root = source_manager.repo_root
+        local_head = self._stable_direct_local_head(source_manager, issue, branch_name, timeout_s)
+        remote = git_utils.run(
+            ["git", *remote_config, "ls-remote", "--refs", "origin", f"refs/heads/{branch_name}"],
+            cwd=repo_root,
+            check=False,
+            timeout=timeout_s,
+            env=remote_env,
+        )
+        remote_fields = remote.stdout.split()
+        remote_head = (
+            remote_fields[0]
+            if remote.returncode == 0
+            and len(remote_fields) == 2
+            and remote_fields[1] == f"refs/heads/{branch_name}"
+            and _is_full_commit_sha(remote_fields[0])
+            else None
+        )
+        if remote.returncode != 0 or (remote.stdout and remote_head is None):
+            if local_head is None:
+                return JobResult(ok=False, error="cannot verify remote writer head")
+            logger.warning(
+                "stable direct branch %s could not be read on origin; "
+                "continuing from the lane head %s",
+                branch_name,
+                local_head,
+            )
+            return local_head
+        if local_head is not None:
+            if remote_head is not None and remote_head != local_head:
+                logger.warning(
+                    "stable direct branch %s moved on origin (%s != %s); "
+                    "continuing from the lane head %s",
+                    branch_name,
+                    remote_head,
+                    local_head,
+                    local_head,
+                )
+            if remote_head is None:
+                git_utils.reserve_remote_branch_if_absent(
+                    branch_name,
+                    local_head,
+                    repo_root,
+                    timeout=timeout_s,
+                    env=remote_env,
+                    remote_config=remote_config,
+                )
+            return local_head
+        if remote_head is None:
+            return None
+        git_utils.run(
+            [
+                "git",
+                *remote_config,
+                "fetch",
+                "origin",
+                f"+refs/heads/{branch_name}:refs/remotes/origin/{branch_name}",
+            ],
+            cwd=repo_root,
+            timeout=timeout_s,
+            env=remote_env,
+        )
+        return remote_head
+
+
     def _prepare_direct_scope_worktree(
         self,
         *,
@@ -12432,7 +12558,7 @@ class WorkerPool:
         timeout_s: int,
         source_manager: SourceWorkspaceManager | None = None,
     ) -> tuple[str | None, str] | JobResult:
-        """Validate and atomically reserve a direct-scope implementation branch."""
+        """Reuse stable issue work or reserve a branch for a new writer."""
         base_sha = kwargs.pop("base_sha", None)
         branch_name = str(kwargs.get("branch_name") or "")
         if base_sha is None:
@@ -12441,6 +12567,26 @@ class WorkerPool:
             return JobResult(ok=False, error="direct scope base pin invalid")
         if not _is_full_commit_sha(base_sha):
             return JobResult(ok=False, error="direct scope base pin invalid")
+
+        if not branch_name:
+            return JobResult(ok=False, error="direct scope branch name is missing")
+        remote_env, remote_config = self._authenticated_remote_git_configuration(
+            cwd=repo_root,
+            expected_repo=expected_repo,
+            timeout=timeout_s,
+        )
+        resumed_head = self._stable_direct_resume_head(
+            source_manager,
+            kwargs.get("issue_number"),
+            branch_name,
+            remote_env=remote_env,
+            remote_config=remote_config,
+            timeout_s=timeout_s,
+        )
+        if isinstance(resumed_head, JobResult):
+            return resumed_head
+        if resumed_head is not None:
+            return resumed_head, branch_name
         checkout_head = git_utils.run(
             ["git", "rev-parse", "HEAD"], cwd=repo_root, timeout=timeout_s
         ).stdout.strip()
@@ -12480,13 +12626,6 @@ class WorkerPool:
                         "direct_scope_reservation": {"branch": branch_name, "base_sha": base_sha},
                     },
                 )
-        if not branch_name:
-            return JobResult(ok=False, error="direct scope branch name is missing")
-        remote_env, remote_config = self._authenticated_remote_git_configuration(
-            cwd=repo_root,
-            expected_repo=expected_repo,
-            timeout=timeout_s,
-        )
         git_utils.reserve_remote_branch_if_absent(
             branch_name,
             base_sha,

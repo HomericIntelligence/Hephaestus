@@ -45,7 +45,13 @@ from hephaestus.utils.git import _is_full_commit_sha
 from hephaestus.utils.helpers import run_subprocess
 from hephaestus.utils.worktree_identity import source_worktree_name
 
-from .git_utils import _detached_rebase_branch_ref, get_repo_root, is_clean_working_tree, run
+from .git_utils import (
+    _detached_rebase_branch_ref,
+    get_repo_root,
+    is_clean_working_tree,
+    issue_auto_impl_branch_name,
+    run,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -776,6 +782,7 @@ class WorktreeManager:
                         # transition to record, so the authority record carries
                         # no predecessor evidence.
                         predecessor_evidence = None
+                        reuse_direct_predecessor = False
                         if direct_predecessor:
                             if not isinstance(
                                 implementation_writer_handoff, ImplementationWriterHandoff
@@ -850,7 +857,11 @@ class WorktreeManager:
                                         worktree_path=worktree_path,
                                     ),
                                 )
-                        if direct_predecessor:
+                            reuse_direct_predecessor = (
+                                current_revision == base_sha
+                                and current_branch == f"refs/heads/{branch_name}"
+                            )
+                        if direct_predecessor and not reuse_direct_predecessor:
                             self._remove_direct_writer_conservatively(
                                 issue_number=issue_number,
                                 worktree_path=worktree_path,
@@ -858,7 +869,7 @@ class WorktreeManager:
                                 expected_branch=predecessor_branch,
                                 timeout=timeout,
                             )
-                        else:
+                        elif not direct_predecessor:
                             self._remove_worktree_path_forcefully(worktree_path, timeout=timeout)
                         if direct_predecessor:
                             if not isinstance(
@@ -872,17 +883,28 @@ class WorktreeManager:
                             )
                     else:
                         predecessor_evidence = None
-                    self._validate_direct_scope_worktree_request(
-                        base_sha=base_sha,
-                        remote_branch_reserved=remote_branch_reserved,
-                        refresh_base=refresh_base,
-                        isolated=False,
-                        worktree_key=worktree_key,
-                        worktree_path=worktree_path,
-                        branch_name=branch_name,
-                        allowed_local_branch_revision=direct_target_ref_revision,
-                        timeout=timeout,
-                    )
+                        reuse_direct_predecessor = False
+                    if (
+                        source_lane == "impl"
+                        and base_sha is not None
+                        and direct_target_ref_revision is None
+                        and branch_name == issue_auto_impl_branch_name(issue_number)
+                    ):
+                        stable_revision = self._local_branch_revision(branch_name, timeout=timeout)
+                        if stable_revision == base_sha:
+                            direct_target_ref_revision = stable_revision
+                    if not reuse_direct_predecessor:
+                        self._validate_direct_scope_worktree_request(
+                            base_sha=base_sha,
+                            remote_branch_reserved=remote_branch_reserved,
+                            refresh_base=refresh_base,
+                            isolated=False,
+                            worktree_key=worktree_key,
+                            worktree_path=worktree_path,
+                            branch_name=branch_name,
+                            allowed_local_branch_revision=direct_target_ref_revision,
+                            timeout=timeout,
+                        )
                     try:
                         if adopting_implementation_writer:
                             self._add_authenticated_adopted_implementation_writer(
@@ -895,21 +917,22 @@ class WorktreeManager:
                                 reuse_dirty_lane=reuse_dirty_lane,
                             )
                         else:
-                            if direct_target_ref_revision is None:
-                                self._add_worktree_for_branch(
-                                    worktree_path,
-                                    branch_name,
-                                    base_sha=base_sha,
-                                    timeout=timeout,
-                                )
-                            else:
-                                self._add_worktree_for_branch(
-                                    worktree_path,
-                                    branch_name,
-                                    base_sha=base_sha,
-                                    replace_existing_base_branch=True,
-                                    timeout=timeout,
-                                )
+                            if not reuse_direct_predecessor:
+                                if direct_target_ref_revision is None:
+                                    self._add_worktree_for_branch(
+                                        worktree_path,
+                                        branch_name,
+                                        base_sha=base_sha,
+                                        timeout=timeout,
+                                    )
+                                else:
+                                    self._add_worktree_for_branch(
+                                        worktree_path,
+                                        branch_name,
+                                        base_sha=base_sha,
+                                        replace_existing_base_branch=True,
+                                        timeout=timeout,
+                                    )
                             if source_lane == "impl":
                                 if direct_predecessor:
                                     if not isinstance(
@@ -1235,6 +1258,15 @@ class WorktreeManager:
                 holder,
             )
             self._remove_worktree_path_forcefully(holder, timeout=timeout)
+        if (
+            reserved_remote_branch_sha is not None
+            and branch_name == issue_auto_impl_branch_name(issue_number)
+            and self._local_branch_revision(branch_name, timeout=timeout)
+            == reserved_remote_branch_sha
+        ):
+            # A stable issue branch is durable work, not an interrupted
+            # per-run allocation. Recreate only its missing checkout.
+            return False
         if self._implementation_writer_branch_exists(
             branch_name,
             reserved_remote_branch_sha=reserved_remote_branch_sha,
