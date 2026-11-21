@@ -58,6 +58,7 @@ if TYPE_CHECKING:
         _idle_poll_s: float
         _stall_ticks_before_retry: int
         _step_watchdog_s: float
+        _watchdog_stall_budget_s: float
         _file_overlap_warning_threshold: int
         completion_q: CompletionQueue
         pool: MainWorker

@@ -142,6 +142,7 @@ class Coordinator(
         self._idle_poll_s = idle_poll_s
         self._stall_ticks_before_retry = stall_ticks_before_retry
         self._step_watchdog_s = ct._STEP_WATCHDOG_S
+        self._watchdog_stall_budget_s = ct._WATCHDOG_STALL_BUDGET_S
         self._file_overlap_warning_threshold = ct._FILE_OVERLAP_WARNING_THRESHOLD
         # These latches are the control plane for the bounded completion
         # queue.  They carry no WorkItem/JobResult payload and therefore
