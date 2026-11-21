@@ -150,6 +150,10 @@ class PipelineGitHubJobRunner:
                 or not (
                     readiness.get("mergeable") == "CONFLICTING"
                     or readiness.get("mergeStateStatus") in {"DIRTY", "CONFLICTING"}
+                    or (
+                        readiness.get("mergeable") == "MERGEABLE"
+                        and readiness.get("mergeStateStatus") == "BEHIND"
+                    )
                 )
             ):
                 return RebaseConflictInspected(request, False, "rebase conflict is not confirmed")
@@ -344,6 +348,29 @@ class PipelineGitHubJobRunner:
         state = admit()
         if isinstance(state, str):
             return complete(state, merge_sha=terminal_merge_sha)
+        try:
+            readiness = github.gh_pr_merge_readiness(request.pr_number)
+        except Exception:
+            readiness = None
+        if isinstance(readiness, dict) and readiness.get("mergeStateStatus") == "BEHIND":
+            current_auto_merge = readiness.get("autoMergeRequest")
+            if "autoMergeRequest" not in readiness or not isinstance(
+                current_auto_merge, dict | None
+            ):
+                return complete("auto_merge_transport_error", attempted=True, can_retry=True)
+            armed = (
+                request.auto_merge_armed
+                or state.get("autoMergeRequest") is not None
+                or current_auto_merge is not None
+            )
+            if armed:
+                try:
+                    disarmed = github.disable_auto_merge(request.pr_number)
+                except Exception:
+                    disarmed = False
+                if not disarmed:
+                    return complete("auto_merge_transport_error", attempted=True, can_retry=True)
+            return complete("merge_behind", attempted=armed)
         if request.auto_merge_armed:
             # The auto-merge is already armed. Observe the pull request
             # without enabling it again. GitHub owns the merge from here.

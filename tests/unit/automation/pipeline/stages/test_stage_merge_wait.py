@@ -2,14 +2,17 @@
 
 The contract is: an open pull request carrying the exclusive implementation-GO
 label is admitted, GitHub native auto-merge is enabled once, and the stage waits
-for GitHub to report the merge. The stage does not read the head, does not gate
-on required status evidence, and does not rebase first.
+for GitHub to report the merge. The stage does not compare the head or gate on
+required status evidence. A conflict or an origin advance returns to
+implementation for finalization base synchronization.
 """
 
 from __future__ import annotations
 
 import threading
 from typing import Any
+
+import pytest
 
 from hephaestus.automation.pipeline.github_jobs import (
     GitHubJob,
@@ -141,6 +144,129 @@ def test_a_conflicting_pull_request_still_enables_auto_merge(tmp_path: Any) -> N
     receipt = _run_cycle(github, _job(tmp_path))
 
     assert receipt.outcome == "auto_merge_enabled"
+
+
+@pytest.mark.parametrize("armed", [False, True])
+def test_a_behind_pr_returns_to_implementation_before_it_can_merge(
+    armed: bool, tmp_path: Any
+) -> None:
+    """A clean PR behind main needs finalization, with any auto-merge disarmed."""
+    auto_merge_request = {"enabledBy": {"login": "someone"}} if armed else None
+    github = _MergeBlockGitHub(
+        states=[_open_pr(auto_merge_request=auto_merge_request)],
+        readiness=[
+            {
+                "state": "OPEN",
+                "mergeStateStatus": "BEHIND",
+                "mergeable": "MERGEABLE",
+                "autoMergeRequest": auto_merge_request,
+            }
+        ],
+    )
+    request = _armed_request() if armed else _job(tmp_path).request
+    assert isinstance(request, RunMergeWaitCycleRequest)
+
+    receipt = PipelineGitHubJobRunner._run_merge_wait_cycle(request, github)
+
+    assert receipt.outcome == "merge_behind"
+    assert github.enable_calls == []
+    assert github.disarm_calls == ([7] if armed else [])
+
+
+def test_a_failed_behind_disarm_remains_retryable() -> None:
+    """Do not route a PR to implementation while its auto-merge remains armed."""
+    github = _MergeBlockGitHub(
+        states=[_open_pr(auto_merge_request={"enabledBy": {"login": "someone"}})],
+        readiness=[
+            {
+                "state": "OPEN",
+                "mergeStateStatus": "BEHIND",
+                "mergeable": "MERGEABLE",
+                "autoMergeRequest": {"enabledBy": {"login": "someone"}},
+            }
+        ],
+    )
+    github.disarm_result = False
+
+    receipt = PipelineGitHubJobRunner._run_merge_wait_cycle(_armed_request(), github)
+
+    assert receipt.outcome == "auto_merge_transport_error"
+    assert receipt.retryable is True
+    assert github.disarm_calls == [7]
+
+
+def test_fresh_readiness_disarms_a_concurrently_armed_behind_pr(tmp_path: Any) -> None:
+    """The current readiness read detects auto-merge armed after the state read."""
+    github = _MergeBlockGitHub(
+        states=[_open_pr(auto_merge_request=None)],
+        readiness=[
+            {
+                "state": "OPEN",
+                "mergeStateStatus": "BEHIND",
+                "mergeable": "MERGEABLE",
+                "autoMergeRequest": {"enabledBy": {"login": "someone"}},
+            }
+        ],
+    )
+
+    request = _job(tmp_path).request
+    assert isinstance(request, RunMergeWaitCycleRequest)
+    receipt = PipelineGitHubJobRunner._run_merge_wait_cycle(request, github)
+
+    assert receipt.outcome == "merge_behind"
+    assert github.disarm_calls == [7]
+    assert github.enable_calls == []
+
+
+def test_missing_current_auto_merge_state_remains_retryable(tmp_path: Any) -> None:
+    """A malformed readiness response cannot make an armed PR look unarmed."""
+
+    class MissingAutoMergeGitHub(_MergeBlockGitHub):
+        def gh_pr_merge_readiness(self, pr_number: int) -> dict[str, object] | None:
+            return {
+                "state": "OPEN",
+                "mergeable": "MERGEABLE",
+                "mergeStateStatus": "BEHIND",
+            }
+
+    request = _job(tmp_path).request
+    assert isinstance(request, RunMergeWaitCycleRequest)
+    receipt = PipelineGitHubJobRunner._run_merge_wait_cycle(request, MissingAutoMergeGitHub())
+
+    assert receipt.outcome == "auto_merge_transport_error"
+    assert receipt.retryable is True
+    assert receipt.attempted is True
+
+
+def test_missing_current_auto_merge_state_exhausts_the_merge_budget(
+    tmp_path: Any, make_ctx: Any, make_work_item: Any
+) -> None:
+    """Persistent malformed readiness consumes the existing merge retry budget."""
+
+    class MissingAutoMergeGitHub(_MergeBlockGitHub):
+        def gh_pr_merge_readiness(self, pr_number: int) -> dict[str, object] | None:
+            return {
+                "state": "OPEN",
+                "mergeable": "MERGEABLE",
+                "mergeStateStatus": "BEHIND",
+            }
+
+    ctx = make_ctx(budget_fn=lambda action: 2)
+    item = make_work_item(kind="pr", issue=1, pr=7)
+    outcomes = []
+    for _ in range(2):
+        request = _job(tmp_path).request
+        assert isinstance(request, RunMergeWaitCycleRequest)
+        receipt = PipelineGitHubJobRunner._run_merge_wait_cycle(request, MissingAutoMergeGitHub())
+        item.state = MERGE_APPLY
+        item.payload[PENDING_GITHUB_REQUEST] = request
+        item.payload["_merge_wait_cycle_receipt"] = receipt
+        outcomes.append(MergeWaitStage()._merge_apply(item, ctx))
+
+    assert outcomes == [
+        StageOutcome(Disposition.RETRY, "merge_not_ready"),
+        StageOutcome(Disposition.FINISH_FAIL, "merge_attempts_exhausted"),
+    ]
 
 
 def test_missing_go_label_is_not_admitted(tmp_path: Any) -> None:
@@ -479,8 +605,8 @@ def test_an_armed_pr_blocked_by_review_threads_names_the_count() -> None:
     assert github.enable_calls == []
 
 
-def test_the_block_check_runs_only_after_the_arm() -> None:
-    """The enabling cycle arms the auto-merge without spending a block read."""
+def test_the_enabling_cycle_checks_for_a_behind_pr_before_arming() -> None:
+    """The enabling cycle checks base freshness before it arms auto-merge."""
     github = _MergeBlockGitHub(readiness=[_blocked_readiness()], threads=[{"id": "T1"}])
 
     receipt = PipelineGitHubJobRunner._run_merge_wait_cycle(
@@ -495,7 +621,7 @@ def test_the_block_check_runs_only_after_the_arm() -> None:
 
     assert receipt.outcome == "auto_merge_enabled"
     assert receipt.attempted is True
-    assert github.readiness_reads == []
+    assert github.readiness_reads == [7]
 
 
 def test_an_armed_pr_blocked_by_failing_checks_names_the_checks() -> None:

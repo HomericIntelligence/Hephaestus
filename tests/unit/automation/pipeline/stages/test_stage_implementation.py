@@ -892,6 +892,34 @@ class TestGate:
         item.payload["worktree_dirty"] = False
         assert stage.step(item, ctx) == Continue(next_state="REBASE_WAIT")
 
+    def test_reviewed_behind_pr_enters_finalization_rebase(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A GO pull request behind origin uses the post-review rebase path."""
+        github = FakeStageGitHub(
+            pr_impl_state=(True, False),
+            pr_state={
+                "state": "OPEN",
+                "autoMergeRequest": None,
+                "headRefOid": "a" * 40,
+                "baseRefName": "main",
+                "mergeable": "MERGEABLE",
+                "mergeStateStatus": "BEHIND",
+            },
+        )
+        item = make_work_item(issue=1, pr=1001, state="REBASE_WAIT")
+        item.payload.update(rebase_reason="review_conflict", reviewed_pr_head_sha="a" * 40)
+        _prepared_writer(item)
+        stage = ImplementationStage()
+        ctx = make_ctx(github=github)
+        _consume_rebase_discovery(stage, item, ctx)
+
+        request = stage.step(item, ctx)
+
+        assert isinstance(request, JobRequest)
+        assert isinstance(request.job, AgentJob)
+        assert request.job.descr == "prepare_conflict_rebase"
+
     def test_dependency_sync_does_not_authorize_rebase(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
@@ -3056,6 +3084,57 @@ class TestWorktreeAndAdvise:
             "base_sha": "a" * 40,
         }
 
+    @pytest.mark.parametrize("base_sha", [None, "a" * 40], ids=["ordinary", "direct"])
+    def test_started_worktree_continues_from_its_lane_without_a_base_refresh(
+        self, base_sha: str | None, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A continuation keeps its lane head instead of rechecking the origin base."""
+        stage = ImplementationStage()
+        item = make_work_item(issue=1, state="WORKTREE_WAIT")
+        item.branch = "1-auto-impl"
+        item.payload.update({"dirty_direct_checked": True, "implementation_started": True})
+        if base_sha is not None:
+            item.payload["_direct_scope_base_sha"] = base_sha
+
+        result = stage.step(item, make_ctx())
+
+        assert isinstance(result, JobRequest)
+        assert isinstance(result.job, GitJob)
+        assert result.job.kwargs == {
+            "issue_number": 1,
+            "branch_name": "1-auto-impl",
+            "refresh_base": False,
+            "preserve_started_lane": True,
+            "repo_root": "/tmp/repo",
+            "source_lane": "impl",
+        }
+
+    def test_started_direct_worktree_does_not_require_a_new_reservation(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A started lane keeps its existing reservation and accepted writer."""
+        stage = ImplementationStage()
+        item = make_work_item(issue=1, state="WORKTREE_WAIT")
+        item.payload.update(
+            {
+                "dirty_direct_checked": True,
+                "implementation_started": True,
+                "_direct_scope_base_sha": "a" * 40,
+            }
+        )
+
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=True,
+                value=_worktree_receipt(item, path="/tmp/lane", revision="b" * 40),
+            ),
+            make_ctx(),
+        )
+
+        assert item.worktree == "/tmp/lane"
+        assert "git_error" not in item.payload
+
     def test_direct_scope_worktree_forwards_the_coordinator_run_nonce(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
@@ -3509,6 +3588,52 @@ class TestWorktreeAndAdvise:
             "branch": "1-auto-impl-direct-abc123",
             "base_sha": "a" * 40,
         }
+
+    def test_direct_scope_checkout_pin_mismatch_continues_from_the_lane(
+        self, make_ctx: Any, make_work_item: Any, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A moved trunk pin is diagnostic after the implementation lane starts."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, state="WORKTREE_WAIT")
+        item.branch = "1-auto-impl-direct-" + "d" * 32
+        item.payload.update(
+            {
+                "_direct_scope_base_sha": "a" * 40,
+                "dirty_direct_checked": True,
+                "implementation_started": True,
+            }
+        )
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=False,
+                error="direct_scope_stale_state:checkout_pin_mismatch",
+                value={
+                    "direct_scope_stale_state": {
+                        "predicate": "checkout_pin_mismatch",
+                        "branch": item.branch,
+                        "detail": "checkout b; lane a",
+                    }
+                },
+            ),
+            ctx,
+        )
+        item.state = "DIRTY_DECISION_WAIT"
+
+        with caplog.at_level("WARNING"):
+            outcome = stage.step(item, ctx)
+
+        assert outcome == Continue(next_state="WORKTREE_WAIT")
+        assert item.attempts["implement"] == 0
+        assert "git_error_retries" not in item.payload
+        assert "continuing from the managed lane" in caplog.text
+        item.state = outcome.next_state
+        retry = stage.step(item, ctx)
+        assert isinstance(retry, JobRequest)
+        assert isinstance(retry.job, GitJob)
+        assert "base_sha" not in retry.job.kwargs
+        assert retry.job.kwargs["refresh_base"] is False
 
     def test_worktree_rollback_failure_preserves_direct_reservation_receipt(
         self, make_ctx: Any, make_work_item: Any
