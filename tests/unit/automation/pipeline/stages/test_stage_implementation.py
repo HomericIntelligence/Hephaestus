@@ -3107,7 +3107,6 @@ class TestWorktreeAndAdvise:
             "preserve_started_lane": True,
             "repo_root": "/tmp/repo",
             "source_lane": "impl",
-            "preserve_started_lane": True,
         }
 
     def test_started_direct_worktree_does_not_require_a_new_reservation(
