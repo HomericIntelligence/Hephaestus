@@ -9278,7 +9278,11 @@ class TestGitOps:
         assert result.ok is True
         assert result.value["path"] == str(source_manager.path_for(7, SourceLane.IMPLEMENTATION))
         assert result.value["impl_source_revision"] == second
-        assert result.value["direct_scope_reservation"] == {"branch": branch, "base_sha": second}
+        assert result.value["direct_scope_reservation"] == {
+            "branch": branch,
+            "base_sha": second,
+            "created_by_this_attempt": True,
+        }
 
     def test_direct_pinned_impl_writer_lane_must_hold_the_pinned_head(
         self,

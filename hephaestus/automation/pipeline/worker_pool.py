@@ -12438,7 +12438,6 @@ class WorkerPool:
             }
         return JobResult(ok=True, value=value)
 
-
     @staticmethod
     def _writer_lane_proves_checkout_pin(
         source_manager: SourceWorkspaceManager,
@@ -12589,7 +12588,6 @@ class WorkerPool:
             env=remote_env,
         )
         return remote_head
-
 
     def _prepare_direct_scope_worktree(
         self,

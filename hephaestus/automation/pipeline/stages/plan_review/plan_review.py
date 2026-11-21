@@ -1530,51 +1530,53 @@ class PlanReviewStage(Stage):
             item.payload["retry_delay_s"] = float(2 ** (retries - 1))
         return outcome
 
+    def _capture_accepted_review(
+        self, item: WorkItem, ctx: StageContext, issue_number: int
+    ) -> _AcceptedPlanReview | StageOutcome | None:
+        """Bind one new verdict to its exact reviewed plan comment."""
+        verdict = item.payload.pop("review_verdict", None)
+        if verdict is None:
+            return None
+        if not isinstance(verdict, ReviewVerdict) or verdict.verdict not in {"GO", "NOGO"}:
+            item.payload.pop("accepted_plan_review", None)
+            raw_review = str(item.payload.get("unclassified_review_text") or "").strip()
+            if raw_review and not item.payload.get("review_verdict_followup_attempted"):
+                item.payload["review_verdict_followup_attempted"] = True
+                item.payload["review_verdict_followup_pending"] = True
+                item.state = REVIEW_WAIT
+                logger.warning(
+                    "plan_review:%s: review has no GO or NOGO; asking the reviewer "
+                    "to classify its own review once",
+                    item.issue,
+                )
+                return StageOutcome(Disposition.RETRY, "review verdict clarification requested")
+            return _reviewer_failure(item, "reviewer returned no GO or NOGO after clarification")
+        item.payload.pop("unclassified_review_text", None)
+        item.payload.pop("review_verdict_followup_attempted", None)
+        item.payload.pop("review_verdict_followup_pending", None)
+        revision = int(item.payload.get("plan_revision") or 0)
+        plan_comment_body = item.payload.get(_REVIEWED_PLAN_COMMENT_BODY)
+        if not isinstance(plan_comment_body, str) or not plan_comment_body:
+            # Preserve marker-conflict detection for a legacy in-flight item
+            # that predates the exact-body binding.
+            journal_snapshot(ctx.github.issue_comments(issue_number))
+            item.payload.pop("accepted_plan_review", None)
+            return _reviewer_failure(item, "reviewed plan identity is unavailable")
+        review = _AcceptedPlanReview(verdict, revision, plan_comment_body)
+        item.payload["accepted_plan_review"] = review
+        item.payload.pop("review_publication_retries", None)
+        return review
+
     def _eval(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """Publish one accepted review without charging its retries again."""
         if item.issue is None:  # guarded by step(); kept for type narrowing
             return StageOutcome(Disposition.FINISH_FAIL, "no issue number")
         issue_number = item.issue
-        verdict = item.payload.pop("review_verdict", None)
-        review = item.payload.get("accepted_plan_review")
-        if verdict is not None:
-            if not isinstance(verdict, ReviewVerdict) or verdict.verdict not in {
-                "GO",
-                "NOGO",
-            }:
-                item.payload.pop("accepted_plan_review", None)
-                raw_review = str(item.payload.get("unclassified_review_text") or "").strip()
-                if raw_review and not item.payload.get("review_verdict_followup_attempted"):
-                    item.payload["review_verdict_followup_attempted"] = True
-                    item.payload["review_verdict_followup_pending"] = True
-                    item.state = REVIEW_WAIT
-                    logger.warning(
-                        "plan_review:%s: review has no GO or NOGO; asking the reviewer "
-                        "to classify its own review once",
-                        item.issue,
-                    )
-                    return StageOutcome(Disposition.RETRY, "review verdict clarification requested")
-                return _reviewer_failure(
-                    item, "reviewer returned no GO or NOGO after clarification"
-                )
-            item.payload.pop("unclassified_review_text", None)
-            item.payload.pop("review_verdict_followup_attempted", None)
-            item.payload.pop("review_verdict_followup_pending", None)
-            revision = int(item.payload.get("plan_revision") or 0)
-            plan_comment_body = item.payload.get(_REVIEWED_PLAN_COMMENT_BODY)
-            if not isinstance(plan_comment_body, str) or not plan_comment_body:
-                # Preserve marker-conflict detection for a legacy in-flight
-                # item that predates the exact-body binding.
-                journal_snapshot(ctx.github.issue_comments(issue_number))
-                item.payload.pop("accepted_plan_review", None)
-                return _reviewer_failure(item, "reviewed plan identity is unavailable")
-            review = _AcceptedPlanReview(
-                verdict,
-                revision,
-                plan_comment_body,
-            )
-            item.payload["accepted_plan_review"] = review
-            item.payload.pop("review_publication_retries", None)
+        review = self._capture_accepted_review(item, ctx, issue_number)
+        if isinstance(review, StageOutcome):
+            return review
+        if review is None:
+            review = item.payload.get("accepted_plan_review")
         if not isinstance(review, _AcceptedPlanReview):
             if item.payload.get("review_session_error") == "review-provider-unavailable":
                 return _provider_failure_outcome(item, ctx)
@@ -1604,23 +1606,27 @@ class PlanReviewStage(Stage):
             return identity_outcome
 
         if verdict.is_go:
-            # One bounded final planner pass integrates the accepted review's
-            # findings when they can improve the plan (#3643). Either outcome
-            # (changed plan, kept plan, failed pass) completes the GO below;
-            # the guard keys the pass to at most one attempt per lifetime.
-            if not item.payload.get(_PLAN_FEEDBACK_INTEGRATED) and _GO_FEEDBACK_RE.search(
-                verdict.raw
-            ):
-                item.payload[_PLAN_FEEDBACK_INTEGRATED] = True
-                item.payload[_PLAN_REVIEW_FINDINGS] = verdict.raw
-                logger.info(
-                    "plan_review:%d: GO with findings; requesting one final "
-                    "planner integration pass",
-                    issue_number,
-                )
-                return Continue(next_state=FEEDBACK_WAIT)
-            return self._complete_go(item, ctx, review)
+            return self._complete_go_with_feedback(item, ctx, review, issue_number)
         return self._complete_nogo(item, ctx, review)
+
+    def _complete_go_with_feedback(
+        self, item: WorkItem, ctx: StageContext, review: _AcceptedPlanReview, issue_number: int
+    ) -> StepResult:
+        """Run one bounded feedback integration before completing an accepted GO."""
+        verdict = review.verdict
+        # One bounded final planner pass integrates the accepted review's
+        # findings when they can improve the plan (#3643). Either outcome
+        # (changed plan, kept plan, failed pass) completes the GO below;
+        # the guard keys the pass to at most one attempt per lifetime.
+        if not item.payload.get(_PLAN_FEEDBACK_INTEGRATED) and _GO_FEEDBACK_RE.search(verdict.raw):
+            item.payload[_PLAN_FEEDBACK_INTEGRATED] = True
+            item.payload[_PLAN_REVIEW_FINDINGS] = verdict.raw
+            logger.info(
+                "plan_review:%d: GO with findings; requesting one final planner integration pass",
+                issue_number,
+            )
+            return Continue(next_state=FEEDBACK_WAIT)
+        return self._complete_go(item, ctx, review)
 
     def _submit_amend_job(self, item: WorkItem, ctx: StageContext) -> JobRequest:
         """Submit the planner amend job with the reviewer feedback block.
