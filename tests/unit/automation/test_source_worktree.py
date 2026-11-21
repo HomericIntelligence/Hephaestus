@@ -1201,6 +1201,60 @@ def test_direct_writer_transition_rejects_receipt_free_stale_registration(
     assert str(predecessor.cwd.resolve()) in registered_paths
 
 
+@pytest.mark.parametrize(
+    "transition",
+    ["direct", "adopted"],
+    ids=["direct-no-receipt", "adopted-missing-checkout"],
+)
+def test_writer_inventory_failure_has_unproven_recovery(tmp_path: Path, transition: str) -> None:
+    """Public writer transitions preserve an inventory failure as the cause."""
+    repo, first, second = _repository(tmp_path)
+    manager = SourceWorkspaceManager(repo, repository="example/project")
+    predecessor = manager.prepare(
+        9,
+        SourceLane.IMPLEMENTATION,
+        first,
+        branch="old-writer-branch",
+    )
+    if transition == "direct":
+        manager._receipt_path(9, SourceLane.IMPLEMENTATION).unlink()
+    else:
+        shutil.rmtree(predecessor.cwd)
+    error = RuntimeError("Failed to list git worktrees")
+
+    with manager.implementation_writer_handoff(9) as handoff:
+        with (
+            patch.object(
+                WorktreeManager,
+                "_registered_worktree_at_path",
+                side_effect=error,
+            ),
+            pytest.raises(
+                SourceWorkspaceError,
+                match="implementation writer predecessor is unproven",
+            ) as captured,
+        ):
+            if transition == "direct":
+                manager.authorize_direct_implementation_writer_transition(
+                    9,
+                    branch="writer-branch",
+                    base_sha=second,
+                    handoff=handoff,
+                )
+            else:
+                manager.authorize_adopted_implementation_writer_transition(
+                    9,
+                    branch="writer-branch",
+                    expected_head=second,
+                    handoff=handoff,
+                )
+
+    assert captured.value.__cause__ is error
+    recovery = captured.value.recovery
+    assert recovery is not None
+    assert recovery.kind is SourceWorkspaceRecoveryKind.UNPROVEN_PREDECESSOR
+
+
 @pytest.mark.parametrize("receipt_kind", ["malformed", "unreadable", "symlink"])
 def test_direct_writer_receipt_read_failure_has_unproven_recovery(
     tmp_path: Path, receipt_kind: str
@@ -4072,3 +4126,23 @@ def test_registration_query_propagates_a_failed_inventory(tmp_path: Path) -> Non
 
     with patch.object(WorktreeManager, "_registered_worktree_at_path", return_value=None):
         assert manager._path_is_registered_to_repository(lane.cwd) is False
+
+
+def test_acquire_propagates_failed_inventory(tmp_path: Path) -> None:
+    """Public acquisition keeps the inventory error instead of reporting drift."""
+    repo, first, _ = _repository(tmp_path)
+    manager = SourceWorkspaceManager(repo, repository="example/project")
+    binding = manager.prepare(77, SourceLane.IMPLEMENTATION, first)
+    assert binding.schema_version == 1
+    error = RuntimeError("Failed to list git worktrees")
+
+    with patch.object(
+        WorktreeManager,
+        "_registered_worktree_at_path",
+        side_effect=error,
+    ):
+        with pytest.raises(RuntimeError) as captured:
+            with manager.acquire(binding):
+                pytest.fail("an unavailable inventory must not provide a source lease")
+
+    assert captured.value is error

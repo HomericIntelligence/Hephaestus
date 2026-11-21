@@ -2751,9 +2751,7 @@ class WorktreeManager:
             elif line.startswith("detached") or line.startswith("locked"):
                 continue
             elif line.startswith("HEAD "):
-                value = line.split(" ", 1)[1]
-                if _is_full_commit_sha(value):
-                    current["commit"] = value
+                current["commit"] = line.split(" ", 1)[1]
         if current:
             worktrees.append(current)
         return worktrees
@@ -2783,8 +2781,8 @@ class WorktreeManager:
                     result = self._run_worktree_list(z=True, timeout=timeout, shutdown=shutdown)
                     self._worktree_list_z_supported = True
                     return self._parse_worktree_list_z(result.stdout)
-                except subprocess.CalledProcessError:
-                    if support is True:
+                except subprocess.CalledProcessError as exc:
+                    if support is True or exc.returncode != 129:
                         raise
                     self._worktree_list_z_supported = False
             # Git older than 2.36 does not accept ``-z``: retry once plain.
