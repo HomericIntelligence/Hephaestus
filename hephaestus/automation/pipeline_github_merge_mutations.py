@@ -45,11 +45,14 @@ class PipelineGitHubMergeMutations(PipelineGitHubIssueComments):
         if timeout <= 0:
             return AutoMergeEnableResult(enabled=False, transport_error=True)
         try:
+            owner, name = self._owner_name()
             result = self._deadline_gh_call(
                 [
                     "pr",
                     "merge",
                     str(pr_number),
+                    "--repo",
+                    f"{owner}/{name}",
                     "--squash",
                     "--auto",
                 ],
@@ -89,8 +92,9 @@ class PipelineGitHubMergeMutations(PipelineGitHubIssueComments):
         if pr_number <= 0 or self._skip(f"disable auto-merge for PR #{pr_number}"):
             return False
         try:
+            owner, name = self._owner_name()
             result = self._deadline_gh_call(
-                ["pr", "merge", str(pr_number), "--disable-auto"],
+                ["pr", "merge", str(pr_number), "--repo", f"{owner}/{name}", "--disable-auto"],
                 check=False,
                 retry_on_rate_limit=False,
                 max_retries=1,

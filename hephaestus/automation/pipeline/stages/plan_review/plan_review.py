@@ -144,7 +144,7 @@ from hephaestus.prompts import PromptCatalog
 
 from ...admission import parse_publication_scope_files
 from ...coordinator_sessions import agent_session_lifecycle
-from ...diagnostics import redact_diagnostic_text
+from ...diagnostics import bounded_pipeline_diagnostic, redact_diagnostic_text
 from ...github_jobs import (
     DecompositionChildLabelsApplied,
     DecompositionChildLabelsRequest,
@@ -390,21 +390,23 @@ def _reviewer_failure(item: WorkItem, reason: str) -> StageOutcome:
     """Bound consecutive reviewer failures without charging a plan revision."""
     retries = int(item.payload.get("review_error_retries", 0)) + 1
     item.payload["review_error_retries"] = retries
+    cause = item.payload.get("review_provider_error")
+    detail = f"{reason}: {cause}" if cause and cause != reason else reason
     if retries > REVIEW_ERROR_RETRY_CAP:
-        logger.error("plan_review:%s: reviewer failures exhausted: %s", item.issue, reason)
+        logger.error("plan_review:%s: reviewer failures exhausted: %s", item.issue, detail)
         return StageOutcome(
             Disposition.FINISH_FAIL,
-            f"reviewer error retries exhausted ({reason})",
+            f"reviewer error retries exhausted ({detail})",
         )
     logger.warning(
         "plan_review:%s: %s; retry %d/%d",
         item.issue,
-        reason,
+        detail,
         retries,
         REVIEW_ERROR_RETRY_CAP,
     )
     item.state = REVIEW_WAIT
-    return StageOutcome(Disposition.RETRY, reason)
+    return StageOutcome(Disposition.RETRY, detail)
 
 
 def _selected_reviewer_model(item: WorkItem, ctx: StageContext) -> str:
@@ -2655,16 +2657,27 @@ class PlanReviewStage(Stage):
             return
         if not result.ok:
             reason = _safe_agent_failure_reason(result.error)
+            cause = bounded_pipeline_diagnostic(result.error or "", limit=500)
+            if reason == "agent job failed" and cause:
+                detail = cause
+            elif cause and cause != reason:
+                detail = f"{reason} ({cause})"
+            else:
+                detail = reason
             diagnostic = _safe_agent_failure_diagnostic(result.stderr_tail)
             if diagnostic:
-                logger.warning(
-                    "plan_review:%s: job failed: %s; diagnostic: %s",
+                logger.error(
+                    "plan_review:%s: agent failed due to %s; diagnostic: %s; retrying review loop",
                     item.issue,
-                    reason,
+                    detail,
                     diagnostic,
                 )
             else:
-                logger.warning("plan_review:%s: job failed: %s", item.issue, reason)
+                logger.error(
+                    "plan_review:%s: agent failed due to %s; retrying review loop",
+                    item.issue,
+                    detail,
+                )
             return
 
         if result.value is not None:

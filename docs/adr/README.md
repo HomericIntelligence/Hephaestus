@@ -83,3 +83,4 @@ confirm all three.
 | [0067](0067-pr-bound-repair-publication.md) | PR-bound repair publication uses receipts, namespaces, and exact leases | Accepted |
 | [0068](0068-plan-decomposition.md) | Plan decomposition into single-PR epics | Proposed |
 | [0069](0069-ephemeral-launch-intake.md) | The repository intake is one ephemeral worktree per launch | Proposed |
+| [0070](0070-operational-failure-diagnostics-and-recovery.md) | Operational failures retain their causes and do not invent review verdicts | Proposed |

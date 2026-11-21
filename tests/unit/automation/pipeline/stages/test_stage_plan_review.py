@@ -1389,6 +1389,27 @@ class TestPlanReviewStageStep:
         assert item.payload.get("review_round", 0) == 0
         assert item.payload["review_error_retries"] == 1  # bounded retry loop
 
+    def test_eval_error_logs_the_provider_cause_and_retry_action(
+        self, make_ctx: Any, make_work_item: Any, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A reviewer retry names the recorded provider failure."""
+        stage = PlanReviewStage()
+        github = FakeStageGitHub()
+        ctx = make_ctx(github=github)
+        item = _review_item(make_work_item, github, issue=8, state="EVAL")
+        item.payload["review_verdict"] = _verdict("ERROR")
+        item.payload["review_provider_error"] = "provider stream disconnected"
+
+        with caplog.at_level("WARNING", logger=plan_review.__name__):
+            result = stage.step(item, ctx)
+
+        assert isinstance(result, StageOutcome)
+        assert result.disposition == Disposition.RETRY
+        assert any(
+            "reviewer error: provider stream disconnected; retry 1/2" in message
+            for message in caplog.messages
+        )
+
     def test_eval_missing_verdict_retries(self, make_ctx: Any, make_work_item: Any) -> None:
         """EVAL without a stored verdict retries instead of guessing."""
         stage = PlanReviewStage()
@@ -1743,10 +1764,10 @@ class TestPlanReviewStageOnJobDone:
         assert "Review v1" not in history
         assert "Review v2" not in history
 
-    def test_failed_result_without_stderr_is_not_stored_or_noisy(
+    def test_failed_result_without_stderr_reports_a_safe_cause_and_retry(
         self, make_ctx: Any, make_work_item: Any, caplog: pytest.LogCaptureFixture
     ) -> None:
-        """A failed review without stderr logs only a safe generic error."""
+        """A failed review reports its sanitized cause and the recovery action."""
         stage = PlanReviewStage()
         ctx = make_ctx()
         item = make_work_item(issue=3, state="REVIEW_WAIT")
@@ -1757,7 +1778,10 @@ class TestPlanReviewStageOnJobDone:
             stage.on_job_done(item, result, ctx)
 
         assert "review_verdict" not in item.payload
-        assert caplog.messages == ["plan_review:3: job failed: agent job failed"]
+        assert any(
+            "agent failed due to RuntimeError:" in message and "retrying review loop" in message
+            for message in caplog.messages
+        )
         assert secret not in caplog.text
         assert "\x1b[31m" not in caplog.text
 
@@ -1782,7 +1806,9 @@ class TestPlanReviewStageOnJobDone:
             stage.on_job_done(item, result, ctx)
 
         assert any(
-            "job failed: exit code 1; diagnostic: backend response stream disconnected"
+            "agent failed due to exit code 1 (rc=1)" in message
+            and "diagnostic: backend response stream disconnected" in message
+            and "retrying review loop" in message
             for message in caplog.messages
         )
         assert secret not in caplog.text
@@ -1802,10 +1828,10 @@ class TestPlanReviewStageOnJobDone:
         with caplog.at_level("WARNING", logger=plan_review.__name__):
             stage.on_job_done(item, result, ctx)
 
-        assert any(
-            "job failed: exit code 1; diagnostic: agent subprocess reported diagnostic output"
-            for message in caplog.messages
-        )
+        assert caplog.messages == [
+            "plan_review:3: agent failed due to exit code 1 (rc=1); "
+            "diagnostic: agent subprocess reported diagnostic output; retrying review loop"
+        ]
         assert secret not in caplog.text
         assert "\x1b[31m" not in caplog.text
 
@@ -1837,7 +1863,8 @@ class TestPlanReviewStageOnJobDone:
             )
 
         assert caplog.messages == [
-            f"plan_review:3: job failed: exit code 1; diagnostic: {expected_diagnostic}"
+            f"plan_review:3: agent failed due to exit code 1 (rc=1); "
+            f"diagnostic: {expected_diagnostic}; retrying review loop"
         ]
 
     @pytest.mark.parametrize(
@@ -1864,7 +1891,9 @@ class TestPlanReviewStageOnJobDone:
         with caplog.at_level("WARNING", logger=plan_review.__name__):
             stage.on_job_done(item, JobResult(ok=False, error=error), ctx)
 
-        assert caplog.messages == [f"plan_review:3: job failed: {expected_reason}"]
+        assert caplog.messages == [
+            f"plan_review:3: agent failed due to {expected_reason} ({error}); retrying review loop"
+        ]
 
 
 class TestPlanScopeAdmission:

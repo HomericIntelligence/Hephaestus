@@ -351,6 +351,15 @@ def _filter_open_issues(
         try:
             with github.operation_deadline(deadline_s, shutdown=shutdown):
                 snapshot = github.gh_issue_json(num)
+        except CancelledError:
+            LOG.warning(
+                "[%s] GitHub read was cancelled during coordinator shutdown; "
+                "retaining issue #%s for the next run",
+                slug,
+                num,
+            )
+            kept.append(num)
+            continue
         except Exception as error:
             LOG.warning("[%s] issue #%s state is unknown: %s", slug, num, error)
             kept.append(num)

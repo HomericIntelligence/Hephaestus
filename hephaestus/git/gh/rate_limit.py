@@ -37,6 +37,20 @@ from hephaestus.utils.helpers import run_subprocess
 
 logger = logging.getLogger(__name__)
 
+
+class OperationDeadlineExpired(subprocess.TimeoutExpired):
+    """Report an exhausted GitHub request deadline without a fabricated duration."""
+
+    def __init__(self, operation: str, *, next_step: str = "GitHub request") -> None:
+        """Keep TimeoutExpired classification and name the step that could not start."""
+        self.next_step = next_step
+        super().__init__(operation, 0)
+
+    def __str__(self) -> str:
+        """Describe the deadline state instead of a zero-second child process."""
+        return f"{self.cmd}: absolute monotonic deadline expired before the next {self.next_step}"
+
+
 # Regex matching GitHub CLI rate-limit messages, e.g.:
 #   "Limit reached ... resets 2:30pm (America/Los_Angeles)"
 RATE_LIMIT_RE = re.compile(
@@ -431,7 +445,7 @@ def _throttle_remaining(deadline_s: float | None, shutdown: threading.Event | No
         return None
     budget = deadline_s - time.monotonic()
     if budget <= 0:
-        raise subprocess.TimeoutExpired("GitHub throttle deadline", 0)
+        raise OperationDeadlineExpired("GitHub throttle deadline", next_step="GitHub request")
     return budget
 
 

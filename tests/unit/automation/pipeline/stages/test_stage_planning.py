@@ -2541,6 +2541,23 @@ class TestPlanningStageStep:
         assert item.attempts.get("plan", 0) == 0
         assert github.mutation_log == []
 
+    def test_verify_distinguishes_missing_candidate_output_from_plan_disappearance(
+        self, make_ctx: Any, make_work_item: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An absent candidate plan reports the producer failure before retrying."""
+        stage = PlanningStage()
+        github = FakeStageGitHub(labels=[STATE_NEEDS_PLAN])
+        monkeypatch.setattr(github, "discover_plan", lambda _issue: PlanDiscoveryResult.absent())
+        item = make_work_item(issue=150, state="VERIFY")
+
+        outcome = stage.step(item, make_ctx(github=github))
+
+        assert isinstance(outcome, StageOutcome)
+        assert outcome.disposition is Disposition.RETRY
+        assert outcome.note == (
+            "planner produced no candidate plan text; no canonical plan was found; retry 1/2"
+        )
+
     def test_verify_blocks_marker_identity_conflict_before_publication(
         self, make_ctx: Any, make_work_item: Any, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -2606,28 +2623,32 @@ class TestPlanningStageStep:
         assert item.attempts["plan"] == 2
         assert github.labels[11] == {STATE_PLAN_NO_GO}
 
-    def test_verify_read_error_is_bounded_to_plan_no_go(
-        self, make_ctx: Any, make_work_item: Any
+    def test_verify_read_error_is_bounded_to_a_hold_without_a_plan_verdict(
+        self, make_ctx: Any, make_work_item: Any, caplog: pytest.LogCaptureFixture
     ) -> None:
-        """An uncertain plan lookup cannot requeue VERIFY forever."""
+        """A transport failure holds planning without inventing a NOGO verdict."""
         github = FakeStageGitHub(
             labels=[STATE_NEEDS_PLAN],
-            plan_read_error="malformed comment body",
+            plan_read_error="GitHub throttle deadline expired",
         )
         item = make_work_item(issue=12, state="VERIFY")
         item.payload["plan_text"] = "# Implementation Plan\n\nCandidate"
         ctx = make_ctx(github=github, budget_fn=lambda _name: 2)
 
-        first = PlanningStage().step(item, ctx)
-        item.state = "VERIFY"
-        second = PlanningStage().step(item, ctx)
+        with caplog.at_level("WARNING"):
+            first = PlanningStage().step(item, ctx)
+            item.state = "VERIFY"
+            second = PlanningStage().step(item, ctx)
 
         assert isinstance(first, StageOutcome)
         assert first.disposition == Disposition.RETRY
         assert isinstance(second, StageOutcome)
-        assert second.disposition == Disposition.FINISH_FAIL
+        assert second.disposition == Disposition.BLOCKED
         assert item.attempts["plan"] == 2
-        assert github.labels[12] == {STATE_PLAN_NO_GO}
+        assert github.labels[12] == {STATE_NEEDS_PLAN}
+        assert github.mutation_log == []
+        assert "plan discovery read failed: GitHub throttle deadline expired" in caplog.text
+        assert "holding without changing the plan-review verdict" in caplog.text
 
     @pytest.mark.parametrize(
         ("github", "expected_disposition"),
@@ -2694,7 +2715,7 @@ class TestPlanningStageStep:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """A malformed plan comment stays all-or-nothing."""
+        """A malformed plan comment read retries verification without a new plan."""
         adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
         monkeypatch.setattr(
             adapter,
@@ -2727,7 +2748,8 @@ class TestPlanningStageStep:
 
         assert isinstance(outcome, StageOutcome)
         assert outcome.disposition == Disposition.RETRY
-        assert item.state == "ENTER"
+        assert item.state == "VERIFY"
+        assert item.payload["retry_delay_s"] == 1.0
         assert item.attempts["plan"] == 1
 
     def test_verify_posts_plan_comment_then_advances(

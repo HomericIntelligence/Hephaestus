@@ -37,6 +37,7 @@ from typing import Any
 from hephaestus.cli.localization import text
 from hephaestus.git.gh.environment import gh_child_environment
 from hephaestus.git.gh.rate_limit import (
+    OperationDeadlineExpired,
     detect_claude_usage_cap,
     detect_claude_usage_limit,
     detect_rate_limit,
@@ -577,7 +578,7 @@ def _prepare_gh_operation(
     if deadline_s is not None:
         remaining_s = deadline_s - time.monotonic()
         if remaining_s <= 0:
-            raise subprocess.TimeoutExpired("GitHub operation deadline", 0)
+            raise OperationDeadlineExpired("GitHub operation deadline", next_step="GitHub request")
         timeout = min(float(timeout if timeout is not None else gh_cli_timeout()), remaining_s)
     return timeout, False
 

@@ -1638,12 +1638,17 @@ class ImplementationStage(Stage):
         if lock_failure in _TERMINAL_GIT_LOCK_FAILURES:
             item.payload.pop("git_error_retries", None)
             return StageOutcome(Disposition.FINISH_FAIL, lock_failure)
-        if item.payload.pop("git_error", None):
+        git_error = item.payload.pop("git_error", None)
+        git_error_detail = item.payload.pop("git_error_detail", None)
+        if git_error:
             # Worktree creation failed: transient infrastructure, not an
             # implement outcome. If the retry budget remains, retry the
             # worktree job itself; do not let adopted-PR state fall through
             # to ADOPTED without a valid synced worktree.
-            outcome = self._git_retry(item, "worktree creation failed")
+            note = "worktree creation failed"
+            if isinstance(git_error_detail, str) and git_error_detail:
+                note = f"{note}: {git_error_detail}"
+            outcome = self._git_retry(item, note)
             if outcome.disposition is Disposition.RETRY:
                 item.state = WORKTREE_WAIT
             return outcome
@@ -3902,9 +3907,13 @@ class ImplementationStage(Stage):
             ):
                 item.payload.pop(key, None)
             item.payload["git_error"] = True
+            item.payload["git_error_detail"] = redact_diagnostic_text(
+                result.error or "unspecified worktree job failure"
+            )[:500]
             return
         # A successful worktree job ends the consecutive-git-failure streak.
         item.payload.pop(WORKTREE_MATERIALIZED_KEY, None)
+        item.payload.pop("git_error_detail", None)
         item.payload.pop("git_error_retries", None)
         for key in (
             "worktree_dirty",
@@ -4364,7 +4373,8 @@ class ImplementationStage(Stage):
         """Warn about a run that produced no commit and retry within the budget."""
         issue = _issue_number(item)
         logger.warning(
-            "implementation:%d: run ended without a commit; retrying within the implement budget",
+            "implementation:%d: run ended without a commit: the worktree was clean "
+            "and its HEAD had not advanced; retrying within the implement budget",
             issue,
         )
         item.payload.pop("no_commits", None)
