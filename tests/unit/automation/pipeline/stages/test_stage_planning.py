@@ -530,6 +530,31 @@ class TestPlanningStageEnter:
         assert "plan_text" not in item.payload
         assert "issue_history" not in item.payload
 
+    def test_new_plan_fetches_latest_main_once_before_source_work(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Every new planning epoch captures the latest origin revision once."""
+        stage = PlanningStage()
+        github = FakeStageGitHub(labels=[STATE_NEEDS_PLAN], has_plan=False)
+        ctx = make_ctx(github=github, config=SimpleNamespace(enable_advise=False))
+        item = make_work_item(issue=40, state="ENTER")
+
+        assert stage.on_enter(item, ctx) is None
+        transition = stage.step(item, ctx)
+        assert transition == Continue(next_state="FETCH_MAIN_WAIT")
+        item.state = transition.next_state
+        request = stage.step(item, ctx)
+        assert isinstance(request, JobRequest)
+        assert isinstance(request.job, GitJob)
+        assert request.job.op == "fetch_main"
+
+        revision = "b" * 40
+        stage.on_job_done(item, JobResult(ok=True, value={"head_sha": revision}), ctx)
+        item.state = request.on_done_state
+
+        assert item.payload["_synced_default_branch_sha"] == revision
+        assert stage.step(item, ctx) == Continue(next_state="PLAN_WAIT")
+
     @pytest.mark.parametrize("item_update", [False, True])
     def test_force_fetches_main_once_before_planning(
         self, make_ctx: Any, make_work_item: Any, item_update: bool
@@ -3127,8 +3152,8 @@ class TestPlanningFlowWithFakePool:
     def test_full_walk_enter_to_advance(self, make_ctx: Any, make_work_item: Any) -> None:
         """Full pool-driven walk of the whole stage.
 
-        ENTER -> ADVISE_WAIT -> PLAN_WAIT -> VERIFY -> ADVANCE, with the
-        durable writes in journal order.
+        ENTER -> FETCH_MAIN_WAIT -> ADVISE_WAIT -> PLAN_WAIT -> VERIFY ->
+        ADVANCE, with the durable writes in journal order.
         """
         from tests.unit.automation.pipeline.conftest import FakeWorkerPool
 
@@ -3139,6 +3164,7 @@ class TestPlanningFlowWithFakePool:
 
         pool = FakeWorkerPool()
         pool.script(
+            JobResult(ok=True, value={"head_sha": "a" * 40}),  # latest origin main
             JobResult(ok=True, value="advise findings"),  # advise
             JobResult(ok=True, value="# Implementation Plan\n\nSteps."),  # plan
         )
@@ -3163,9 +3189,13 @@ class TestPlanningFlowWithFakePool:
 
         assert isinstance(outcome, StageOutcome)
         assert outcome.disposition == Disposition.ADVANCE
-        # Both agent jobs ran, in order, with the payload threaded through.
-        assert [h.job.descr for h in pool.submitted] == ["advise", "plan"]
-        plan_job = pool.submitted[1].job
+        # Origin synchronization precedes both agent jobs, in order.
+        assert [h.job.descr for h in pool.submitted] == [
+            "fetch main for plan update",
+            "advise",
+            "plan",
+        ]
+        plan_job = pool.submitted[2].job
         assert isinstance(plan_job, AgentJob)  # narrows the job union for mypy
         assert plan_job.prompt_kwargs["advise_findings"] == "advise findings"
         # Durable writes, pinned in journal order: entry label first, then

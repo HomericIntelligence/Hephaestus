@@ -2,8 +2,9 @@
 
 The contract is: an open pull request carrying the exclusive implementation-GO
 label is admitted, GitHub native auto-merge is enabled once, and the stage waits
-for GitHub to report the merge. The stage does not read the head, does not gate
-on required status evidence, and does not rebase first.
+for GitHub to report the merge. The stage does not compare the head or gate on
+required status evidence. A conflict or an origin advance returns to
+implementation for finalization base synchronization.
 """
 
 from __future__ import annotations
