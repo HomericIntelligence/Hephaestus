@@ -111,14 +111,12 @@ def test_discovery_requires_matching_start_without_publication_intent(
             pool.shutdown()
 
 
-def test_pre_intent_recovery_clears_a_stale_resume_state_and_proceeds() -> None:
-    """A non-rebase resume state recovers instead of blocking forever (#3649).
+def test_pre_intent_recovery_retains_a_non_rebase_resume_state() -> None:
+    """Stable and legacy lanes keep their exact interrupted resume route.
 
-    A pre-PR item interrupted mid-implementation saves a resume state such
-    as IMPLEMENT_WAIT. The nonce rule makes that lane unresumable by any
-    future run, so retaining the stale state would block the item on every
-    relaunch. The route clears the stale key, binds the cleared context,
-    and proceeds through discovery to a fresh decision.
+    Physical receipt identity, not a per-run nonce, owns recovery. A non-rebase
+    state therefore stays bound to the discovery result instead of being
+    cleared as obsolete nonce state.
     """
     from hephaestus.automation.pipeline.stages.implementation.implementation import (
         _PUBLICATION_REBASE_RESUME,
@@ -134,10 +132,10 @@ def test_pre_intent_recovery_clears_a_stale_resume_state_and_proceeds() -> None:
     retained = stage._retain_pre_intent_route(item, value, None)
 
     assert retained is True
-    assert "first_publication_resume_state" not in item.payload
+    assert item.payload["first_publication_resume_state"] == "IMPLEMENT_WAIT"
     assert "first_publication_discovery_failed" not in item.payload
     assert item.payload[_PUBLICATION_REBASE_RESUME] == {
-        "publication_resume_state": None,
+        "publication_resume_state": "IMPLEMENT_WAIT",
         "publication_manual_rebase": False,
     }
 

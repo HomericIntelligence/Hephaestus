@@ -247,11 +247,13 @@ class SourceWorkspaceCreationError(SourceWorkspaceError):
         requested_base_sha: str | None = None,
         recovery: SourceWorkspaceRecovery | None = None,
         creation_failure: SourceWorkspaceCreationFailure = SourceWorkspaceCreationFailure.UNKNOWN,
+        requested_reservation_created: bool = False,
     ) -> None:
         """Keep request details for a later lane-locked recovery attempt."""
         super().__init__(message, recovery=recovery)
         self.requested_branch = requested_branch
         self.requested_base_sha = requested_base_sha
+        self.requested_reservation_created = requested_reservation_created
         self.creation_failure = normalize_source_workspace_creation_failure(creation_failure)
         self.path: Path | None = None
         self.preserve = True
@@ -2033,12 +2035,16 @@ class SourceWorkspaceManager:
                 if (
                     claim is None
                     or claim.state != "armed"
-                    or dirty_plan_identity
-                    != DirtyPlanIdentity(
+                    or dirty_plan_identity is None
+                    or (
                         claim.plan_revision,
                         claim.plan_fingerprint,
                         claim.review_fingerprint,
-                        claim.allowed_paths,
+                    )
+                    != (
+                        dirty_plan_identity.revision,
+                        dirty_plan_identity.plan_fingerprint,
+                        dirty_plan_identity.review_fingerprint,
                     )
                 ):
                     raise SourceWorkspaceError("dirty direct plan identity changed")

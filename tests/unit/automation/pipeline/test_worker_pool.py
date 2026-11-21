@@ -1231,8 +1231,10 @@ def test_codex_boundary_failure_blocks_commit_and_push(pool: WorkerPool, tmp_pat
     push.assert_not_called()
 
 
-def test_issue_2472_rejects_precommitted_unplanned_paths(pool: WorkerPool, tmp_path: Path) -> None:
-    """The publication sink rejects an unplanned path in committed history."""
+def test_issue_2472_unplanned_paths_warn_without_blocking_codex_publication(
+    pool: WorkerPool, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Plan paths are diagnostic metadata, not a Codex publication allowlist."""
     _manager, binding = _prepared_publication_writer(
         tmp_path, issue_number=2472, branch="2472-auto-impl"
     )
@@ -1254,40 +1256,75 @@ def test_issue_2472_rejects_precommitted_unplanned_paths(pool: WorkerPool, tmp_p
             "scope_history_base_sha": base_sha,
         },
     )
-    git_outputs = (
-        "",
-        "",
-        "",
-        "scripts/run_ci_local.sh\0",
-    )
 
+    def scope_probe(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        output = "scripts/run_ci_local.sh\0" if f"{base_sha}..HEAD" in argv else ""
+        return subprocess.CompletedProcess(argv, 0, stdout=output)
+
+    with (
+        patch(f"{_WP}.git_utils.run", side_effect=scope_probe),
+        patch.object(
+            pool, "_commit_if_changes_with_controlled_signing", return_value=False
+        ) as commit,
+        patch.object(pool, "_commit_push_requires_publish", return_value=False),
+        patch.object(pool, "_read_publish_head", return_value=base_sha),
+        caplog.at_level(logging.WARNING),
+    ):
+        result = pool._git_commit_push_inner(job, ExitStack())
+
+    assert result == JobResult(ok=True, value={"pushed": False, "head_sha": base_sha})
+    warning = "implementation changed paths outside the plan scope: scripts/run_ci_local.sh"
+    assert warning in caplog.text
+    assert commit.call_args.args[2] is None
+
+
+@pytest.mark.parametrize("agent", ["codex", "claude"])
+@pytest.mark.parametrize("allowed_paths", [None, ()], ids=["missing", "empty"])
+def test_empty_plan_scope_never_blocks_a_provider(
+    pool: WorkerPool, tmp_path: Path, agent: str, allowed_paths: tuple[str, ...] | None
+) -> None:
+    """Every provider can publish with absent or empty plan path metadata."""
+    job = GitJob(
+        repo="test/repo",
+        op="commit_push",
+        timeout_s=60,
+        kwargs={"agent": agent, "scope_history_base_sha": "not-a-sha"},
+    )
+    with patch(f"{_WP}.git_utils.run") as git_run:
+        result = pool._verify_implementation_edit_scope(job, tmp_path, allowed_paths=allowed_paths)
+    assert result is None
+    git_run.assert_not_called()
+
+
+@pytest.mark.parametrize("failure", ["missing-base", "probe-failure"])
+def test_scope_only_probe_failures_warn_and_continue(
+    pool: WorkerPool,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    failure: str,
+) -> None:
+    """Unavailable plan diagnostics do not become a publication safety gate."""
+    job = GitJob(
+        repo="test/repo",
+        op="commit_push",
+        timeout_s=60,
+        kwargs={
+            "agent": "codex",
+            "scope_history_base_sha": None if failure == "missing-base" else "a" * 40,
+        },
+    )
     with (
         patch(
             f"{_WP}.git_utils.run",
-            side_effect=(
-                subprocess.CompletedProcess([], 0, stdout=output) for output in git_outputs
-            ),
-        ) as git_run,
-        patch.object(pool, "_commit_if_changes_with_controlled_signing") as commit,
-        patch(f"{_WP}.git_utils.push_branch") as push,
+            side_effect=subprocess.CalledProcessError(128, ["git", "diff"]),
+        ),
+        caplog.at_level(logging.WARNING),
     ):
-        result = pool._git_commit_push(job)
-
-    assert result.ok is False
-    assert result.error == "implementation changed paths outside approved scope"
-    # The refusal carries bounded evidence so the stage can route one
-    # correction. The key is disjoint from every writer receipt key.
-    assert result.value == {"scope_violation_unexpected_paths": ["scripts/run_ci_local.sh"]}
-    assert git_run.call_args_list[-1].args[0] == [
-        "git",
-        "diff",
-        "--no-renames",
-        "--name-only",
-        "-z",
-        f"{base_sha}..HEAD",
-    ]
-    commit.assert_not_called()
-    push.assert_not_called()
+        result = pool._verify_implementation_edit_scope(
+            job, tmp_path, allowed_paths=("planned.py",)
+        )
+    assert result is None
+    assert "cannot inspect implementation plan scope; continuing without it" in caplog.text
 
 
 def _remediation_scope_job(
@@ -9340,6 +9377,7 @@ class TestGitOps:
             "direct_scope_reservation": {
                 "branch": "7-auto",
                 "base_sha": pinned_sha,
+                "created_by_this_attempt": True,
             },
         }
 
@@ -9418,7 +9456,11 @@ class TestGitOps:
             "impl_source_revision": pinned_sha,
             "source_workspace": source_manager._binding(receipt).to_dict(),
             "source_receipt": receipt.to_dict(),
-            "direct_scope_reservation": {"branch": "7-auto", "base_sha": pinned_sha},
+            "direct_scope_reservation": {
+                "branch": "7-auto",
+                "base_sha": pinned_sha,
+                "created_by_this_attempt": True,
+            },
         }
 
     def test_direct_pinned_impl_writer_promotes_owned_detached_predecessor(
@@ -9466,7 +9508,11 @@ class TestGitOps:
             "impl_source_revision": base_revision,
             "source_workspace": source_manager._binding(promoted).to_dict(),
             "source_receipt": promoted.to_dict(),
-            "direct_scope_reservation": {"branch": branch, "base_sha": base_revision},
+            "direct_scope_reservation": {
+                "branch": branch,
+                "base_sha": base_revision,
+                "created_by_this_attempt": True,
+            },
         }
         assert promoted.generation == predecessor.generation + 1
         assert promoted.revision == base_revision
@@ -9704,11 +9750,62 @@ class TestGitOps:
         assert second_result.value["direct_scope_reservation"] == {
             "branch": branch,
             "base_sha": work_head,
+            "created_by_this_attempt": False,
         }
         assert _git(writer_path, "symbolic-ref", "--short", "HEAD") == branch
         assert _git(writer_path, "rev-parse", "HEAD") == work_head
         assert (writer_path / "lane-work.txt").read_text(encoding="utf-8") == "keep me\n"
         assert _git(writer_path, "status", "--porcelain") == ""
+
+    def test_stable_resume_rollback_preserves_the_preexisting_remote_branch(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """A stale-local failure cannot delete a remote branch this run did not create."""
+        repo, resumed_head, moved_base = _worker_repository(tmp_path)
+        branch = "7-auto-impl"
+        _git(repo, "branch", branch, resumed_head)
+        _git(repo, "push", "origin", f"{branch}:{branch}")
+        assert _git(repo, "rev-parse", "HEAD") == moved_base
+        kwargs: dict[str, object] = {
+            "issue_number": 7,
+            "branch_name": branch,
+            "repo_root": str(repo),
+            "base_sha": moved_base,
+        }
+        with patch.object(
+            pool,
+            "_authenticated_remote_git_configuration",
+            return_value=(build_git_child_env(), ("-c", "protocol.file.allow=always")),
+        ):
+            setup = pool._prepare_direct_scope_worktree(
+                kwargs=kwargs,
+                sync_to_remote=False,
+                repo_root=repo,
+                expected_repo="HomericIntelligence/Hephaestus",
+                timeout_s=60,
+                source_manager=SourceWorkspaceManager(repo, repository="Hephaestus"),
+            )
+            assert not isinstance(setup, JobResult)
+            base_sha, branch_name = setup
+            assert base_sha == resumed_head
+            manager = MagicMock()
+            manager.create_worktree.side_effect = DirectScopeStaleStateError(
+                "local_ref", branch, "stale local branch"
+            )
+            result = pool._create_managed_worktree(
+                manager=manager,
+                kwargs=kwargs,
+                base_dir=repo / "build/.worktrees",
+                base_sha=base_sha,
+                branch_name=branch_name,
+                repo_root=repo,
+                expected_repo="HomericIntelligence/Hephaestus",
+                timeout_s=60,
+            )
+
+        assert isinstance(result, JobResult)
+        assert result.ok is False
+        assert _git(repo, "ls-remote", "origin", f"refs/heads/{branch}").startswith(resumed_head)
 
     def test_direct_pinned_impl_writer_preserves_a_wrong_prior_direct_branch(
         self,
@@ -9844,6 +9941,7 @@ class TestGitOps:
         assert result.value["direct_scope_reservation"] == {
             "branch": branch,
             "base_sha": base_revision,
+            "created_by_this_attempt": True,
         }
         assert "source_workspace_terminal" not in result.value
         preserved = source_manager._read_receipt(7, SourceLane.IMPLEMENTATION)
@@ -10091,7 +10189,11 @@ class TestGitOps:
 
         assert result.ok is False
         assert result.value == {
-            "direct_scope_reservation": {"branch": "7-auto", "base_sha": pinned_sha}
+            "direct_scope_reservation": {
+                "branch": "7-auto",
+                "base_sha": pinned_sha,
+                "created_by_this_attempt": True,
+            }
         }
 
     def test_direct_worktree_rollback_timeout_preserves_reservation_receipt(
@@ -10133,7 +10235,11 @@ class TestGitOps:
 
         assert result.ok is False
         assert result.value == {
-            "direct_scope_reservation": {"branch": "7-auto", "base_sha": pinned_sha}
+            "direct_scope_reservation": {
+                "branch": "7-auto",
+                "base_sha": pinned_sha,
+                "created_by_this_attempt": True,
+            }
         }
 
     def test_direct_pinned_worktree_fails_before_agent_admission_when_reservation_loses_race(
@@ -10576,7 +10682,11 @@ class TestGitOps:
         assert isinstance(result.value, dict)
         assert "source_workspace_preserve" not in result.value
         assert "source_workspace_terminal" not in result.value
-        assert result.value["direct_scope_reservation"] == {"branch": "7-auto", "base_sha": pin}
+        assert result.value["direct_scope_reservation"] == {
+            "branch": "7-auto",
+            "base_sha": pin,
+            "created_by_this_attempt": False,
+        }
 
     def test_direct_writer_change_after_authorization_returns_typed_recovery(
         self,
@@ -10676,6 +10786,7 @@ class TestGitOps:
         assert result.value["direct_scope_reservation"] == {
             "branch": "writer-branch",
             "base_sha": second,
+            "created_by_this_attempt": False,
         }
         assert predecessor.cwd.exists()
 
@@ -14779,6 +14890,7 @@ class TestGitOps:
         assert result.value["direct_scope_reservation"] == {
             "branch": branch,
             "base_sha": target,
+            "created_by_this_attempt": False,
         }
         assert state_path.exists()
 
@@ -15698,6 +15810,7 @@ class TestGitOps:
             kwargs={
                 "branch": "7-auto",
                 "base_sha": pin,
+                "created_by_this_attempt": True,
                 "repo_root": str(tmp_path),
             },
         )
@@ -15732,7 +15845,12 @@ class TestGitOps:
             repo="test/repo",
             op="release_branch_reservation",
             timeout_s=60,
-            kwargs={"branch": "7-auto", "base_sha": pin, "repo_root": str(tmp_path)},
+            kwargs={
+                "branch": "7-auto",
+                "base_sha": pin,
+                "created_by_this_attempt": True,
+                "repo_root": str(tmp_path),
+            },
         )
         with patch(
             "hephaestus.automation.pipeline.git_cleanup.delete_reserved_branch_if_unchanged",
@@ -15877,8 +15995,8 @@ class TestGitOps:
             (("unplanned.py",), "", "", True),
             (("unplanned.py",), "", "unplanned.py\0", False),
             (("unplanned.py",), "unplanned.py\0", "", False),
-            (("other.py",), "", "", False),
-            (None, "", "", False),
+            (("other.py",), "", "", True),
+            (None, "", "", True),
         ],
     )
     def test_scope_accepts_only_verified_retraction(
@@ -15916,10 +16034,10 @@ class TestGitOps:
             )
         assert (result is None) is accepted
 
-    def test_recovery_scope_rejection_precedes_candidate_staging(
-        self, pool: WorkerPool, tmp_path: Path
+    def test_recovery_plan_metadata_does_not_block_commit_path_selection(
+        self, pool: WorkerPool, tmp_path: Path, caplog: pytest.LogCaptureFixture
     ) -> None:
-        """Reject an unrelated path before private candidate staging or signing."""
+        """Plan paths stay diagnostic while independent Git checks still run."""
         old_head = "a" * 40
         tree = "c" * 40
         job = GitJob(
@@ -15959,13 +16077,16 @@ class TestGitOps:
             ) as candidate,
             patch.object(pool, "_commit_if_changes_with_controlled_signing") as commit,
             patch(f"{_WP}.git_utils.run", return_value=MagicMock(stdout="unrelated.py\0")),
+            caplog.at_level(logging.WARNING),
         ):
             result = pool._git_commit_push(job)
 
         assert result.ok is False
-        assert result.error == "implementation changed paths outside approved scope"
+        assert result.error == "writer tracking baseline unavailable"
+        assert "implementation changed paths outside the plan scope: unrelated.py" in caplog.text
         candidate.assert_not_called()
-        commit.assert_not_called()
+        commit.assert_called_once()
+        assert commit.call_args.args[2] is None
 
     def test_ordinary_publication_pushes_the_bound_commit(
         self, pool: WorkerPool, tmp_path: Path
@@ -16429,6 +16550,11 @@ class TestGitOps:
                 "branch": "5-auto",
                 "agent": "claude",
                 "expected_remote_sha": pin,
+                "direct_scope_reservation": {
+                    "branch": "5-auto",
+                    "base_sha": pin,
+                    "created_by_this_attempt": True,
+                },
             },
         )
         with (
@@ -16458,6 +16584,55 @@ class TestGitOps:
             revalidate_remote=ANY,
         )
         assert _git(tmp_path, "rev-parse", "HEAD") == pin
+        normal_push.assert_not_called()
+
+    def test_no_commit_preserves_a_recovered_remote_branch(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """A no-change run never deletes a branch recovered from an earlier owner."""
+        manager, binding = _prepared_publication_writer(tmp_path, issue_number=5, branch="5-auto")
+        tmp_path = binding.cwd
+        pin = binding.revision
+        job = GitJob(
+            repo="test/repo",
+            op="commit_push",
+            workspace=binding,
+            timeout_s=60,
+            kwargs={
+                "source_lane": "impl",
+                "repo_root": str(binding.reusable_root),
+                "issue_number": 5,
+                "worktree_path": tmp_path,
+                "branch": "5-auto",
+                "agent": "claude",
+                "expected_remote_sha": pin,
+                "direct_scope_reservation": {
+                    "branch": "5-auto",
+                    "base_sha": pin,
+                    "created_by_this_attempt": False,
+                },
+            },
+        )
+        with (
+            patch("hephaestus.automation.git_utils.commit_if_changes", return_value=False),
+            patch("hephaestus.automation.git_utils.delete_reserved_branch_if_unchanged") as release,
+            patch("hephaestus.automation.git_utils.push_branch") as normal_push,
+            patch.object(pool, "_authenticated_remote_git_configuration", return_value=({}, ())),
+        ):
+            pool.submit(job, StageName.IMPLEMENTATION)
+            _, result = completion_q.get(timeout=10)
+
+        assert result.ok is True
+        assert result.value == {
+            "pushed": False,
+            "head_sha": pin,
+            "source_workspace": binding.to_dict(),
+            "source_receipt": manager._require_receipt(5, SourceLane.IMPLEMENTATION).to_dict(),
+        }
+        release.assert_not_called()
         normal_push.assert_not_called()
 
     @pytest.mark.parametrize(
@@ -16502,6 +16677,11 @@ class TestGitOps:
                 "branch": branch,
                 "agent": "claude",
                 "expected_remote_sha": pin,
+                "direct_scope_reservation": {
+                    "branch": branch,
+                    "base_sha": pin,
+                    "created_by_this_attempt": True,
+                },
             },
         )
 
@@ -21065,7 +21245,11 @@ def test_writer_creation_category_crosses_worker_boundary(
     )
     assert isinstance(result.value, dict)
     assert "source_workspace_preserve" not in result.value
-    reservation = None if base is None else {"branch": "7-auto", "base_sha": base}
+    reservation = (
+        None
+        if base is None
+        else {"branch": "7-auto", "base_sha": base, "created_by_this_attempt": False}
+    )
     assert ("direct_scope_reservation" in result.value) is (base is not None)
     assert result.value.get("direct_scope_reservation") == reservation
     for sentinel in ("credential-probe", "ENV_PROBE", "/private/probe"):
@@ -21162,6 +21346,7 @@ def test_post_success_writer_validation_failure_is_terminal(
     assert result.value["direct_scope_reservation"] == {
         "branch": "7-auto",
         "base_sha": "a" * 40,
+        "created_by_this_attempt": False,
     }
     for sentinel in ("credential-probe", "ENV_PROBE", "/private/probe"):
         assert sentinel not in json.dumps(result.value) + (result.error or "") + caplog.text
@@ -21305,7 +21490,11 @@ def test_failed_writer_recovery_evidence_has_no_terminal_result(
     )
     item.payload[WAVE_LEASE_PAYLOAD] = lease
     item.payload[DIRECT_SCOPE_BASE_SHA_KEY] = target_sha
-    reservation = {"branch": branch, "base_sha": target_sha}
+    reservation = {
+        "branch": branch,
+        "base_sha": target_sha,
+        "created_by_this_attempt": False,
+    }
     ctx = MagicMock()
     ctx.org = "acme"
     ctx.config.repo_state_roots = {}

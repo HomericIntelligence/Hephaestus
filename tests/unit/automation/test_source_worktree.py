@@ -1167,6 +1167,7 @@ def test_direct_worker_preserves_existing_writer_without_terminalizing(tmp_path:
     assert result.value["direct_scope_reservation"] == {
         "branch": "writer-branch",
         "base_sha": second,
+        "created_by_this_attempt": False,
     }
     assert writer.exists()
     assert not (source_manager.state_dir / "9-impl-terminal.json").exists()
@@ -1440,6 +1441,7 @@ def test_direct_worker_serializes_unproven_recovery_for_unreadable_receipt(
     assert result.value["direct_scope_reservation"] == {
         "branch": "writer-branch",
         "base_sha": second,
+        "created_by_this_attempt": False,
     }
     assert predecessor.cwd.exists()
 

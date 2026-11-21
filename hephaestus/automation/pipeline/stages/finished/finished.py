@@ -320,12 +320,12 @@ class FinishedStage(Stage):
                 branch_name = reservation.get("branch")
                 base_sha = reservation.get("base_sha")
                 owns_branch = isinstance(branch_name, str) and branch_name == item.branch
-                if owns_branch and is_full_commit_sha(base_sha):
+                created_here = reservation.get("created_by_this_attempt") is True
+                recovered = reservation.get("created_by_this_attempt") is False
+                if owns_branch and created_here and is_full_commit_sha(base_sha):
                     # The branch contains no coordinator-published commit.
-                    # Release only if its remote ref is still the exact base
-                    # we reserved, so a later human/concurrent writer is
-                    # never deleted.  This also runs for failed items whose
-                    # writer worktree is deliberately preserved.
+                    # Release only a ref created by this attempt and only if
+                    # its remote ref is still the exact reserved base.
                     attempts = int(
                         item.payload.get("_direct_scope_reservation_release_attempts", 0)
                     )
@@ -341,6 +341,7 @@ class FinishedStage(Stage):
                                 kwargs={
                                     "branch": branch_name,
                                     "base_sha": base_sha,
+                                    "created_by_this_attempt": True,
                                     "repo_root": str(ctx.paths.repo_root),
                                 },
                                 descr=f"release unused direct-scope branch {branch_name}",
@@ -352,7 +353,7 @@ class FinishedStage(Stage):
                         item.issue or item.repo,
                         attempts,
                     )
-                else:
+                elif not (owns_branch and recovered and is_full_commit_sha(base_sha)):
                     logger.warning(
                         "finished:%s: invalid or stale direct-scope reservation receipt; "
                         "not releasing branch",

@@ -76,7 +76,7 @@ def test_completed_publication_death_recovers_actual_stage_callback(
     pool = None
     try:
         with pytest.MonkeyPatch.context() as preparation:
-            job = _publication_job(tmp_path, preparation)
+            job = _publication_job(tmp_path, preparation, branch="9-auto-impl")
         job = replace(job, repo="project", expected_repository="example/project")
         assert job.workspace is not None
         _stop_after_completion(job)

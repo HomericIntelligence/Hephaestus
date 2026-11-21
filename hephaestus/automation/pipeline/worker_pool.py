@@ -195,12 +195,7 @@ from hephaestus.automation.pipeline.repository_validation_profiles import (
     plan_validation_profile,
 )
 from hephaestus.automation.pipeline.routing import StageName
-from hephaestus.automation.pipeline.scope_retraction import (
-    SCOPE_VIOLATION_PATH_LIMIT,
-    SCOPE_VIOLATION_PATH_MAX_CHARS,
-    SCOPE_VIOLATION_PATHS_KEY,
-    is_safe_scope_retraction_path,
-)
+from hephaestus.automation.pipeline.scope_retraction import is_safe_scope_retraction_path
 from hephaestus.automation.pipeline.tool_scopes import (
     DEFAULT_TOOL_SCOPE,
     ToolScope,
@@ -321,6 +316,7 @@ logger = logging.getLogger(__name__)
 
 _TAIL = 4000  # chars of stdout/stderr retained in a JobResult
 _ERR_MAX = 500  # chars of error detail retained in a JobResult
+_RESERVATION_CREATED = "_direct_scope_reservation_created"
 _CONFLICT_HUNK_MAX = 4000
 _CONFLICT_CONTEXT_MAX = 16000
 _CONFLICT_CONTEXT_VERSION = 1
@@ -519,25 +515,6 @@ def _invoke_claude_commit_message(
         allowed_tools="Read,Glob,Grep",
     )
     return (stdout or "").strip()
-
-
-def _bounded_unexpected_paths(paths: Collection[str]) -> list[str]:
-    """Return the rejected paths in bounded, redacted, stable order.
-
-    The stage validates this evidence before it routes one bounded
-    correction. Keep the shape closed: a sorted, truncated list of strings.
-
-    Args:
-        paths: The paths the publication scope guard rejected.
-
-    Returns:
-        The redacted, size-bounded evidence list.
-
-    """
-    return [
-        redact_diagnostic_text(path)[:SCOPE_VIOLATION_PATH_MAX_CHARS]
-        for path in sorted(paths)[:SCOPE_VIOLATION_PATH_LIMIT]
-    ]
 
 
 def _bounded_candidate_commit_paths(
@@ -832,24 +809,18 @@ def _dirty_agent_plan_identity(job: AgentJob) -> DirtyPlanIdentity:
 
 
 def _dirty_plan_input_identity(plan: DirtyDirectPlanInput) -> DirtyPlanIdentity:
-    """Recompute the exact plan identity from independent host inputs."""
-    from hephaestus.automation.pipeline.admission import parse_publication_scope_files
-
+    """Recompute approval identity while retaining plan paths as metadata."""
     if (
         type(plan.revision) is not int
         or plan.revision < 1
-        or (plan.review_revision is not None and plan.review_revision != plan.revision)
         or parse_plan_review_state(plan.review) != "state:plan-go"
     ):
         raise SourceWorkspaceError("dirty direct job plan is not approved")
-    allowed = tuple(sorted(parse_publication_scope_files(plan.plan)))
-    if allowed != plan.allowed_paths:
-        raise SourceWorkspaceError("dirty direct job plan scope changed")
     return DirtyPlanIdentity(
         plan.revision,
         plan_fingerprint(plan.plan),
         hashlib.sha256(plan.review.encode("utf-8")).hexdigest(),
-        allowed,
+        plan.allowed_paths,
     )
 
 
@@ -874,10 +845,19 @@ def _dirty_plan_from_read(receipt: DirtyDirectPrStateRead) -> DirtyDirectPlanInp
         if len(comments) != len(rows):
             raise ValueError("invalid journal row")
         snapshot = journal_snapshot(comments)
+        if not snapshot.current_plan:
+            raise SourceWorkspaceError("dirty direct current plan evidence is unavailable")
         if snapshot.current_review_revision is None:
             logger.warning(
                 "dirty direct plan review for the current lane carries no revision "
                 "marker; binding the review by its text"
+            )
+        elif snapshot.current_review_revision != snapshot.revision:
+            logger.warning(
+                "dirty direct plan review revision %s differs from plan revision %s; "
+                "binding the review by its text",
+                snapshot.current_review_revision,
+                snapshot.revision,
             )
         inputs = DirtyDirectPlanInput(
             snapshot.revision,
@@ -8114,7 +8094,9 @@ class WorkerPool:
             job.kwargs.get("rebase_reason") != "implementation_start"
             or job.kwargs.get("publish_rebased_head")
             or not isinstance(reservation, dict)
-            or set(reservation) != {"branch", "base_sha"}
+            or not {"branch", "base_sha"}.issubset(reservation)
+            or not set(reservation).issubset({"branch", "base_sha", "created_by_this_attempt"})
+            or type(reservation.get("created_by_this_attempt", False)) is not bool
             or reservation.get("branch") != identity["branch"]
             or not _is_full_commit_sha(reservation.get("base_sha"))
         ):
@@ -8215,7 +8197,11 @@ class WorkerPool:
             value={
                 **result.value,
                 "published": published,
-                "direct_scope_reservation": {"branch": branch, "base_sha": target},
+                "direct_scope_reservation": {
+                    "branch": branch,
+                    "base_sha": target,
+                    "created_by_this_attempt": False,
+                },
             },
         )
 
@@ -8445,6 +8431,7 @@ class WorkerPool:
                         "direct_scope_reservation": {
                             "branch": identity["branch"],
                             "base_sha": completed["head_sha"],
+                            "created_by_this_attempt": False,
                         }
                     }
                     if reservation is not None
@@ -10981,17 +10968,23 @@ class WorkerPool:
         if original is None:
             path = manager.path_for(issue, SourceLane.IMPLEMENTATION)
             if path.exists() or path.is_symlink():
-                # An unowned path cannot bind to any future run (the nonce
-                # rule), and the receipt-less claim would fail closed on
-                # every relaunch (#3649). Quarantine it aside so the bytes
-                # stay recoverable and a fresh lane forms.
-                quarantine = path.parent / (f"{path.name}.quarantine-{uuid.uuid4().hex[:12]}")
-                path.rename(quarantine)
-                logger.warning(
-                    "dirty direct lane path for #%s has no receipt; quarantined the orphan to %s",
-                    issue,
-                    quarantine,
-                )
+                if manager._path_is_registered_to_repository(path, deadline=deadline):
+                    logger.warning(
+                        "dirty direct lane path for #%s has no receipt but remains registered; "
+                        "preserving it for ownership recovery",
+                        issue,
+                    )
+                else:
+                    # Only an unregistered orphan can move aside without making
+                    # its live Git registration prunable.
+                    quarantine = path.parent / (f"{path.name}.quarantine-{uuid.uuid4().hex[:12]}")
+                    path.rename(quarantine)
+                    logger.warning(
+                        "dirty direct lane path for #%s has no receipt; "
+                        "quarantined the orphan to %s",
+                        issue,
+                        quarantine,
+                    )
             return JobResult(ok=True, value={"dirty_direct_not_applicable": True})
         manager._reject_foreign_owner(original, issue, SourceLane.IMPLEMENTATION)
         if original.schema_version != 1:
@@ -11181,6 +11174,7 @@ class WorkerPool:
                         "direct_scope_reservation": {
                             "branch": physical_branch_name,
                             "base_sha": physical_head,
+                            "created_by_this_attempt": False,
                         },
                     },
                 )
@@ -11203,7 +11197,16 @@ class WorkerPool:
         evidence = self._read_dirty_direct_state(
             job, repo_root=repo_root, issue=issue, branch=branch
         )
-        if _dirty_plan_input_identity(_dirty_plan_from_read(evidence)) != expected:
+        current = _dirty_plan_input_identity(_dirty_plan_from_read(evidence))
+        if (
+            current.revision,
+            current.plan_fingerprint,
+            current.review_fingerprint,
+        ) != (
+            expected.revision,
+            expected.plan_fingerprint,
+            expected.review_fingerprint,
+        ):
             raise SourceWorkspaceError("dirty direct approved plan changed")
 
     @staticmethod
@@ -11532,6 +11535,9 @@ class WorkerPool:
             requested_branch=branch if isinstance(branch, str) else None,
             requested_base_sha=base_sha if isinstance(base_sha, str) else None,
             creation_failure=category,
+            requested_reservation_created=(
+                isinstance(reservation, dict) and reservation.get("created_by_this_attempt") is True
+            ),
         )
         failure.path = source_manager.path_for(item_number, SourceLane.IMPLEMENTATION)
         return failure
@@ -11644,6 +11650,10 @@ class WorkerPool:
                         creation_failure=normalize_source_workspace_creation_failure(
                             value.get("source_workspace_creation_failure")
                         ),
+                        requested_reservation_created=(
+                            isinstance(reservation, dict)
+                            and reservation.get("created_by_this_attempt") is True
+                        ),
                     )
                 return result
         except SourceWorkspaceCreationError as exc:
@@ -11658,6 +11668,7 @@ class WorkerPool:
                 value["direct_scope_reservation"] = {
                     "branch": exc.requested_branch,
                     "base_sha": exc.requested_base_sha,
+                    "created_by_this_attempt": exc.requested_reservation_created,
                 }
             return JobResult(
                 ok=False,
@@ -11707,6 +11718,7 @@ class WorkerPool:
         if isinstance(direct_setup, JobResult):
             return direct_setup
         base_sha, branch_name = direct_setup
+        reservation_created = kwargs.pop(_RESERVATION_CREATED, False) is True
         base_dir = WorktreeManager.default_base_dir(repo_root)
         implementation_adoption_head = kwargs.get("implementation_adoption_head")
         adopting_implementation_writer = implementation_adoption_head is not None
@@ -11806,6 +11818,7 @@ class WorkerPool:
                     requested_base_sha=base_sha,
                     recovery=exc.recovery if isinstance(exc, SourceWorkspaceError) else None,
                     creation_failure=SourceWorkspaceCreationFailure.WRITER_TRANSITION,
+                    requested_reservation_created=reservation_created,
                 )
                 failure.path = source_manager.path_for(
                     cast(int, kwargs["issue_number"]), SourceLane.IMPLEMENTATION
@@ -11821,6 +11834,7 @@ class WorkerPool:
             expected_repo=job.transport_repository,
             timeout_s=job.timeout_s,
             reuse_dirty_lane=reuse_dirty_lane,
+            reservation_created=reservation_created,
         )
         if isinstance(created_or_failure, JobResult):
             return created_or_failure
@@ -11841,6 +11855,7 @@ class WorkerPool:
                 branch_name=branch_name,
                 base_sha=base_sha,
                 creation_failure=SourceWorkspaceCreationFailure.WRITER_RECEIPT,
+                reservation_created=reservation_created,
             )
         result = self._finalize_created_worktree(
             created=created,
@@ -11859,6 +11874,7 @@ class WorkerPool:
             source_manager=source_manager,
             implementation_writer_handoff=implementation_writer_handoff,
             timeout_s=job.timeout_s,
+            reservation_created=reservation_created,
         )
         if not result.ok and base_sha is not None and implementation_writer_handoff is not None:
             raise SourceWorkspaceCreationError(
@@ -11870,6 +11886,7 @@ class WorkerPool:
                     if isinstance(result.value, dict)
                     else None
                 ),
+                requested_reservation_created=reservation_created,
             )
         if (
             job.kwargs.get("record_initial_creation") is True
@@ -11956,6 +11973,7 @@ class WorkerPool:
         expected_repo: str,
         timeout_s: int,
         reuse_dirty_lane: bool = False,
+        reservation_created: bool = False,
     ) -> Path | JobResult:
         """Create a worktree and preserve typed writer-receipt failures."""
         try:
@@ -11972,6 +11990,7 @@ class WorkerPool:
                     requested_branch=branch_name,
                     requested_base_sha=base_sha,
                     creation_failure=SourceWorkspaceCreationFailure.REMOTE_REFRESH,
+                    requested_reservation_created=reservation_created,
                 ) from exc
             if bool(kwargs.get("refresh_base", False)):
                 return JobResult(
@@ -11990,6 +12009,7 @@ class WorkerPool:
                 creation_failure=SourceWorkspaceCreationFailure.WRITER_RECEIPT
                 if kwargs.get("implementation_writer_handoff") is not None
                 else None,
+                reservation_created=reservation_created,
             )
         except DirectScopeStaleStateError as exc:
             # Deterministic local state: the same inputs fail on every attempt.
@@ -12013,6 +12033,7 @@ class WorkerPool:
                 timeout_s=timeout_s,
                 error=error,
                 extra_value=value,
+                created_by_this_attempt=reservation_created,
             )
         except Exception as exc:
             if base_sha is not None and kwargs.get("implementation_writer_handoff") is not None:
@@ -12021,6 +12042,7 @@ class WorkerPool:
                     requested_branch=branch_name,
                     requested_base_sha=base_sha,
                     creation_failure=SourceWorkspaceCreationFailure.WORKTREE_CREATE,
+                    requested_reservation_created=reservation_created,
                 ) from exc
             if base_sha is not None:
                 return self._rollback_direct_scope_reservation(
@@ -12030,6 +12052,7 @@ class WorkerPool:
                     expected_repo=expected_repo,
                     timeout_s=timeout_s,
                     error=f"worktree creation failed: {exc}",
+                    created_by_this_attempt=reservation_created,
                 )
             raise
 
@@ -12042,6 +12065,7 @@ class WorkerPool:
         branch_name: str,
         base_sha: str | None,
         creation_failure: SourceWorkspaceCreationFailure | None = None,
+        reservation_created: bool = False,
     ) -> JobResult:
         """Preserve a materialized writer when its ownership proof fails."""
         error = f"source_workspace_ownership_unavailable: {exc}"
@@ -12066,6 +12090,7 @@ class WorkerPool:
             value["direct_scope_reservation"] = {
                 "branch": branch_name,
                 "base_sha": base_sha,
+                "created_by_this_attempt": reservation_created,
             }
         return JobResult(
             ok=False,
@@ -12081,9 +12106,10 @@ class WorkerPool:
         *,
         expected_repo: str,
         timeout_s: int,
+        created_by_this_attempt: bool = False,
     ) -> bool:
-        """Conditionally release a direct reservation, or no-op for normal worktrees."""
-        if base_sha is None:
+        """Release only a remote ref created by this exact attempt."""
+        if base_sha is None or not created_by_this_attempt:
             return True
 
         revalidate_remote = self._authenticated_remote_revalidator(
@@ -12110,8 +12136,9 @@ class WorkerPool:
         timeout_s: int,
         error: str,
         extra_value: dict[str, object] | None = None,
+        created_by_this_attempt: bool = False,
     ) -> JobResult:
-        """Release an early reservation or preserve its receipt for Finished."""
+        """Release an owned early reservation or preserve an existing branch."""
         value: dict[str, object] = dict(extra_value or {})
         try:
             released = self._release_direct_scope_reservation(
@@ -12120,13 +12147,18 @@ class WorkerPool:
                 repo_root,
                 expected_repo=expected_repo,
                 timeout_s=timeout_s,
+                created_by_this_attempt=created_by_this_attempt,
             )
         except (RuntimeError, subprocess.TimeoutExpired) as exc:
             return JobResult(
                 ok=False,
                 value={
                     **value,
-                    "direct_scope_reservation": {"branch": branch_name, "base_sha": base_sha},
+                    "direct_scope_reservation": {
+                        "branch": branch_name,
+                        "base_sha": base_sha,
+                        "created_by_this_attempt": created_by_this_attempt,
+                    },
                 },
                 error=f"{error}; reservation rollback failed: {exc}",
             )
@@ -12157,6 +12189,7 @@ class WorkerPool:
         implementation_adoption_head: object = None,
         source_manager: SourceWorkspaceManager | None = None,
         implementation_writer_handoff: ImplementationWriterHandoff | None = None,
+        reservation_created: bool = False,
     ) -> JobResult:
         """Validate a created worktree and attach a direct reservation receipt."""
         if created is None:
@@ -12170,6 +12203,7 @@ class WorkerPool:
                     creation_failure=SourceWorkspaceCreationFailure.WRITER_OWNERSHIP
                     if implementation_writer_handoff is not None
                     else None,
+                    reservation_created=reservation_created,
                 )
             if base_sha is not None:
                 return self._rollback_direct_scope_reservation(
@@ -12179,6 +12213,7 @@ class WorkerPool:
                     expected_repo=repo,
                     timeout_s=timeout_s,
                     error="worktree manager returned no worktree",
+                    created_by_this_attempt=reservation_created,
                 )
             return JobResult(ok=False, error="worktree manager returned no worktree")
         worktree_path = Path(created)
@@ -12207,6 +12242,7 @@ class WorkerPool:
                     requested_branch=branch_name,
                     requested_base_sha=base_sha,
                     creation_failure=SourceWorkspaceCreationFailure.WRITER_OWNERSHIP,
+                    requested_reservation_created=reservation_created,
                 )
             if base_sha is not None:
                 return self._rollback_direct_scope_reservation(
@@ -12216,6 +12252,7 @@ class WorkerPool:
                     expected_repo=repo,
                     timeout_s=timeout_s,
                     error=error,
+                    created_by_this_attempt=reservation_created,
                 )
             return JobResult(
                 ok=False,
@@ -12234,6 +12271,7 @@ class WorkerPool:
                     creation_failure=SourceWorkspaceCreationFailure.WRITER_OWNERSHIP
                     if implementation_writer_handoff is not None
                     else None,
+                    reservation_created=reservation_created,
                 )
             return JobResult(ok=False, error="worktree was not materialized")
 
@@ -12332,6 +12370,7 @@ class WorkerPool:
                         if isinstance(exc, SourceWorkspaceError)
                         else SourceWorkspaceCreationFailure.POST_CREATE_PREPARATION
                     ),
+                    requested_reservation_created=reservation_created,
                 ) from exc
             if isinstance(exc, (SourceWorkspaceError, WorktreeCreationReceiptError)):
                 return self._creation_receipt_failure(
@@ -12347,6 +12386,7 @@ class WorkerPool:
                     )
                     if implementation_writer_handoff is not None
                     else None,
+                    reservation_created=reservation_created,
                 )
             return JobResult(
                 ok=False,
@@ -12394,6 +12434,7 @@ class WorkerPool:
             value["direct_scope_reservation"] = {
                 "branch": branch_name,
                 "base_sha": base_sha,
+                "created_by_this_attempt": reservation_created,
             }
         return JobResult(ok=True, value=value)
 
@@ -12475,6 +12516,7 @@ class WorkerPool:
         remote_env: dict[str, str],
         remote_config: tuple[str, ...],
         timeout_s: int,
+        reservation_ownership: dict[str, Any],
     ) -> str | JobResult | None:
         """Find existing stable-branch work before reserving a new branch."""
         if (
@@ -12530,6 +12572,7 @@ class WorkerPool:
                     env=remote_env,
                     remote_config=remote_config,
                 )
+                reservation_ownership[_RESERVATION_CREATED] = True
             return local_head
         if remote_head is None:
             return None
@@ -12570,6 +12613,7 @@ class WorkerPool:
 
         if not branch_name:
             return JobResult(ok=False, error="direct scope branch name is missing")
+        kwargs[_RESERVATION_CREATED] = False
         remote_env, remote_config = self._authenticated_remote_git_configuration(
             cwd=repo_root,
             expected_repo=expected_repo,
@@ -12582,6 +12626,7 @@ class WorkerPool:
             remote_env=remote_env,
             remote_config=remote_config,
             timeout_s=timeout_s,
+            reservation_ownership=kwargs,
         )
         if isinstance(resumed_head, JobResult):
             return resumed_head
@@ -12634,6 +12679,7 @@ class WorkerPool:
             env=remote_env,
             remote_config=remote_config,
         )
+        kwargs[_RESERVATION_CREATED] = True
         return base_sha, branch_name
 
     def _git_verify_pr_review_checkout(self, job: GitJob) -> JobResult:
@@ -13409,7 +13455,7 @@ class WorkerPool:
         changed = self._commit_if_changes_with_controlled_signing(
             job,
             commit_args,
-            allowed_paths,
+            None,
             agent_model,
             git_message_timeout,
         )
@@ -13491,31 +13537,25 @@ class WorkerPool:
         )
 
     @staticmethod
-    def _verify_implementation_edit_scope(
+    def _verify_implementation_edit_scope(  # noqa: C901
         job: GitJob,
         worktree: Path,
         *,
         allowed_paths: Collection[str] | None,
     ) -> JobResult | None:
-        """Report dirty and committed edits outside the host-approved scope.
-
-        The plan scope guides the work. A path the plan does not name is a
-        warning, because the next review round judges the diff. Codex isolation
-        remains the one boundary that needs a declared scope.
-        """
-        codex_isolated = agent_runtime.requires_codex_implementation_isolation(
-            str(job.kwargs.get("agent", ""))
-        )
+        """Warn about plan-path drift and retain independent retraction checks."""
         requested = tuple(allowed_paths or ())
         declared = tuple(path for path in requested if is_safe_scope_retraction_path(path))
         if len(declared) != len(requested):
             logger.warning("implementation plan scope declares unusable paths; ignoring them")
+        retractions = job.kwargs.get("scope_retraction_paths")
         if not declared:
-            if codex_isolated:
-                return JobResult(ok=False, error="implementation approved scope is unavailable")
             return None
         history_base_sha = job.kwargs.get("scope_history_base_sha")
         if not _is_full_commit_sha(history_base_sha):
+            if retractions is None:
+                logger.warning("cannot inspect implementation plan scope; continuing without it")
+                return None
             return JobResult(ok=False, error="cannot validate implementation edit scope")
         probes = (
             ["git", "diff", "--no-renames", "--name-only", "-z"],
@@ -13545,9 +13585,11 @@ class WorkerPool:
                 if "ls-files" in argv:
                     untracked = paths
         except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            if retractions is None:
+                logger.warning("cannot inspect implementation plan scope; continuing without it")
+                return None
             return JobResult(ok=False, error="cannot validate implementation edit scope")
         permitted = set(declared)
-        retractions = job.kwargs.get("scope_retraction_paths")
         if retractions is not None:
             if (
                 not isinstance(retractions, tuple)
@@ -13560,40 +13602,12 @@ class WorkerPool:
             if restoration is not None:
                 return restoration
             permitted.update(retractions)
-        if not changed.issubset(permitted):
-            return WorkerPool._remediation_scope_outcome(job, changed, permitted)
-        return None
-
-    @staticmethod
-    def _remediation_scope_outcome(
-        job: GitJob, changed: set[str], permitted: set[str]
-    ) -> JobResult | None:
-        """Warn about one edit that the plan scope does not cover.
-
-        The plan is a guide. A review finding, and an agent that keeps the
-        working tree, can both change a file the plan did not name. Warn and
-        continue; the next review round judges the diff. Codex isolation stays
-        the one boundary that needs the declared scope.
-
-        Args:
-            job: The job that owns the edit.
-            changed: The paths that the job changed.
-            permitted: The paths that the job may change.
-
-        Returns:
-            The failure for an isolated Codex job, else None.
-
-        """
-        if agent_runtime.requires_codex_implementation_isolation(str(job.kwargs.get("agent", ""))):
-            return JobResult(
-                ok=False,
-                error="implementation changed paths outside approved scope",
-                value={SCOPE_VIOLATION_PATHS_KEY: _bounded_unexpected_paths(changed - permitted)},
+        unexpected = changed - permitted
+        if unexpected:
+            logger.warning(
+                "implementation changed paths outside the plan scope: %s",
+                ",".join(sorted(unexpected)),
             )
-        logger.warning(
-            "implementation changed paths outside the plan scope: %s",
-            ",".join(sorted(changed - permitted)),
-        )
         return None
 
     def _commit_if_changes_with_controlled_signing(
@@ -14066,12 +14080,8 @@ class WorkerPool:
             raise ValueError("The first-publication recovery candidate changed.")
         self._first_publication_discovery_source(job, manager, record, deadline)
         paths = job.kwargs.get("allowed_paths")
-        if (
-            type(paths) is not tuple
-            or not paths
-            or (record.allowed_paths is not None and paths != record.allowed_paths)
-        ):
-            raise ValueError("The first-publication approved scope changed or is unavailable.")
+        if paths is not None and type(paths) is not tuple:
+            raise ValueError("The first-publication plan metadata is invalid.")
         scope = self._first_publication_recovery_scope(job, record, paths)
         if scope is not None:
             return scope
@@ -14086,9 +14096,9 @@ class WorkerPool:
         return record
 
     def _first_publication_recovery_scope(
-        self, job: GitJob, record: FirstPublicationRecord, paths: tuple[str, ...]
+        self, job: GitJob, record: FirstPublicationRecord, paths: Collection[str] | None
     ) -> JobResult | None:
-        """Check independent current PR paths and retained-base paths against fresh scope."""
+        """Recheck operation identity and Git integrity with optional plan metadata."""
         worktree = record.workspace.cwd
         fetch_job = replace(job, kwargs={**job.kwargs, "cwd": str(worktree)})
         main = self._git_fetch_main(fetch_job)
@@ -14212,7 +14222,7 @@ class WorkerPool:
             workspace=current,
             tree_sha=tree,
             scope_base_sha=scope_base,
-            allowed_paths=tuple(sorted(paths)) if paths is not None else None,
+            allowed_paths=tuple(sorted(paths)) if paths else None,
             phase="publication_intent",
         )
         if manager._require_receipt(issue, SourceLane.IMPLEMENTATION) != receipt:
@@ -14785,6 +14795,14 @@ class WorkerPool:
         if ahead.stdout.strip() != "0":
             return True
 
+        reservation = job.kwargs.get("direct_scope_reservation")
+        if (
+            not isinstance(reservation, dict)
+            or reservation.get("created_by_this_attempt") is not True
+            or reservation.get("branch") != branch
+            or reservation.get("base_sha") != expected_remote_sha
+        ):
+            return False
         revalidate_remote = self._authenticated_remote_revalidator(
             cwd=worktree_path, expected_repo=job.transport_repository, timeout=job.timeout_s
         )

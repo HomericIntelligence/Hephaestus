@@ -152,6 +152,9 @@ def _prepare_metadata_gap(job: GitJob, key: Path, case: str) -> GitJob:
     [
         ("missing", None),
         ("start-matching", None),
+        ("empty-initial-scope", None),
+        ("empty-recovery-scope", None),
+        ("changed-recovery-scope", None),
         ("start-conflict", "conflicts with the start record"),
         ("start-malformed", "initial implementation record does not match"),
         ("main-fetch", "Controlled main fetch failure"),
@@ -175,7 +178,12 @@ def test_recovery_checks_fresh_start_and_main_evidence(
         assert job.workspace is not None
         head = job.workspace.revision
         assert head is not None
+        if case == "empty-initial-scope":
+            job = replace(job, kwargs={**job.kwargs, "allowed_paths": ()})
+        assert job.workspace is not None
         record_path = _retain_failed_publication(job, monkeypatch)
+        if case == "empty-initial-scope":
+            assert json.loads(record_path.read_bytes())["allowed_paths"] is None
         if case == "base-nonancestor":
             retained = json.loads(record_path.read_bytes())
             unrelated = _git(
@@ -197,10 +205,16 @@ def test_recovery_checks_fresh_start_and_main_evidence(
         pool = _pool(root, monkeypatch)
         start_path = _prepare_start_record(pool, job, case)
         start_content = start_path.read_bytes() if start_path.exists() else None
+        recovery_paths = {
+            "empty-initial-scope": (),
+            "empty-recovery-scope": (),
+            "changed-recovery-scope": ("different.txt",),
+        }.get(case, job.kwargs["allowed_paths"])
         recovery = replace(
             job,
             kwargs={
                 **job.kwargs,
+                "allowed_paths": recovery_paths,
                 "scope_history_base_sha": head,
                 "publish_base_sha": head,
                 "first_publication_candidate": record["operation_id"],

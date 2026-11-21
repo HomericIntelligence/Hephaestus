@@ -63,10 +63,11 @@ def test_dirty_claim_consumes_before_turn_and_rejects_replay(tmp_path: Path) -> 
 
 
 @pytest.mark.parametrize(
-    "change", ["plan", "review", "scope", "generation", "content", "issue", "repository"]
+    "change",
+    ["plan", "review", "scope", "empty_scope", "generation", "content", "issue", "repository"],
 )
-def test_dirty_job_rejects_changed_inputs_before_turn(tmp_path: Path, change: str) -> None:
-    """Independent frozen inputs and live ownership must match the claim."""
+def test_dirty_job_validates_changed_inputs_before_turn(tmp_path: Path, change: str) -> None:
+    """Ownership and approval stay exact while plan path metadata may change."""
     import hashlib
 
     from hephaestus.automation.pipeline.jobs import AgentJob, DirtyDirectPlanInput
@@ -102,6 +103,8 @@ def test_dirty_job_rejects_changed_inputs_before_turn(tmp_path: Path, change: st
         inputs = replace(inputs, review="Different approval.\nstate:plan-go")
     elif change == "scope":
         inputs = replace(inputs, allowed_paths=("other.txt",))
+    elif change == "empty_scope":
+        inputs = replace(inputs, allowed_paths=())
     elif change == "generation":
         binding = replace(binding, generation=binding.generation + 1)
     elif change == "content":
@@ -121,6 +124,13 @@ def test_dirty_job_rejects_changed_inputs_before_turn(tmp_path: Path, change: st
         job = replace(job, issue=13)
     elif change == "repository":
         job = replace(job, repo="foreign")
+    if change in {"scope", "empty_scope"}:
+        with _agent_workspace_lease(
+            job, deadline_s=time.monotonic() + job.timeout_s, shutdown=threading.Event()
+        ):
+            stored = manager._require_receipt(12, SourceLane.IMPLEMENTATION)
+            assert stored.dirty_claim is not None and stored.dirty_claim.state == "consumed"
+        return
     with pytest.raises(SourceWorkspaceError):
         with _agent_workspace_lease(
             job, deadline_s=time.monotonic() + job.timeout_s, shutdown=threading.Event()
@@ -135,7 +145,6 @@ def test_dirty_job_rejects_changed_inputs_before_turn(tmp_path: Path, change: st
     [
         None,
         "owner",
-        "revision",
         "label",
         "review",
         "missing",
@@ -162,7 +171,7 @@ def test_fresh_plan_read_requires_owned_matching_approval(failure: str | None) -
         IssueComment(
             render_current_review(
                 review if failure != "review" else "The plan is approved.",
-                revision=4 if failure == "revision" else 5,
+                revision=5,
             ),
             viewer_did_author=True,
         ),
@@ -190,6 +199,51 @@ def test_fresh_plan_read_requires_owned_matching_approval(failure: str | None) -
     else:
         with pytest.raises(SourceWorkspaceError):
             _dirty_plan_from_read(receipt)
+
+
+@pytest.mark.parametrize("review_revision", [None, 4, 5], ids=["missing", "older", "current"])
+@pytest.mark.parametrize("plan", ["## Files to Modify\n- `tracked.txt`\n", "No file section.\n"])
+def test_fresh_plan_read_treats_revision_and_paths_as_informational(
+    review_revision: int | None, plan: str
+) -> None:
+    """Plan approval binds revision and fingerprints, not review markers or paths."""
+    from dataclasses import asdict
+
+    from hephaestus.automation.pipeline.github_jobs import DirtyDirectPrStateRead, FrozenJson
+    from hephaestus.automation.pipeline.worker_pool import _dirty_plan_from_read
+    from hephaestus.automation.review_journal import (
+        IssueComment,
+        render_current_plan,
+        render_current_review,
+    )
+
+    rendered_review = render_current_review("The plan is complete.\nstate:plan-go", revision=5)
+    if review_revision is None:
+        rendered_review = rendered_review.replace("<!-- revision: 5 -->\n", "")
+    elif review_revision != 5:
+        rendered_review = rendered_review.replace(
+            "<!-- revision: 5 -->", f"<!-- revision: {review_revision} -->"
+        )
+    comments = [
+        IssueComment(render_current_plan(plan, revision=5), viewer_did_author=True),
+        IssueComment(rendered_review, viewer_did_author=True),
+    ]
+    receipt = DirtyDirectPrStateRead(
+        "example/project",
+        12,
+        _claim().branch,
+        (),
+        None,
+        plan_journal=FrozenJson.snapshot([asdict(comment) for comment in comments]),
+        issue_state="OPEN",
+        issue_labels=("state:plan-go",),
+    )
+
+    parsed = _dirty_plan_from_read(receipt)
+
+    assert parsed.revision == 5
+    assert parsed.review_revision == review_revision
+    assert parsed.allowed_paths == (() if plan == "No file section.\n" else ("tracked.txt",))
 
 
 @pytest.mark.parametrize("started", [False, True])
@@ -612,6 +666,7 @@ def test_post_timeout_probe_claim_adopts_the_published_lane(
         assert result.value["direct_scope_reservation"] == {
             "branch": branch,
             "base_sha": advanced,
+            "created_by_this_attempt": False,
         }
         assert result.value["source_workspace"]["revision"] == advanced
         armed = manager._require_receipt(12, SourceLane.IMPLEMENTATION)
@@ -1288,5 +1343,84 @@ def test_probe_claim_classifies_a_missing_receipt_without_claiming(
             assert "quarantine" in caplog.text
         assert runner.run.call_count == 0
         assert manager._read_receipt(12, SourceLane.IMPLEMENTATION) is None
+    finally:
+        pool._executor.shutdown()
+
+
+def test_registered_receiptless_writer_survives_probe_and_create(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A registered writer keeps its path and registration through recovery failure."""
+    import queue
+    import threading
+    from unittest.mock import MagicMock, patch
+
+    from hephaestus.automation.pipeline.jobs import GitJob
+    from hephaestus.automation.pipeline.worker_pool import WorkerPool
+
+    repo, first, second = _repository(tmp_path, origin_repository="example/project")
+    _registered_git_fixture(repo, monkeypatch)
+    _source_registration_fixture(repo, monkeypatch)
+    manager = SourceWorkspaceManager(repo, repository="project")
+    branch = "12-auto-impl"
+    original = manager.prepare(12, SourceLane.IMPLEMENTATION, first, branch=branch)
+    manager._receipt_path(12, SourceLane.IMPLEMENTATION).unlink()
+    (original.cwd / "output.txt").write_text("recoverable\n", encoding="utf-8")
+    runner = MagicMock()
+    pool = WorkerPool(
+        1,
+        threading.Event(),
+        queue.Queue(),
+        github_job_runner=runner,
+        host_capabilities=WorkerCapabilities(None, "unit-worker", FakeSigningProvider()),
+    )
+    probe = GitJob(
+        repo="project",
+        op="claim_dirty_direct_continuation",
+        timeout_s=30,
+        expected_repository="example/project",
+        kwargs={"repo_root": str(repo), "issue_number": 12, "probe": True},
+    )
+    create = GitJob(
+        repo="project",
+        op="create_worktree",
+        timeout_s=30,
+        expected_repository="example/project",
+        kwargs={
+            "repo_root": str(repo),
+            "issue_number": 12,
+            "branch_name": branch,
+            "source_lane": "impl",
+            "base_sha": second,
+        },
+    )
+    try:
+        probed = pool._run_git(probe)
+        assert probed.ok, probed.error
+        assert probed.value == {"dirty_direct_not_applicable": True}
+        assert original.cwd.exists()
+        assert (original.cwd / "output.txt").read_text(encoding="utf-8") == "recoverable\n"
+        assert manager._path_is_registered_to_repository(original.cwd)
+
+        with (
+            patch.object(pool, "_prepare_direct_scope_worktree", return_value=(second, branch)),
+            patch.object(
+                pool,
+                "_authenticated_remote_git_configuration",
+                return_value=(build_git_child_env(), ()),
+            ),
+        ):
+            created = pool._run_git(create)
+
+        assert created.ok is False
+        assert created.error is not None
+        assert created.error.startswith("worktree creation failed:")
+        assert created.value["source_workspace_creation_failure"] == "writer_transition"
+        assert "source_workspace_terminal" not in created.value
+        assert original.cwd.exists()
+        assert manager._path_is_registered_to_repository(original.cwd)
+        assert not list(original.cwd.parent.glob(f"{original.cwd.name}.quarantine-*"))
+        assert runner.run.call_count == 0
     finally:
         pool._executor.shutdown()
