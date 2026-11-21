@@ -1373,9 +1373,9 @@ def _plan_discovery_stop_outcome(
     """Convert a failed plan lookup into the stage outcome that preserves state."""
     if lookup.status is PlanDiscoveryStatus.READ_ERROR:
         reason = f"plan discovery read failed: {lookup.error}"
-        assert item.issue is not None  # noqa: S101 - caller validates this
+        issue_number = cast(int, item.issue)
         try:
-            live = ctx.github.gh_issue_json(item.issue)
+            live = ctx.github.gh_issue_json(issue_number)
         except RuntimeError as exc:
             live = None
             reason = f"{reason}; terminal-state read failed: {exc}"

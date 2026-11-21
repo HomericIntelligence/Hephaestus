@@ -35,9 +35,9 @@ from concurrent.futures import CancelledError
 from typing import Any
 
 from hephaestus.cli.localization import text
-from hephaestus.errors import OperationDeadlineExpired
 from hephaestus.git.gh.environment import gh_child_environment
 from hephaestus.git.gh.rate_limit import (
+    OperationDeadlineExpired,
     detect_claude_usage_cap,
     detect_claude_usage_limit,
     detect_rate_limit,

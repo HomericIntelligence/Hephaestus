@@ -280,9 +280,9 @@ from hephaestus.config.child_environments import (
     build_host_verification_env,
     build_python_phase_env,
 )
-from hephaestus.errors import OperationDeadlineExpired
 from hephaestus.git.config_safety import unsafe_local_git_config_key
 from hephaestus.git.gh.client import GitHubRateLimitError, GitHubUnavailableError
+from hephaestus.git.gh.rate_limit import OperationDeadlineExpired
 from hephaestus.git.runtime import (
     current_operation_shutdown,
     operation_file_lock,

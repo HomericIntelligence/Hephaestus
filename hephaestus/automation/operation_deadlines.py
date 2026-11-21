@@ -12,7 +12,7 @@ from pathlib import Path
 from threading import Event
 from typing import Any, Protocol
 
-from hephaestus.errors import OperationDeadlineExpired
+from hephaestus.git.gh.rate_limit import OperationDeadlineExpired
 from hephaestus.utils.file_lock import LockUnavailableError, file_lock
 
 type GitHubCommandRunner = Callable[..., subprocess.CompletedProcess[str]]
