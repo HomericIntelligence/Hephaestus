@@ -1328,7 +1328,7 @@ class SourceWorkspaceManager:
         if old is None:
             try:
                 predecessor_is_registered = self._has_worktree_registration(expected_path)
-            except (OSError, UnicodeError, subprocess.SubprocessError) as exc:
+            except (OSError, UnicodeError, subprocess.SubprocessError, RuntimeError) as exc:
                 raise SourceWorkspaceError(
                     "implementation writer predecessor is unproven",
                     recovery=self._unproven_recovery(
@@ -1395,7 +1395,7 @@ class SourceWorkspaceManager:
         if not expected_path.exists():
             try:
                 predecessor_is_registered = self._has_worktree_registration(expected_path)
-            except (OSError, UnicodeError, subprocess.SubprocessError) as exc:
+            except (OSError, UnicodeError, subprocess.SubprocessError, RuntimeError) as exc:
                 raise SourceWorkspaceError(
                     "implementation writer predecessor is unproven",
                     recovery=self._unproven_recovery(

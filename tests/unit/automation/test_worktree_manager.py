@@ -1679,8 +1679,10 @@ class TestWorktreeManager:
 
         assert len(worktrees) == 2
         assert worktrees[0]["path"] == "/repo"
+        assert worktrees[0]["commit"] == "abc123"
         assert worktrees[0]["branch"] == "refs/heads/main"
         assert worktrees[1]["path"] == "/repo/build/.worktrees/issue\n123"
+        assert worktrees[1]["commit"] == "def456"
         assert worktrees[1]["branch"] == "refs/heads/123-feature"
         assert worktree_mocks.run.call_args.args[0] == [
             "git",
@@ -1727,7 +1729,7 @@ class TestWorktreeManager:
         assert len(worktrees) == 2
         assert worktrees[0]["path"] == "/repo"
         assert "branch" not in worktrees[0]
-        assert "commit" not in worktrees[0]
+        assert worktrees[0]["commit"] == "link gitdir:core.worktree"
         assert worktrees[1]["path"] == "/repo/build/.worktrees/issue-123"
         assert worktrees[1]["branch"] == "refs/heads/123-feature"
         assert worktrees[1]["commit"] == "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678"
@@ -1736,6 +1738,34 @@ class TestWorktreeManager:
         assert len(issued) == 3
         assert issued[0] == ["git", "worktree", "list", "--porcelain", "-z"]
         assert all(cmd == ["git", "worktree", "list", "--porcelain"] for cmd in issued[1:])
+
+    @pytest.mark.parametrize("raise_on_error", [False, True], ids=["return-empty", "raise"])
+    def test_list_worktrees_non_129_failure_does_not_fall_back(
+        self, worktree_mocks: Any, tmp_path: Any, raise_on_error: bool
+    ) -> None:
+        """Only an unsupported ``-z`` flag selects plain porcelain."""
+        worktree_mocks.repo_root.return_value = tmp_path
+        manager = WorktreeManager()
+        command = ["git", "worktree", "list", "--porcelain", "-z"]
+        error = subprocess.CalledProcessError(1, command)
+        result = Mock()
+        result.stdout = "worktree /repo\0HEAD abc123\0branch refs/heads/main\0\0"
+        worktree_mocks.run.side_effect = [error, result]
+
+        if raise_on_error:
+            with pytest.raises(RuntimeError, match="Failed to list git worktrees") as captured:
+                manager.list_worktrees(raise_on_error=True)
+            assert captured.value.__cause__ is error
+        else:
+            assert manager.list_worktrees() == []
+
+        worktree_mocks.run.assert_called_once()
+        assert manager._worktree_list_z_supported is None
+        assert manager.list_worktrees() == [
+            {"path": "/repo", "commit": "abc123", "branch": "refs/heads/main"}
+        ]
+        assert manager._worktree_list_z_supported is True
+        assert [call.args[0] for call in worktree_mocks.run.call_args_list] == [command, command]
 
     def test_list_worktrees_cached_z_failure_raises(
         self, worktree_mocks: Any, tmp_path: Any
