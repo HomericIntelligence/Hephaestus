@@ -8,10 +8,12 @@ Source jobs use the accepted workspace binding. Host results update the
 source receipt. Plan scope reads use typed jobs. The address-review agent
 replies to and resolves its own review threads on GitHub.
 
-Only three events permit a rebase: initial implementation, a conflict at an
-exact reviewed GO head, or an explicit rebase request. An adopted PR and a
-review correction do not independently permit a rebase. The host owns Git
-and publication. A conflict agent can edit only the recorded conflict paths.
+Only three events permit a rebase: initial implementation, base synchronization
+at an exact reviewed GO head, or an explicit rebase request. Base
+synchronization covers a conflict or an origin advance during finalization. An
+adopted PR and a review correction do not independently permit a rebase. The
+host owns Git and publication. A conflict agent can edit only the recorded
+conflict paths.
 
 Review evidence survives a rebase only when the host supplies the required
 proof. A durable review record needs fresh host verification after restart.
@@ -1321,22 +1323,26 @@ class ImplementationStage(Stage):
             return restored_rebase
         logger.info("implementation:%d: requesting worktree job", issue)
         adopted = bool(item.payload.get("existing_pr"))
+        initial_source = not adopted and not item.payload.get("implementation_started")
         direct_base_sha = item.payload.get(DIRECT_SCOPE_BASE_SHA_KEY)
-        if not adopted and direct_base_sha is not None and not is_full_commit_sha(direct_base_sha):
+        if (
+            initial_source
+            and direct_base_sha is not None
+            and not is_full_commit_sha(direct_base_sha)
+        ):
             return StageOutcome(Disposition.FINISH_FAIL, "direct_scope_base_pin_invalid")
         kwargs: dict[str, object] = {
             "issue_number": issue,
             "branch_name": item.branch,
-            # Fresh branch: cut from a freshly refreshed trunk (doc step
-            # 2: worktree_manager.create_worktree(refresh_base=True)).
-            # ADOPTED branch: never reset to trunk — sync to the PR's
-            # remote head instead (the anti-clobber reset of
-            # _prepare_worktree_for_existing_pr :649/:693, so re-running
-            # never discards pushed commits). Values coordinator-vetted.
-            "refresh_base": not adopted and direct_base_sha is None,
+            # Refresh trunk only for a fresh branch. A started lane keeps its
+            # head while origin advances; finalization owns base synchronization.
+            # An adopted branch syncs to its PR head instead of resetting to trunk.
+            "refresh_base": initial_source and direct_base_sha is None,
             "repo_root": str(ctx.paths.repo_root),
             "source_lane": "impl",
         }
+        if item.payload.get("implementation_started") and not adopted:
+            kwargs["preserve_started_lane"] = True
         if (
             item.pr is None
             and not adopted
@@ -1364,7 +1370,7 @@ class ImplementationStage(Stage):
             # original managed writer. Recover that writer by the immutable
             # branch identity, not by the new source cursor.
             kwargs["direct_worktree_nonce"] = direct_branch_nonce
-        elif not adopted and direct_base_sha is not None:
+        elif initial_source and direct_base_sha is not None:
             kwargs["base_sha"] = direct_base_sha
             if direct_branch_nonce is not None:
                 if direct_worktree_nonce != direct_branch_nonce:
@@ -1621,11 +1627,20 @@ class ImplementationStage(Stage):
             return StageOutcome(Disposition.FINISH_FAIL, "direct_scope_reservation_collision")
         stale_state = item.payload.pop(DIRECT_SCOPE_STALE_STATE_KEY, None)
         if isinstance(stale_state, dict):
-            # Deterministic local state fails on every attempt. Stop with the
-            # failed predicate instead of spending the Git retry budget (#2905).
+            # A started lane continues after trunk movement. Other deterministic
+            # local state stops without spending the Git retry budget (#2905).
             item.payload.pop("git_error", None)
             item.payload.pop("git_error_retries", None)
             predicate = str(stale_state.get("predicate") or "unknown")
+            if predicate == "checkout_pin_mismatch" and item.payload.get("implementation_started"):
+                logger.warning(
+                    "implementation:%d: direct scope checkout pin moved for branch %s (%s); "
+                    "continuing from the managed lane without a base refresh",
+                    issue,
+                    stale_state.get("branch"),
+                    stale_state.get("detail"),
+                )
+                return Continue(next_state=WORKTREE_WAIT)
             logger.error(
                 "implementation:%d: direct scope stale state at %s for branch %s (%s)",
                 issue,
@@ -1876,7 +1891,7 @@ class ImplementationStage(Stage):
     def _review_conflict_admission(
         item: WorkItem, ctx: StageContext, head: str
     ) -> StepResult | None:
-        """Require GO and a live conflict for the exact reviewed head."""
+        """Require GO and live base-sync evidence for the exact reviewed head."""
         if item.pr is None:
             return StageOutcome(Disposition.FINISH_FAIL, "rebase_pr_unavailable")
         if item.payload.get("reviewed_pr_head_sha") != head:
@@ -1893,7 +1908,7 @@ class ImplementationStage(Stage):
             return StageOutcome(Disposition.FINISH_FAIL, "rebase_conflict_state_unverified")
         if readiness.get("mergeable") != "CONFLICTING" and readiness.get(
             "mergeStateStatus"
-        ) not in {"DIRTY", "CONFLICTING"}:
+        ) not in {"BEHIND", "DIRTY", "CONFLICTING"}:
             item.payload.pop("rebase_reason", None)
             item.payload.pop("post_review_rebase_required", None)
             return StageOutcome(Disposition.FAIL_BACK, "review_retained_after_rebase")
@@ -3940,7 +3955,9 @@ class ImplementationStage(Stage):
                 item.payload["worktree_content_snapshot"] = value.get("content_snapshot")
             direct_base_sha = item.payload.get(DIRECT_SCOPE_BASE_SHA_KEY)
             requires_fresh_direct_reservation = (
-                not bool(item.payload.get("existing_pr")) and direct_base_sha is not None
+                not bool(item.payload.get("existing_pr"))
+                and not bool(item.payload.get("implementation_started"))
+                and direct_base_sha is not None
             )
             if requires_fresh_direct_reservation:
                 reservation = value.get("direct_scope_reservation")

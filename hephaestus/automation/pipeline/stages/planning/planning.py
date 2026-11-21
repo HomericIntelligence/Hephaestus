@@ -1361,6 +1361,7 @@ def _verify_published_plan_state(item: WorkItem, ctx: StageContext) -> StageOutc
             Disposition.RETRY,
             "exclusive needs-plan label was not confirmed",
         )
+    item.payload.pop("planning_main_refresh_complete", None)
     logger.info("planning:%d: plan verified; advancing", item.issue)
     return StageOutcome(Disposition.ADVANCE, "plan generated and verified")
 
@@ -1480,7 +1481,7 @@ def _verify_plan(item: WorkItem, ctx: StageContext) -> StageOutcome:
 
 
 def _planning_main_refresh_step(item: WorkItem, ctx: StageContext) -> StepResult | None:
-    """Check the issue and fetch main before a new plan update."""
+    """Check the issue and fetch the latest origin main before source work."""
     if not item.issue:
         return StageOutcome(Disposition.FINISH_FAIL, "no issue number")
     if item.payload.get("planning_main_refresh_error"):
@@ -1650,6 +1651,8 @@ class PlanningStage(Stage):
 
         if recovery_required:
             logger.info("planning:%d: requirements recovery required", item.issue)
+            if item.state == "ENTER" and not item.payload.get("planning_main_refresh_complete"):
+                item.payload["planning_main_refresh_pending"] = True
             return None
 
         # Fast-forward only from the sole confirmed plan state. A stale sibling
@@ -1717,6 +1720,7 @@ class PlanningStage(Stage):
                 "exclusive planning entry label was not confirmed",
             )
         if force_replan:
+            item.payload.pop("planning_main_refresh_complete", None)
             item.payload["planning_main_refresh_pending"] = True
             item.payload["forced_planning_epoch_started"] = True
             item.payload.pop("update_plan_required", None)
@@ -1734,6 +1738,9 @@ class PlanningStage(Stage):
                 "planning:%d: plan comment already exists; fast-forward to VERIFY", item.issue
             )
             item.state = "VERIFY"
+        elif item.state == "ENTER" and not item.payload.get("planning_main_refresh_complete"):
+            # Capture origin once before this planning epoch starts source work.
+            item.payload["planning_main_refresh_pending"] = True
 
         return None  # proceed to step()
 
@@ -1859,6 +1866,7 @@ class PlanningStage(Stage):
                 return
             item.payload["_synced_default_branch_sha"] = revision
             item.payload.pop("planning_main_refresh_pending", None)
+            item.payload["planning_main_refresh_complete"] = True
             return
 
         if item.state == "ADVISE_WAIT" and not result.ok:

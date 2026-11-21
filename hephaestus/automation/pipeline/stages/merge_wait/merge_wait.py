@@ -2,12 +2,12 @@
 
 ``pr_review`` applies ``state:implementation-go`` when no review thread is
 unresolved. This stage arms GitHub native auto-merge for an open pull request
-that carries the label, unless an agent already armed it. GitHub owns
-everything after that: branch protection, the required checks, any merge
-queue, and a rebase when the merge reports a real conflict. The stage compares
-no head, checks no status evidence, and does not rebase before arming. It
-polls the pull request, with a bounded wait, until GitHub reports it merged or
-closed.
+that carries the label, unless an agent already armed it. GitHub owns branch
+protection, the required checks, and any merge queue. A conflict or an origin
+advance returns the exact reviewed head to implementation for base
+synchronization. The stage compares no head and checks no required-status
+evidence. It polls the pull request, with a bounded wait, until GitHub reports
+it merged or closed.
 
 The implemented mini-state graph is:
 
@@ -209,7 +209,7 @@ class MergeWaitStage(Stage):
             )
             item.payload.pop(_AUTO_MERGE_ARMED, None)
             return StageOutcome(Disposition.FAIL_BACK, outcome)
-        if outcome == "merge_conflicting":
+        if outcome in {"merge_conflicting", "merge_behind"}:
             return self._post_review_rebase(item, outcome)
         if outcome == "merge_blocked_by_failing_checks":
             # GitHub will not merge while a required check fails. Name the
@@ -249,7 +249,8 @@ class MergeWaitStage(Stage):
 
     @staticmethod
     def _post_review_rebase(item: WorkItem, reason: str) -> StageOutcome:
-        """Send a merge conflict to the implementation stage."""
+        """Send finalization base synchronization to the implementation stage."""
+        item.payload.pop(_AUTO_MERGE_ARMED, None)
         item.payload["post_review_rebase_required"] = True
         item.payload["rebase_reason"] = "review_conflict"
         return StageOutcome(Disposition.FAIL_BACK, reason)

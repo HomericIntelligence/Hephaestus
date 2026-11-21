@@ -132,12 +132,9 @@ def test_changed_restart_plan_cannot_reuse_stale_plan_go(
     assert PlanningStage().on_enter(item, ctx) is None
     assert item.stage is StageName.PLANNING
     assert STATE_PLAN_GO not in github.labels[1]
-    assert item.payload.get("planning_main_refresh_pending", False) is (
-        replacement_plan is not None
-    )
+    assert item.payload["planning_main_refresh_pending"] is True
     assert "update_plan_required" not in item.payload
-    next_state = "FETCH_MAIN_WAIT" if replacement_plan is not None else "ADVISE_WAIT"
-    assert PlanningStage().step(item, ctx) == Continue(next_state=next_state)
+    assert PlanningStage().step(item, ctx) == Continue(next_state="FETCH_MAIN_WAIT")
 
 
 @pytest.mark.parametrize("prior_forced_epoch", [False, True])

@@ -1,7 +1,8 @@
 """Tests for merge-wait when auto-merge is enabled but GitHub has not merged yet.
 
-Required status evidence is GitHub's gate. The stage's only remaining job after
-enabling auto-merge is to wait, and to fail closed when that wait expires.
+Required status evidence is GitHub's gate. After enablement, the stage waits
+for a terminal merge or a finalization base-sync request. The wait fails closed
+when its deadline expires.
 """
 
 from __future__ import annotations
@@ -55,6 +56,21 @@ def test_enabled_auto_merge_parks_and_retries(make_ctx: Any, make_work_item: Any
     assert isinstance(outcome, StageOutcome)
     assert outcome.disposition is Disposition.RETRY
     assert outcome.note == "merge_wait_poll"
+
+
+def test_behind_go_pr_returns_to_implementation_for_base_sync(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """Finalization rebases a reviewed head when origin advances."""
+    item = _item_with_receipt(make_work_item, "merge_behind", attempted=False)
+    item.payload["merge_auto_merge_armed"] = True
+
+    outcome = MergeWaitStage()._merge_apply(item, make_ctx())
+
+    assert outcome == StageOutcome(Disposition.FAIL_BACK, "merge_behind")
+    assert item.payload["post_review_rebase_required"] is True
+    assert item.payload["rebase_reason"] == "review_conflict"
+    assert "merge_auto_merge_armed" not in item.payload
 
 
 def test_wait_backoff_grows_and_stays_bounded(make_ctx: Any, make_work_item: Any) -> None:

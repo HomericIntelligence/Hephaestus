@@ -2115,6 +2115,71 @@ class TestCreateWorktreeBranchCollision:
         assert ["git", "branch", "-f", "1109-auto-impl", manager.base_branch] in argvs
         assert add_argv in argvs
 
+    def test_started_lane_does_not_fast_forward_a_stale_local_branch(
+        self, worktree_mocks: Any, tmp_path: Any
+    ) -> None:
+        """A started lane resumes its exact head even when origin advanced."""
+        worktree_mocks.repo_root.return_value = tmp_path
+
+        def fake_run(argv: list[str], **_: Any) -> MagicMock:
+            if argv[:3] == ["git", "rev-parse", "--verify"]:
+                return MagicMock(stdout="oldsha\n", returncode=0)
+            if argv[:3] == ["git", "rev-list", "--left-right"]:
+                return MagicMock(stdout="7 0\n", returncode=0)
+            if argv[:2] == ["git", "symbolic-ref"]:
+                return MagicMock(stdout="origin/main\n", returncode=0)
+            return MagicMock(stdout="", returncode=0)
+
+        worktree_mocks.run.side_effect = fake_run
+        manager = WorktreeManager()
+
+        with patch.object(manager, "list_worktrees", return_value=[]):
+            manager.create_worktree(1109, "1109-auto-impl", preserve_started_lane=True)
+
+        argvs = [c.args[0] for c in worktree_mocks.run.call_args_list]
+        assert ["git", "branch", "-f", "1109-auto-impl", manager.base_branch] not in argvs
+        assert [
+            "git",
+            "worktree",
+            "add",
+            str(manager.base_dir / "issue-1109"),
+            "1109-auto-impl",
+        ] in argvs
+
+    def test_started_lane_does_not_delete_a_branch_without_unique_commits(
+        self, worktree_mocks: Any, tmp_path: Path
+    ) -> None:
+        """Base-relative cleanup is disabled after implementation starts."""
+        worktree_mocks.repo_root.return_value = tmp_path
+
+        def fake_run(argv: list[str], **_: Any) -> MagicMock:
+            if argv[:3] == ["git", "rev-list", "--count"]:
+                return MagicMock(stdout="0\n", returncode=0)
+            if argv[:2] == ["git", "symbolic-ref"]:
+                return MagicMock(stdout="origin/main\n", returncode=0)
+            return MagicMock(stdout="oldsha\n", returncode=0)
+
+        worktree_mocks.run.side_effect = fake_run
+        manager = WorktreeManager()
+        lane = manager.base_dir / "issue-1109"
+
+        with (
+            patch.object(manager, "_registered_worktree_paths", return_value=set()),
+            patch.object(manager, "list_worktrees", return_value=[]),
+        ):
+            manager._assert_implementation_writer_is_controlled(
+                issue_number=1109,
+                branch_name="1109-auto-impl",
+                worktree_path=lane,
+                reserved_remote_branch_sha=None,
+                implementation_writer_handoff=None,
+                timeout=60,
+                preserve_started_lane=True,
+            )
+
+        argvs = [c.args[0] for c in worktree_mocks.run.call_args_list]
+        assert ["git", "branch", "-D", "1109-auto-impl"] not in argvs
+
     def test_local_branch_with_unique_commits_is_preserved(
         self, worktree_mocks: Any, tmp_path: Any
     ) -> None:
