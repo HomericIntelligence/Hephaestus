@@ -235,7 +235,38 @@ def test_missing_current_auto_merge_state_remains_retryable(tmp_path: Any) -> No
 
     assert receipt.outcome == "auto_merge_transport_error"
     assert receipt.retryable is True
-    assert receipt.attempted is False
+    assert receipt.attempted is True
+
+
+def test_missing_current_auto_merge_state_exhausts_the_merge_budget(
+    tmp_path: Any, make_ctx: Any, make_work_item: Any
+) -> None:
+    """Persistent malformed readiness consumes the existing merge retry budget."""
+
+    class MissingAutoMergeGitHub(_MergeBlockGitHub):
+        def gh_pr_merge_readiness(self, pr_number: int) -> dict[str, object] | None:
+            return {
+                "state": "OPEN",
+                "mergeable": "MERGEABLE",
+                "mergeStateStatus": "BEHIND",
+            }
+
+    ctx = make_ctx(budget_fn=lambda action: 2)
+    item = make_work_item(kind="pr", issue=1, pr=7)
+    outcomes = []
+    for _ in range(2):
+        request = _job(tmp_path).request
+        assert isinstance(request, RunMergeWaitCycleRequest)
+        receipt = PipelineGitHubJobRunner._run_merge_wait_cycle(request, MissingAutoMergeGitHub())
+        item.state = MERGE_APPLY
+        item.payload[PENDING_GITHUB_REQUEST] = request
+        item.payload["_merge_wait_cycle_receipt"] = receipt
+        outcomes.append(MergeWaitStage()._merge_apply(item, ctx))
+
+    assert outcomes == [
+        StageOutcome(Disposition.RETRY, "merge_not_ready"),
+        StageOutcome(Disposition.FINISH_FAIL, "merge_attempts_exhausted"),
+    ]
 
 
 def test_missing_go_label_is_not_admitted(tmp_path: Any) -> None:

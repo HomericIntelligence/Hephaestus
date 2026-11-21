@@ -357,7 +357,7 @@ class PipelineGitHubJobRunner:
             if "autoMergeRequest" not in readiness or not isinstance(
                 current_auto_merge, dict | None
             ):
-                return complete("auto_merge_transport_error", attempted=False, can_retry=True)
+                return complete("auto_merge_transport_error", attempted=True, can_retry=True)
             armed = (
                 request.auto_merge_armed
                 or state.get("autoMergeRequest") is not None
