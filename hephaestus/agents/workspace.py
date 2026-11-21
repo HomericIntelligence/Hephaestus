@@ -67,7 +67,7 @@ class DirtySourceOperation:
                 or ".." in PurePosixPath(path).parts
                 for path in self.allowed_paths
             )
-            or (self.kind != "inspect" and not self.allowed_paths)
+            or (self.kind == "rebase-conflict" and not self.allowed_paths)
         ):
             raise ValueError("dirty source file scope is invalid")
         if (self.kind in {"inspect", "rebase-conflict"} or self.content_snapshot) and (

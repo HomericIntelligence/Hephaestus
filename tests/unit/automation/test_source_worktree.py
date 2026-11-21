@@ -270,9 +270,9 @@ def test_bounded_prepare_includes_final_workspace_validation(
     assert not manager._receipt_path(42, SourceLane.REVIEW).exists()
 
 
-@pytest.mark.parametrize("change", ["generation", "lane", "item", "path", "unrelated_file"])
+@pytest.mark.parametrize("change", ["generation", "lane", "item", "path"])
 def test_dirty_operation_rejects_source_drift(tmp_path: Path, change: str) -> None:
-    """A dirty operation must keep the exact source receipt and file scope."""
+    """A dirty operation must keep the exact source receipt and content snapshot."""
     from hephaestus.agents.workspace import DirtySourceOperation
 
     repo, _, second = _repository(tmp_path)
@@ -287,8 +287,6 @@ def test_dirty_operation_rejects_source_drift(tmp_path: Path, change: str) -> No
         binding = replace(binding, item_number=43)
     elif change == "path":
         binding = replace(binding, cwd=repo)
-    else:
-        (binding.cwd / "unrelated.txt").write_text("outside the approved scope\n")
 
     with pytest.raises(SourceWorkspaceError):
         with manager.acquire(
@@ -298,23 +296,26 @@ def test_dirty_operation_rejects_source_drift(tmp_path: Path, change: str) -> No
             pytest.fail("source drift received a lease")
 
 
-def test_dirty_operation_lease_yields_the_worktree_and_keeps_changes(
-    tmp_path: Path,
+@pytest.mark.parametrize("allowed_paths", [(), ("tracked.txt",)], ids=["empty", "out-of-plan"])
+def test_test_fix_lease_ignores_plan_paths_and_keeps_changes(
+    tmp_path: Path, allowed_paths: tuple[str, ...]
 ) -> None:
-    """A dirty-operation lease grants the worktree and leaves the edits intact."""
+    """Test repair keeps its source lease with empty or out-of-plan edits."""
     from hephaestus.agents.workspace import DirtySourceOperation
 
     repo, _, second = _repository(tmp_path)
     manager = SourceWorkspaceManager(repo, repository="example/project")
     binding = manager.prepare(42, SourceLane.IMPLEMENTATION, second, branch="writer")
     (binding.cwd / "tracked.txt").write_text("candidate\n")
+    (binding.cwd / "unrelated.txt").write_text("test repair needs this file too\n")
 
     with manager.acquire(
-        binding, source_operation=DirtySourceOperation("test-fix", ("tracked.txt",))
+        binding, source_operation=DirtySourceOperation("test-fix", allowed_paths)
     ) as leased:
         assert leased == binding.cwd
 
     assert (binding.cwd / "tracked.txt").read_text() == "candidate\n"
+    assert (binding.cwd / "unrelated.txt").read_text() == "test repair needs this file too\n"
 
 
 def test_acquire_repairs_a_moved_worktree_registration(tmp_path: Path) -> None:

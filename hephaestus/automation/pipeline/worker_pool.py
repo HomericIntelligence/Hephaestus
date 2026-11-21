@@ -13470,6 +13470,9 @@ class WorkerPool:
             if isinstance(publish_state, JobResult):
                 return publish_state
             if not publish_state:
+                scope_retraction = self._verify_scope_retraction(job, worktree)
+                if scope_retraction is not None:
+                    return scope_retraction
                 clean_head = self._read_publish_head(worktree, timeout=job.timeout_s)
                 if isinstance(clean_head, JobResult):
                     return clean_head
@@ -13537,7 +13540,7 @@ class WorkerPool:
         )
 
     @staticmethod
-    def _verify_implementation_edit_scope(  # noqa: C901
+    def _verify_implementation_edit_scope(
         job: GitJob,
         worktree: Path,
         *,
@@ -13549,14 +13552,48 @@ class WorkerPool:
         if len(declared) != len(requested):
             logger.warning("implementation plan scope declares unusable paths; ignoring them")
         retractions = job.kwargs.get("scope_retraction_paths")
+        permitted = set(declared)
+        if retractions is not None:
+            if (
+                not isinstance(retractions, tuple)
+                or not retractions
+                or not all(is_safe_scope_retraction_path(path) for path in retractions)
+            ):
+                return JobResult(
+                    ok=False,
+                    value={"scope_retraction_failure": True},
+                    error="scope retraction verification unavailable",
+                )
+            try:
+                result = git_utils.run(
+                    ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+                    cwd=worktree,
+                    capture_output=True,
+                    timeout=job.timeout_s,
+                )
+            except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+                return JobResult(
+                    ok=False,
+                    value={"scope_retraction_failure": True},
+                    error="scope retraction verification unavailable",
+                )
+            untracked = {path for path in str(result.stdout or "").split("\0") if path}
+            if untracked.intersection(retractions):
+                return JobResult(
+                    ok=False,
+                    value={"scope_retraction_failure": True},
+                    error="scope retraction verification unavailable",
+                )
+            restoration = WorkerPool._verify_scope_retraction(job, worktree, include_worktree=True)
+            if restoration is not None:
+                return restoration
+            permitted.update(retractions)
         if not declared:
             return None
         history_base_sha = job.kwargs.get("scope_history_base_sha")
         if not _is_full_commit_sha(history_base_sha):
-            if retractions is None:
-                logger.warning("cannot inspect implementation plan scope; continuing without it")
-                return None
-            return JobResult(ok=False, error="cannot validate implementation edit scope")
+            logger.warning("cannot inspect implementation plan scope; continuing without it")
+            return None
         probes = (
             ["git", "diff", "--no-renames", "--name-only", "-z"],
             ["git", "diff", "--cached", "--no-renames", "--name-only", "-z"],
@@ -13572,7 +13609,6 @@ class WorkerPool:
         )
         try:
             changed: set[str] = set()
-            untracked: set[str] = set()
             for argv in probes:
                 result = git_utils.run(
                     argv,
@@ -13580,28 +13616,10 @@ class WorkerPool:
                     capture_output=True,
                     timeout=job.timeout_s,
                 )
-                paths = {path for path in str(result.stdout or "").split("\0") if path}
-                changed.update(paths)
-                if "ls-files" in argv:
-                    untracked = paths
+                changed.update(path for path in str(result.stdout or "").split("\0") if path)
         except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
-            if retractions is None:
-                logger.warning("cannot inspect implementation plan scope; continuing without it")
-                return None
-            return JobResult(ok=False, error="cannot validate implementation edit scope")
-        permitted = set(declared)
-        if retractions is not None:
-            if (
-                not isinstance(retractions, tuple)
-                or not retractions
-                or not all(is_safe_scope_retraction_path(path) for path in retractions)
-                or untracked.intersection(retractions)
-            ):
-                return JobResult(ok=False, error="scope retraction verification unavailable")
-            restoration = WorkerPool._verify_scope_retraction(job, worktree, include_worktree=True)
-            if restoration is not None:
-                return restoration
-            permitted.update(retractions)
+            logger.warning("cannot inspect implementation plan scope; continuing without it")
+            return None
         unexpected = changed - permitted
         if unexpected:
             logger.warning(

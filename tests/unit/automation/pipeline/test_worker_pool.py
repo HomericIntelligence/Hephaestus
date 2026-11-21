@@ -16405,23 +16405,30 @@ class TestGitOps:
         assert result.ok is False
         assert result.value == {"scope_retraction_failure": True}
         assert result.error == "scope retraction incomplete"
-        diff.assert_called_once_with(
-            [
-                "git",
-                "--literal-pathspecs",
-                "diff",
-                "--no-ext-diff",
-                "--no-textconv",
-                "--name-only",
-                base_sha,
-                "HEAD",
-                "--",
-                "hephaestus/agents/runtime.py",
-            ],
-            cwd=tmp_path,
-            capture_output=True,
-            timeout=60,
-        )
+        assert diff.call_args_list == [
+            call(
+                ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+                cwd=tmp_path,
+                capture_output=True,
+                timeout=60,
+            ),
+            call(
+                [
+                    "git",
+                    "--literal-pathspecs",
+                    "diff",
+                    "--no-ext-diff",
+                    "--no-textconv",
+                    "--name-only",
+                    base_sha,
+                    "--",
+                    "hephaestus/agents/runtime.py",
+                ],
+                cwd=tmp_path,
+                capture_output=True,
+                timeout=60,
+            ),
+        ]
         push.assert_not_called()
 
     def test_commit_push_rejects_pathspec_magic_before_publish(
@@ -16526,6 +16533,58 @@ class TestGitOps:
             remote_config=ANY,
         )
         normal_push.assert_not_called()
+
+    def test_empty_plan_no_commit_still_verifies_scope_retraction(
+        self,
+        pool: WorkerPool,
+        tmp_path: Path,
+    ) -> None:
+        """An empty plan cannot hide an incomplete retraction on a no-op publication."""
+        _manager, binding = _prepared_publication_writer(
+            tmp_path, issue_number=2137, branch="2137-auto-impl"
+        )
+        worktree = binding.cwd
+        (worktree / "tracked.txt").write_text("retraction is still incomplete\n")
+        pin = binding.revision
+        job = GitJob(
+            repo="test/repo",
+            op="commit_push",
+            workspace=binding,
+            timeout_s=60,
+            kwargs={
+                "source_lane": "impl",
+                "repo_root": str(binding.reusable_root),
+                "issue_number": 2137,
+                "worktree_path": worktree,
+                "branch": "2137-auto-impl",
+                "agent": "claude",
+                "allowed_paths": (),
+                "scope_history_base_sha": pin,
+                "scope_retraction_base_sha": pin,
+                "scope_retraction_paths": ("tracked.txt",),
+                "expected_remote_sha": pin,
+                "direct_scope_reservation": {
+                    "branch": "2137-auto-impl",
+                    "base_sha": pin,
+                    "created_by_this_attempt": False,
+                },
+            },
+        )
+        with (
+            patch(
+                f"{_WP}.WorkerPool._verify_scope_retraction",
+                wraps=WorkerPool._verify_scope_retraction,
+            ) as verify_retraction,
+            patch.object(pool, "_commit_if_changes_with_controlled_signing", return_value=False),
+            patch.object(pool, "_commit_push_requires_publish", return_value=False),
+            patch.object(pool, "_read_publish_head", return_value=pin),
+        ):
+            result = pool._git_commit_push_inner(job, ExitStack())
+
+        assert result.ok is False
+        assert result.value == {"scope_retraction_failure": True}
+        assert result.error == "scope retraction incomplete"
+        verify_retraction.assert_called_once()
 
     def test_direct_scope_no_commit_releases_unchanged_reservation(
         self,

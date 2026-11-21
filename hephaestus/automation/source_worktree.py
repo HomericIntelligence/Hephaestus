@@ -2109,10 +2109,6 @@ class SourceWorkspaceManager:
         )
         if operation.content_snapshot and snapshot.snapshot != dict(operation.content_snapshot):
             raise SourceWorkspaceError("dirty source content changed")
-        if operation.kind == "test-fix" and not set(snapshot.changed_paths).issubset(
-            operation.allowed_paths
-        ):
-            raise SourceWorkspaceError("dirty source contains unrelated files")
         if operation.kind != "rebase-conflict":
             return binding
         manager = WorktreeManager(repo_root=self.repo_root, base_dir=self.base_dir)

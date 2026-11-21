@@ -3138,8 +3138,8 @@ class ImplementationStage(Stage):
         pretest_kwargs: dict[str, Any] = {}
         try:
             pretest_kwargs["workspace"] = _existing_impl_workspace(item)
-            allowed_paths, _scope_digest = _pretest_scope(item, ctx)
-            pretest_kwargs["source_operation"] = DirtySourceOperation("test-fix", allowed_paths)
+            _pretest_scope(item, ctx)
+            pretest_kwargs["source_operation"] = DirtySourceOperation("test-fix")
         except (KeyError, TypeError, ValueError, RuntimeError):
             return StageOutcome(Disposition.FINISH_FAIL, "test_fix_source_authority_unavailable")
         logger.info("implementation:%d: requesting test-fix job", issue)

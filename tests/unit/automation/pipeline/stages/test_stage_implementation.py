@@ -6779,8 +6779,53 @@ def test_dirty_agent_job_keeps_current_source_authority(
     assert result.job.workspace == binding
     assert result.job.source_operation is not None
     assert result.job.source_operation.kind == operation
-    if operation != "inspect":
+    if operation == "rebase-conflict":
         assert result.job.source_operation.allowed_paths == ("a.py",)
+    elif operation == "test-fix":
+        assert result.job.source_operation.allowed_paths == ()
+    _validate_source_operation_job(result.job)
+
+
+def test_test_fix_admits_an_empty_plan_path_manifest(
+    tmp_path: Path, make_ctx: Any, make_work_item: Any
+) -> None:
+    """An approved plan without file entries cannot block test repair."""
+    from hephaestus.agents.workspace import WorkspaceBinding
+
+    class EmptyPlanGitHub(_PlannedWriterGitHub):
+        def discover_plan(self, issue_number: int) -> PlanDiscoveryResult:
+            return PlanDiscoveryResult.found("No file section is necessary.\n")
+
+    item = make_work_item(issue=1, pr=1001, state="TESTFIX_WAIT")
+    item.worktree = str(tmp_path / "build" / ".worktrees" / "auto-1-impl")
+    item.branch = "fixture-branch"
+    binding = WorkspaceBinding.source(
+        cwd=Path(item.worktree),
+        reusable_root=tmp_path,
+        repository=item.repo,
+        ownership_key="fixture:1:impl",
+        item_number=1,
+        lane=SourceLane.IMPLEMENTATION,
+        revision="a" * 40,
+        generation=7,
+        detached=False,
+    )
+    item.payload.update(
+        {
+            "_impl_source_workspace": binding.to_dict(),
+            "_impl_source_revision": binding.revision,
+            "_impl_source_receipt": _writer_receipt(item, binding),
+        }
+    )
+    stage = ImplementationStage()
+
+    result = _step_after_plan_scope(stage, item, make_ctx(github=EmptyPlanGitHub()))
+
+    assert isinstance(result, JobRequest) and isinstance(result.job, AgentJob)
+    assert result.job.workspace == binding
+    assert result.job.source_operation is not None
+    assert result.job.source_operation.kind == "test-fix"
+    assert result.job.source_operation.allowed_paths == ()
     _validate_source_operation_job(result.job)
 
 
