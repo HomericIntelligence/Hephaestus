@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import subprocess
 import sys
 import time
 import types
@@ -25,6 +26,7 @@ from hephaestus.git.gh.rate_limit import (
     _countdown_loop,
     _global_throttle_state_path,
     _rate_limit_probe_cache,
+    _throttle_remaining,
     configure_gh_global_throttle,
     detect_claude_usage_cap,
     detect_claude_usage_limit,
@@ -1030,3 +1032,17 @@ def test_default_rate_paces_below_the_hourly_account_quota() -> None:
         f"default rate {DEFAULT_GLOBAL_RATE}/s permits "
         f"{DEFAULT_GLOBAL_RATE * 3600:.0f}/hour against a {hourly_quota:.0f} quota"
     )
+
+
+def test_expired_throttle_deadline_does_not_report_a_zero_second_subprocess_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An exhausted absolute budget is distinct from a subprocess that ran for zero seconds."""
+    monkeypatch.setattr(time, "monotonic", lambda: 101.0)
+
+    with pytest.raises(subprocess.TimeoutExpired) as caught:
+        _throttle_remaining(100.0, None)
+
+    message = str(caught.value)
+    assert "absolute monotonic deadline expired before the next GitHub request" in message
+    assert "timed out after 0 seconds" not in message

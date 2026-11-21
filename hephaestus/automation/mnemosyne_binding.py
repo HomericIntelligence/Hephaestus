@@ -15,6 +15,7 @@ from packaging.version import InvalidVersion, Version
 
 from hephaestus.automation.athena_contract import AthenaContractReceipt
 from hephaestus.config.child_environments import build_git_child_env, build_remote_git_env
+from hephaestus.diagnostics import bounded_git_diagnostic
 from hephaestus.github.mnemosyne_repo import (
     UPSTREAM_OWNER,
     UPSTREAM_SLUG,
@@ -251,7 +252,7 @@ class MnemosyneBindingService:
         """Resolve a target or use a verified canonical local checkout."""
         try:
             return self.resolver()
-        except MnemosyneResolutionError:
+        except MnemosyneResolutionError as exc:
             origin = _require_success(
                 self._git(root, "config", "--get", "remote.origin.url"),
                 "origin read",
@@ -260,7 +261,9 @@ class MnemosyneBindingService:
                 raise
             logger.warning(
                 "Mnemosyne repository resolution did not complete; "
-                "the canonical local checkout will be used"
+                "the canonical local checkout will be used (cause=%s: %s)",
+                type(exc).__name__,
+                bounded_git_diagnostic(exc, limit=500),
             )
             return MnemosyneTarget(
                 owner=UPSTREAM_OWNER,

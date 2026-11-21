@@ -12,6 +12,7 @@ from pathlib import Path
 from threading import Event
 from typing import Any, Protocol
 
+from hephaestus.git.gh.rate_limit import OperationDeadlineExpired
 from hephaestus.utils.file_lock import LockUnavailableError, file_lock
 
 type GitHubCommandRunner = Callable[..., subprocess.CompletedProcess[str]]
@@ -90,7 +91,7 @@ class PipelineGitHubDeadlineMixin:
         now = time.monotonic()
         remaining_s = self._operation_deadline_s - now
         if remaining_s <= 0:
-            raise subprocess.TimeoutExpired("GitHub operation deadline", 0)
+            raise OperationDeadlineExpired("GitHub operation deadline", next_step="GitHub request")
         return remaining_s if requested_s is None else min(float(requested_s), remaining_s)
 
     def _deadline_gh_call(self, argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
