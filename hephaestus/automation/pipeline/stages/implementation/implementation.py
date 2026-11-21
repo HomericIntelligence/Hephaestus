@@ -3951,7 +3951,9 @@ class ImplementationStage(Stage):
                 item.payload["worktree_content_snapshot"] = value.get("content_snapshot")
             direct_base_sha = item.payload.get(DIRECT_SCOPE_BASE_SHA_KEY)
             requires_fresh_direct_reservation = (
-                not bool(item.payload.get("existing_pr")) and direct_base_sha is not None
+                not bool(item.payload.get("existing_pr"))
+                and not bool(item.payload.get("implementation_started"))
+                and direct_base_sha is not None
             )
             if requires_fresh_direct_reservation:
                 reservation = value.get("direct_scope_reservation")

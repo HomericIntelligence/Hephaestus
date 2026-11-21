@@ -154,7 +154,14 @@ def test_a_behind_pr_returns_to_implementation_before_it_can_merge(
     auto_merge_request = {"enabledBy": {"login": "someone"}} if armed else None
     github = _MergeBlockGitHub(
         states=[_open_pr(auto_merge_request=auto_merge_request)],
-        readiness=[{"state": "OPEN", "mergeStateStatus": "BEHIND", "mergeable": "MERGEABLE"}],
+        readiness=[
+            {
+                "state": "OPEN",
+                "mergeStateStatus": "BEHIND",
+                "mergeable": "MERGEABLE",
+                "autoMergeRequest": auto_merge_request,
+            }
+        ],
     )
     request = _armed_request() if armed else _job(tmp_path).request
     assert isinstance(request, RunMergeWaitCycleRequest)
@@ -170,7 +177,14 @@ def test_a_failed_behind_disarm_remains_retryable() -> None:
     """Do not route a PR to implementation while its auto-merge remains armed."""
     github = _MergeBlockGitHub(
         states=[_open_pr(auto_merge_request={"enabledBy": {"login": "someone"}})],
-        readiness=[{"state": "OPEN", "mergeStateStatus": "BEHIND", "mergeable": "MERGEABLE"}],
+        readiness=[
+            {
+                "state": "OPEN",
+                "mergeStateStatus": "BEHIND",
+                "mergeable": "MERGEABLE",
+                "autoMergeRequest": {"enabledBy": {"login": "someone"}},
+            }
+        ],
     )
     github.disarm_result = False
 
@@ -179,6 +193,49 @@ def test_a_failed_behind_disarm_remains_retryable() -> None:
     assert receipt.outcome == "auto_merge_transport_error"
     assert receipt.retryable is True
     assert github.disarm_calls == [7]
+
+
+def test_fresh_readiness_disarms_a_concurrently_armed_behind_pr(tmp_path: Any) -> None:
+    """The current readiness read detects auto-merge armed after the state read."""
+    github = _MergeBlockGitHub(
+        states=[_open_pr(auto_merge_request=None)],
+        readiness=[
+            {
+                "state": "OPEN",
+                "mergeStateStatus": "BEHIND",
+                "mergeable": "MERGEABLE",
+                "autoMergeRequest": {"enabledBy": {"login": "someone"}},
+            }
+        ],
+    )
+
+    request = _job(tmp_path).request
+    assert isinstance(request, RunMergeWaitCycleRequest)
+    receipt = PipelineGitHubJobRunner._run_merge_wait_cycle(request, github)
+
+    assert receipt.outcome == "merge_behind"
+    assert github.disarm_calls == [7]
+    assert github.enable_calls == []
+
+
+def test_missing_current_auto_merge_state_remains_retryable(tmp_path: Any) -> None:
+    """A malformed readiness response cannot make an armed PR look unarmed."""
+
+    class MissingAutoMergeGitHub(_MergeBlockGitHub):
+        def gh_pr_merge_readiness(self, pr_number: int) -> dict[str, object] | None:
+            return {
+                "state": "OPEN",
+                "mergeable": "MERGEABLE",
+                "mergeStateStatus": "BEHIND",
+            }
+
+    request = _job(tmp_path).request
+    assert isinstance(request, RunMergeWaitCycleRequest)
+    receipt = PipelineGitHubJobRunner._run_merge_wait_cycle(request, MissingAutoMergeGitHub())
+
+    assert receipt.outcome == "auto_merge_transport_error"
+    assert receipt.retryable is True
+    assert receipt.attempted is False
 
 
 def test_missing_go_label_is_not_admitted(tmp_path: Any) -> None:

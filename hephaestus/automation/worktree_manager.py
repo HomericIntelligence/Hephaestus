@@ -925,6 +925,7 @@ class WorktreeManager:
                             started_lane_kwargs = (
                                 {"preserve_started_lane": True} if preserve_started_lane else {}
                             )
+
                             if not reuse_direct_predecessor:
                                 if direct_target_ref_revision is None:
                                     self._add_worktree_for_branch(
@@ -943,6 +944,7 @@ class WorktreeManager:
                                         timeout=timeout,
                                         **started_lane_kwargs,
                                     )
+
                             if source_lane == "impl":
                                 if direct_predecessor:
                                     if not isinstance(
