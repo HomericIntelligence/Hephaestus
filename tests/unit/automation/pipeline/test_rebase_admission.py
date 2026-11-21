@@ -232,8 +232,8 @@ def test_initial_record_rejects_other_branch(
     fetch.assert_not_called()
 
 
-def test_live_conflict_requires_same_base_and_exclusive_go() -> None:
-    """Reject stale bases, revoked GO, and a clean branch behind main."""
+def test_live_finalization_requires_same_base_and_exclusive_go() -> None:
+    """Admit a clean branch behind main, but reject stale bases and revoked GO."""
     from hephaestus.automation.pipeline.github_jobs import InspectRebaseConflictRequest
     from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
 
@@ -264,7 +264,7 @@ def test_live_conflict_requires_same_base_and_exclusive_go() -> None:
             "mergeStateStatus": "BEHIND" if change == "behind" else "DIRTY",
         }
         receipt = PipelineGitHubJobRunner._inspect_rebase_conflict(request, github)
-        assert receipt.admitted is (change == "none"), change
+        assert receipt.admitted is (change in {"none", "behind"}), change
         github.edit_labels.assert_not_called()
         github.merge_pr.assert_not_called()
 
