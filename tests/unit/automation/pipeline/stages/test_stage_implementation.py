@@ -3103,9 +3103,36 @@ class TestWorktreeAndAdvise:
             "issue_number": 1,
             "branch_name": "1-auto-impl",
             "refresh_base": False,
+            "preserve_started_lane": True,
             "repo_root": "/tmp/repo",
             "source_lane": "impl",
         }
+
+    def test_started_direct_worktree_does_not_require_a_new_reservation(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A started lane keeps its existing reservation and accepted writer."""
+        stage = ImplementationStage()
+        item = make_work_item(issue=1, state="WORKTREE_WAIT")
+        item.payload.update(
+            {
+                "dirty_direct_checked": True,
+                "implementation_started": True,
+                "_direct_scope_base_sha": "a" * 40,
+            }
+        )
+
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=True,
+                value=_worktree_receipt(item, path="/tmp/lane", revision="b" * 40),
+            ),
+            make_ctx(),
+        )
+
+        assert item.worktree == "/tmp/lane"
+        assert "git_error" not in item.payload
 
     def test_direct_scope_worktree_forwards_the_coordinator_run_nonce(
         self, make_ctx: Any, make_work_item: Any

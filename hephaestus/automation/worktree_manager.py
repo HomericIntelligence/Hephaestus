@@ -564,6 +564,7 @@ class WorktreeManager:
         implementation_adoption_head: str | None = None,
         implementation_writer_handoff: object = None,
         reuse_dirty_lane: bool = False,
+        preserve_started_lane: bool = False,
         timeout: int | None = None,
     ) -> Path:
         """Create a new worktree for an issue.
@@ -601,6 +602,9 @@ class WorktreeManager:
             reuse_dirty_lane: When True, an implementation lane that already
                 holds the agent's uncommitted work at the adopted head keeps
                 that worktree. The agent continues in that lane.
+            preserve_started_lane: Keep a started implementation lane at its
+                exact head. Do not delete or fast-forward its branch because
+                the base advanced. Ownership and handoff checks still apply.
             timeout: Optional timeout in seconds for each git command.
 
         Returns:
@@ -724,6 +728,7 @@ class WorktreeManager:
                             ),
                             implementation_writer_handoff=implementation_writer_handoff,
                             timeout=timeout,
+                            preserve_started_lane=preserve_started_lane,
                         )
                     if (
                         base_sha is None
@@ -886,12 +891,16 @@ class WorktreeManager:
                                 reuse_dirty_lane=reuse_dirty_lane,
                             )
                         else:
+                            started_lane_kwargs = (
+                                {"preserve_started_lane": True} if preserve_started_lane else {}
+                            )
                             if direct_target_ref_revision is None:
                                 self._add_worktree_for_branch(
                                     worktree_path,
                                     branch_name,
                                     base_sha=base_sha,
                                     timeout=timeout,
+                                    **started_lane_kwargs,
                                 )
                             else:
                                 self._add_worktree_for_branch(
@@ -900,6 +909,7 @@ class WorktreeManager:
                                     base_sha=base_sha,
                                     replace_existing_base_branch=True,
                                     timeout=timeout,
+                                    **started_lane_kwargs,
                                 )
                             if source_lane == "impl":
                                 if direct_predecessor:
@@ -1151,6 +1161,7 @@ class WorktreeManager:
         reserved_remote_branch_sha: str | None,
         implementation_writer_handoff: object,
         timeout: int | None,
+        preserve_started_lane: bool = False,
     ) -> bool:
         """Reject every pre-existing fresh-writer path or branch before cleanup."""
         registered = self._registered_worktree_at_path(worktree_path, timeout=timeout)
@@ -1237,16 +1248,19 @@ class WorktreeManager:
                 raise WorktreeCreationReceiptError(
                     "implementation writer branch is an unowned existing branch"
                 )
-            logger.warning(
-                "discarding an interrupted writer branch %s; it holds no work",
-                branch_name,
-            )
-            run(
-                ["git", "branch", "-D", branch_name],
-                cwd=self.repo_root,
-                capture_output=True,
-                **_timeout_kw(timeout),
-            )
+            if preserve_started_lane:
+                logger.info("preserving started writer branch %s at its current head", branch_name)
+            else:
+                logger.warning(
+                    "discarding an interrupted writer branch %s; it holds no work",
+                    branch_name,
+                )
+                run(
+                    ["git", "branch", "-D", branch_name],
+                    cwd=self.repo_root,
+                    capture_output=True,
+                    **_timeout_kw(timeout),
+                )
         return False
 
     def _branch_holds_no_work(self, branch_name: str, *, timeout: int | None = None) -> bool:
@@ -2047,6 +2061,7 @@ class WorktreeManager:
         *,
         base_sha: str | None = None,
         replace_existing_base_branch: bool = False,
+        preserve_started_lane: bool = False,
         timeout: int | None = None,
     ) -> None:
         """Add a git worktree, choosing the right source for ``branch_name``.
@@ -2083,7 +2098,8 @@ class WorktreeManager:
             if not replace_existing_base_branch:
                 self._fresh_branch_creations.add((worktree_path.resolve(), branch_name))
         elif self._local_branch_exists(branch_name, timeout=timeout):
-            self._refresh_stale_local_branch_if_safe(branch_name, timeout=timeout)
+            if not preserve_started_lane:
+                self._refresh_stale_local_branch_if_safe(branch_name, timeout=timeout)
             logger.info("Branch %s already exists, reusing it", branch_name)
             run(
                 ["git", "worktree", "add", str(worktree_path), branch_name],

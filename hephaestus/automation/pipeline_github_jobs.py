@@ -353,7 +353,16 @@ class PipelineGitHubJobRunner:
         except Exception:
             readiness = None
         if isinstance(readiness, dict) and readiness.get("mergeStateStatus") == "BEHIND":
-            armed = request.auto_merge_armed or state.get("autoMergeRequest") is not None
+            current_auto_merge = readiness.get("autoMergeRequest")
+            if "autoMergeRequest" not in readiness or not isinstance(
+                current_auto_merge, dict | None
+            ):
+                return complete("auto_merge_transport_error", attempted=False, can_retry=True)
+            armed = (
+                request.auto_merge_armed
+                or state.get("autoMergeRequest") is not None
+                or current_auto_merge is not None
+            )
             if armed:
                 try:
                     disarmed = github.disable_auto_merge(request.pr_number)
