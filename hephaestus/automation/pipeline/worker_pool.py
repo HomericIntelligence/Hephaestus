@@ -36,37 +36,26 @@ from contextlib import (
 )
 from contextvars import copy_context
 from dataclasses import asdict, dataclass, replace
-from pathlib import Path, PureWindowsPath
+from pathlib import Path
 from typing import Any, Literal, cast
 
 import hephaestus.agents.runtime as agent_runtime
 import hephaestus.automation.claude_invoke as claude_invoke
 import hephaestus.automation.codex_adapter_admission as codex_adapter_admission
 import hephaestus.automation.git_utils as git_utils
-import hephaestus.automation.pipeline.codex_worktree_boundary as codex_worktree_boundary
 import hephaestus.utils.subprocess_registry as subprocess_registry
 from hephaestus.agents.codex_isolation import (
-    CodexExecutionPolicyV1,
-    CodexGitReceiptV1,
-    CodexIsolationAdapterV1,
     CodexIsolationError,
-    CodexIsolationRequestV1,
-    StagedLinuxExecutable,
-    canonical_sha256,
     close_staged_linux_executable,
-    new_run_nonce,
     stage_linux_executable,
 )
 from hephaestus.agents.execution_policy import (
     AgentOperation,
     AgentRole,
-    ExecutionPolicyError,
     ExecutionRequest,
-    FilesystemMode,
     SessionLifecycle,
     resolve_policy,
 )
-from hephaestus.agents.model_selection import AgentModelSelection, resolve_codex_model_selection
 from hephaestus.agents.pi_session import AgentSessionBinding
 from hephaestus.agents.runtime import (
     AgentExecutionError,
@@ -88,7 +77,7 @@ from hephaestus.agents.workspace import (
     validate_workspace_binding,
 )
 from hephaestus.automation.agent_config import AGENT_COMMIT_MESSAGE
-from hephaestus.automation.commit_paths import CommitPaths, is_bounded_commit_paths
+from hephaestus.automation.commit_paths import CommitPaths
 from hephaestus.automation.first_publication_recovery import FirstPublicationStore
 from hephaestus.automation.host_capabilities import (
     QuotaLifecycleError,
@@ -105,6 +94,8 @@ from hephaestus.automation.pipeline.athena_skill_jobs import (
     athena_workspace_lease,
 )
 from hephaestus.automation.pipeline.diagnostics import (
+    _JOB_RESULT_ERROR_MAX as _ERR_MAX,
+    _JOB_RESULT_TAIL as _TAIL,
     bounded_pipeline_diagnostic,
     redact_diagnostic_text,
 )
@@ -113,8 +104,6 @@ from hephaestus.automation.pipeline.fleet_execution import (
     is_initial_implementation,
 )
 from hephaestus.automation.pipeline.git_jobs import (
-    DIRTY_SNAPSHOT_CHANGED_FILE_MAX,
-    DIRTY_SNAPSHOT_CONTENT_MAX_BYTES,
     FIRST_PUBLICATION_CHECK_ARGV,
     IMPLEMENTATION_INSPECTION_DIFF_MAX_BYTES,
     IMPLEMENTATION_INSPECTION_METADATA_MAX_BYTES,
@@ -152,6 +141,22 @@ from hephaestus.automation.pipeline.host_verification_pyxis import (
     validate_pyxis_image as _validate_pyxis_image,
     validate_pyxis_quota_root as _validate_pyxis_quota_root,
 )
+from hephaestus.automation.pipeline.job_failures import (
+    _agent_exception_result as _agent_exception_result,
+    _classify_github_failure as _classify_github_failure,
+    _dirty_direct_failure_result as _dirty_direct_failure_result,
+    _exception_chain as _exception_chain,
+    _git_environment_failure_result as _git_environment_failure_result,
+    _git_exception_diagnostics as _git_exception_diagnostics,
+    _git_lock_failure_result as _git_lock_failure_result,
+    _ignore_local_agent_failure as _ignore_local_agent_failure,
+    _ordered_git_diagnostics as _ordered_git_diagnostics,
+    _publication_failure_diagnostic as _publication_failure_diagnostic,
+    _publication_failure_location as _publication_failure_location,
+    _RebaseSigningEnvironmentError as _RebaseSigningEnvironmentError,
+    _RemoteGitAuthenticationError as _RemoteGitAuthenticationError,
+    _retain_publication_failure as _retain_publication_failure,
+)
 from hephaestus.automation.pipeline.jobs import (
     WORKTREE_MATERIALIZED_KEY,
     AgentJob,
@@ -173,10 +178,11 @@ from hephaestus.automation.pipeline.rebase_policy import (
 )
 from hephaestus.automation.pipeline.repo_intake_cleanup import RepoIntakeCleanupFailure
 from hephaestus.automation.pipeline.repository_lock import (
-    LockMetadataError,
-    LockTimeoutError,
     RepositoryLockError,
     RepositoryOperationLock,
+    _GitLockInterruptedError as _GitLockInterruptedError,
+    _GitLockTimeoutError as _GitLockTimeoutError,
+    _repository_lock_operation as _repository_lock_operation,
     repo_lock_path,
 )
 from hephaestus.automation.pipeline.repository_validation import (
@@ -201,17 +207,83 @@ from hephaestus.automation.pipeline.tool_scopes import (
     ToolScope,
     tool_scope_for,
 )
+from hephaestus.automation.pipeline.worker_codex import (
+    _CODEX_IMPLEMENTATION_GRACE_SECONDS as _CODEX_IMPLEMENTATION_GRACE_SECONDS,
+    _CODEX_IMPLEMENTATION_INVENTORY_QUIESCENCE_SECONDS as _CODEX_IMPLEMENTATION_INVENTORY_QUIESCENCE_SECONDS,  # noqa: E501
+    _CODEX_IMPLEMENTATION_OUTPUT_MAX_BYTES as _CODEX_IMPLEMENTATION_OUTPUT_MAX_BYTES,
+    _CODEX_IMPLEMENTATION_PROVIDER_RELAY as _CODEX_IMPLEMENTATION_PROVIDER_RELAY,
+    _CODEX_NON_APPLICABLE_TOOLS as _CODEX_NON_APPLICABLE_TOOLS,
+    _CODEX_OPERATION_TOOLS as _CODEX_OPERATION_TOOLS,
+    _CODEX_TOOL_CAPABILITIES as _CODEX_TOOL_CAPABILITIES,
+    _codex_git_boundary as _codex_git_boundary,
+    _codex_implementation_command as _codex_implementation_command,
+    _codex_implementation_grants as _codex_implementation_grants,
+    _codex_implementation_request as _codex_implementation_request,
+    _codex_private_profile as _codex_private_profile,
+    _initialize_codex_adapter as _initialize_codex_adapter,
+    _owned_codex_adapter as _owned_codex_adapter,
+    _reject_codex_terminal_cleanup_tombstone as _reject_codex_terminal_cleanup_tombstone,
+    _run_isolated_codex_effort_attempts as _run_isolated_codex_effort_attempts,
+    _uses_codex_implementation_adapter as _uses_codex_implementation_adapter,
+    _validate_staged_codex_executable as _validate_staged_codex_executable,
+)
+from hephaestus.automation.pipeline.worker_conflict_io import (
+    _CONFLICT_FILE_MAX_BYTES as _CONFLICT_FILE_MAX_BYTES,
+    _CONFLICT_HUNK_MAX as _CONFLICT_HUNK_MAX,
+    _conflict_file_identity as _conflict_file_identity,
+    _ConflictFileIdentity as _ConflictFileIdentity,
+    _ConflictPathBinding as _ConflictPathBinding,
+    _open_bounded_conflict_file as _open_bounded_conflict_file,
+    _open_conflict_descriptor_chain as _open_conflict_descriptor_chain,
+    _read_bounded_conflict_descriptor as _read_bounded_conflict_descriptor,
+    _read_bounded_conflict_file as _read_bounded_conflict_file,
+    _read_conflict_file_chunks as _read_conflict_file_chunks,
+    _RebaseConflictContextError as _RebaseConflictContextError,
+    _revalidate_conflict_descriptor_chain as _revalidate_conflict_descriptor_chain,
+    _validated_conflict_path as _validated_conflict_path,
+)
+from hephaestus.automation.pipeline.worker_git_inspection import (
+    _bounded_candidate_commit_paths as _bounded_candidate_commit_paths,
+    _candidate_commit_tree_evidence as _candidate_commit_tree_evidence,
+    _checkout_preflight_error as _checkout_preflight_error,
+    _filesystem_identity as _filesystem_identity,
+    _FilesystemIdentity as _FilesystemIdentity,
+    _git_environment_for_binding as _git_environment_for_binding,
+    _inspect_candidate_with_private_git as _inspect_candidate_with_private_git,
+    _linked_binding_matches as _linked_binding_matches,
+    _linked_worktree_git_env as _linked_worktree_git_env,
+    _linked_worktree_git_env_portable as _linked_worktree_git_env_portable,
+    _LinkedWorktreeBinding as _LinkedWorktreeBinding,
+    _LinkedWorktreeGitEnvironment as _LinkedWorktreeGitEnvironment,
+    _metadata_path as _metadata_path,
+    _normalized_metadata_path as _normalized_metadata_path,
+    _open_absolute_directory_no_follow as _open_absolute_directory_no_follow,
+    _open_directory_at_no_follow as _open_directory_at_no_follow,
+    _open_directory_no_follow as _open_directory_no_follow,
+    _open_root_metadata_directory_no_follow as _open_root_metadata_directory_no_follow,
+    _portable_path_identity as _portable_path_identity,
+    _portable_read_bounded_regular as _portable_read_bounded_regular,
+    _portable_read_branch_ref as _portable_read_branch_ref,
+    _portable_read_git_pointer as _portable_read_git_pointer,
+    _portable_repository_git_root as _portable_repository_git_root,
+    _portable_root_metadata_identity as _portable_root_metadata_identity,
+    _private_linked_worktree_git_env as _private_linked_worktree_git_env,
+    _PrivateLinkedWorktreeGitEnvironment as _PrivateLinkedWorktreeGitEnvironment,
+    _read_bounded_git_pointer_at as _read_bounded_git_pointer_at,
+    _read_bounded_regular_at as _read_bounded_regular_at,
+    _read_branch_ref as _read_branch_ref,
+    _regular_file_identity_at as _regular_file_identity_at,
+    _reject_object_alternates_at as _reject_object_alternates_at,
+    _reject_portable_object_alternates as _reject_portable_object_alternates,
+    _repository_git_root as _repository_git_root,
+    _RepositoryGitRootBinding as _RepositoryGitRootBinding,
+    _root_metadata_file_identity_no_follow as _root_metadata_file_identity_no_follow,
+    _unsafe_local_git_config_key as _unsafe_local_git_config_key,
+    _validate_registered_repository_admin as _validate_registered_repository_admin,
+)
 from hephaestus.automation.pipeline_github_review_validation import validation_plan_for_workspace
 from hephaestus.automation.podman_machine_supervisor import validate_podman_machine_name
 from hephaestus.automation.prompts._review_rubric import plugin_skills_context
-from hephaestus.automation.provider_auth_resilience import (
-    is_provider_auth_error,
-    provider_auth_error_message,
-)
-from hephaestus.automation.provider_transport_failures import (
-    is_provider_transport_error,
-    provider_transport_timeout_message,
-)
 from hephaestus.automation.pyxis_artifact_io import (
     CrossNodePathBinding,
     bind_cross_node_root,
@@ -232,7 +304,6 @@ from hephaestus.automation.repository_validation_runtime import (
     admit_runtime,
 )
 from hephaestus.automation.review_journal import (
-    CommentJournalReadError,
     IssueComment,
     journal_snapshot,
     parse_plan_review_state,
@@ -270,14 +341,11 @@ from hephaestus.automation.worktree_manager import (
     WorktreeManager,
 )
 from hephaestus.config.child_environments import (
-    build_codex_implementation_child_env,
     build_git_child_env,
     build_git_signing_env,
     build_host_verification_env,
     build_python_phase_env,
 )
-from hephaestus.git.config_safety import unsafe_local_git_config_key
-from hephaestus.git.gh.client import GitHubRateLimitError, GitHubUnavailableError
 from hephaestus.git.gh.rate_limit import OperationDeadlineExpired
 from hephaestus.git.runtime import (
     current_operation_shutdown,
@@ -304,7 +372,6 @@ from hephaestus.resilience import (
     CircuitBreakerOpenError,
     get_circuit_breaker,
 )
-from hephaestus.resilience.subprocess_resilience import is_transient_subprocess_error
 from hephaestus.utils.file_lock import LockUnavailableError, file_lock
 from hephaestus.utils.git import _is_full_commit_sha
 from hephaestus.utils.helpers import get_repo_root, run_subprocess
@@ -315,10 +382,7 @@ from .worker_completion import resolve_worker_future
 
 logger = logging.getLogger(__name__)
 
-_TAIL = 4000  # chars of stdout/stderr retained in a JobResult
-_ERR_MAX = 500  # chars of error detail retained in a JobResult
 _RESERVATION_CREATED = "_direct_scope_reservation_created"
-_CONFLICT_HUNK_MAX = 4000
 _CONFLICT_CONTEXT_MAX = 16000
 _CONFLICT_CONTEXT_VERSION = 1
 _CONFLICT_PATHS_MAX_BYTES = 64 * 1024
@@ -328,35 +392,10 @@ _CONFLICT_INDEX_MAX_BYTES = 1024 * 1024
 _CONFLICT_PATH_INDEX_MAX_BYTES = _CONFLICT_HUNK_MAX * 4
 _CONFLICT_IGNORED_PATHS_MAX_BYTES = 1024 * 1024
 _CONFLICT_IGNORED_FILE_MAX = 20_000
-_CONFLICT_FILE_MAX_BYTES = _CONFLICT_HUNK_MAX * 4
 _CONFLICT_RESOLUTION_OUTCOMES = frozenset(
     {"no_edit", "residual_markers", "out_of_scope_edit", "resolved_content"}
 )
 _GIT_LOCK_WAIT_POLL_S = 0.1
-_CODEX_IMPLEMENTATION_OUTPUT_MAX_BYTES = 1024 * 1024
-_CODEX_IMPLEMENTATION_GRACE_SECONDS = 5.0
-_CODEX_IMPLEMENTATION_INVENTORY_QUIESCENCE_SECONDS = 1.0
-_CODEX_IMPLEMENTATION_PROVIDER_RELAY = "vsock://2:443"
-
-
-def _exception_chain(exc: BaseException) -> tuple[BaseException, ...]:
-    """Return a finite causal chain in command execution order."""
-    ordered: list[BaseException] = []
-    seen: set[int] = set()
-
-    def visit(current: BaseException | None) -> None:
-        if current is None or id(current) in seen:
-            return
-        seen.add(id(current))
-        cause = current.__cause__
-        context = None if current.__suppress_context__ else current.__context__
-        if context is not cause:
-            visit(context)
-        visit(cause)
-        ordered.append(current)
-
-    visit(exc)
-    return tuple(ordered)
 
 
 def _cleanup_launch_intake(
@@ -378,93 +417,6 @@ def _cleanup_launch_intake(
         except Exception:
             logger.exception("repository-intake owner lock release failed")
     return None
-
-
-def _git_exception_diagnostics(
-    exc: BaseException,
-) -> tuple[int | None, str, str, str]:
-    """Return the decisive class, return code, and safe ordered streams."""
-    failures = tuple(
-        current
-        for current in _exception_chain(exc)
-        if isinstance(current, (subprocess.CalledProcessError, subprocess.TimeoutExpired))
-    )
-    if not failures:
-        return None, type(exc).__name__, "", ""
-    decisive = failures[-1]
-    returncode = (
-        decisive.returncode if isinstance(decisive, subprocess.CalledProcessError) else None
-    )
-
-    def streams(attribute: str) -> str:
-        limit = max(1, _TAIL // len(failures))
-        parts: list[str] = []
-        for failure in failures:
-            value = getattr(failure, attribute, None)
-            if attribute == "stdout" and value is None:
-                value = getattr(failure, "output", None)
-            text = bounded_pipeline_diagnostic(value, limit=limit)
-            if text:
-                parts.append(text)
-        return bounded_pipeline_diagnostic("\n".join(parts), limit=_TAIL)
-
-    return returncode, type(decisive).__name__, streams("stdout"), streams("stderr")
-
-
-def _publication_failure_diagnostic(
-    exc: BaseException,
-    *,
-    phase: str,
-    remote_state: str,
-    head_sha: str | None,
-) -> tuple[dict[str, object], str, str]:
-    """Build one bounded diagnostic sidecar for a failed publication."""
-    returncode, exception_class, stdout_tail, stderr_tail = _git_exception_diagnostics(exc)
-    diagnostic: dict[str, object] = {
-        "failure_kind": "publication",
-        "phase": phase,
-        "head_sha": head_sha,
-        "exception_class": exception_class,
-        "remote_state": remote_state,
-    }
-    if returncode is not None:
-        diagnostic["returncode"] = returncode
-    return diagnostic, stdout_tail, stderr_tail
-
-
-def _publication_failure_location(exc: BaseException) -> tuple[str, str]:
-    """Return the phase and remote state for a publication failure."""
-    if isinstance(exc, git_utils.BranchPublicationRemoteHeadChangedError):
-        return "push", "changed"
-    if isinstance(exc, git_utils.BranchPublicationRemoteHeadUnchangedError):
-        return "push", "unchanged"
-    if isinstance(exc, git_utils.BranchPublicationRemoteProbeError):
-        return "remote_probe", "unverified"
-    return "push", "unverified"
-
-
-def _ordered_git_diagnostics(*values: object) -> str:
-    """Return non-empty diagnostics in input order within one fixed bound."""
-    nonempty = [value for value in values if value]
-    if not nonempty:
-        return ""
-    per_value_limit = max(1, _TAIL // len(nonempty))
-    return bounded_pipeline_diagnostic(
-        "\n".join(bounded_pipeline_diagnostic(value, limit=per_value_limit) for value in nonempty),
-        limit=_TAIL,
-    )
-
-
-def _retain_publication_failure(result: JobResult, prior: JobResult | None) -> JobResult:
-    """Keep earlier push evidence without replacing the later outcome or cause."""
-    if prior is None:
-        return result
-    return replace(
-        result,
-        stdout_tail=_ordered_git_diagnostics(prior.stdout_tail, result.stdout_tail),
-        stderr_tail=_ordered_git_diagnostics(prior.stderr_tail, result.stderr_tail),
-        process_failure=result.process_failure or prior.process_failure,
-    )
 
 
 def _invoke_claude_commit_message(
@@ -516,281 +468,6 @@ def _invoke_claude_commit_message(
         allowed_tools="Read,Glob,Grep",
     )
     return (stdout or "").strip()
-
-
-def _bounded_candidate_commit_paths(
-    worktree: Path,
-    head: str,
-    *,
-    timeout: int,
-    git_env: dict[str, str] | None = None,
-) -> CommitPaths:
-    """Return one bounded, filtered path manifest for candidate staging."""
-    from hephaestus.automation.commit_paths import (
-        parse_porcelain_status,
-        reject_filtered_path_shape_changes,
-        select_commit_paths,
-    )
-
-    env = dict(git_env or _isolated_checkout_git_env())
-    porcelain = _run_bounded_git_output(
-        (
-            "git",
-            "-c",
-            "core.fsmonitor=false",
-            "status",
-            "--porcelain=v1",
-            "-z",
-            "--untracked-files=all",
-            "--no-renames",
-        ),
-        cwd=worktree,
-        timeout=timeout,
-        max_bytes=IMPLEMENTATION_INSPECTION_STATUS_MAX_BYTES,
-        retain_text=True,
-        env=env,
-    ).text
-    status_entries = parse_porcelain_status(porcelain)
-    if len({path for _status, path in status_entries}) > DIRTY_SNAPSHOT_CHANGED_FILE_MAX:
-        raise _GitInspectionResourceLimitError("dirty snapshot file limit exceeded")
-    selected = select_commit_paths(status_entries, None)
-    if not selected.add_paths and not selected.update_paths:
-        raise RuntimeError("dirty writer has no publishable non-secret paths")
-    reject_filtered_path_shape_changes(status_entries, selected)
-    if not is_bounded_commit_paths(
-        selected,
-        max_paths=DIRTY_SNAPSHOT_CHANGED_FILE_MAX,
-        max_bytes=IMPLEMENTATION_INSPECTION_STATUS_MAX_BYTES,
-    ):
-        raise _GitInspectionResourceLimitError("dirty snapshot path manifest limit exceeded")
-    return selected
-
-
-def _candidate_commit_tree_evidence(
-    worktree: Path,
-    head: str,
-    *,
-    timeout: int,
-    selected: CommitPaths | None = None,
-    git_env: dict[str, str] | None = None,
-    snapshot_root: Path | None = None,
-) -> tuple[str, _BoundedGitOutput]:
-    """Build and diff the non-secret tree in a disposable Git object store."""
-    selected = selected or _bounded_candidate_commit_paths(
-        worktree,
-        head,
-        timeout=timeout,
-        git_env=git_env,
-    )
-    with tempfile.TemporaryDirectory(prefix="hephaestus-candidate-index-") as temporary:
-        temporary_root = Path(temporary)
-        index = temporary_root / "index"
-        objects = temporary_root / "objects"
-        objects.mkdir()
-        if snapshot_root is None:
-            snapshot_root = temporary_root / "worktree"
-        snapshot_root.mkdir(mode=0o700)
-        env = dict(git_env or _isolated_checkout_git_env())
-        shared_objects = git_utils.run(
-            ["git", "rev-parse", "--git-path", "objects"],
-            cwd=worktree,
-            timeout=timeout,
-            env=env,
-        ).stdout.strip()
-        shared_object_path = Path(shared_objects)
-        if not shared_object_path.is_absolute():
-            shared_object_path = worktree / shared_object_path
-        shared_object_path = shared_object_path.resolve(strict=True)
-        if not shared_object_path.is_dir():
-            raise RuntimeError("shared Git object store is unavailable")
-        env["GIT_INDEX_FILE"] = str(index)
-        env["GIT_OBJECT_DIRECTORY"] = str(objects)
-        env["GIT_ALTERNATE_OBJECT_DIRECTORIES"] = str(shared_object_path)
-        selected_paths = (*selected.add_paths, *selected.update_paths)
-        _path_content_identity(
-            worktree,
-            "\0".join(selected_paths) + "\0",
-            remaining_content_bytes=[DIRTY_SNAPSHOT_CONTENT_MAX_BYTES],
-            timeout=timeout,
-            copy_root=snapshot_root,
-        )
-        env["GIT_WORK_TREE"] = str(snapshot_root)
-        git_utils.run(
-            ["git", "read-tree", head],
-            cwd=worktree,
-            timeout=timeout,
-            env=env,
-        )
-        if selected.update_paths:
-            update_pathspec = temporary_root / "update-paths"
-            update_pathspec.write_bytes(
-                b"\0".join(os.fsencode(path) for path in selected.update_paths) + b"\0"
-            )
-            git_utils.run(
-                [
-                    "git",
-                    "--literal-pathspecs",
-                    "rm",
-                    "-r",
-                    "-f",
-                    "--cached",
-                    "--ignore-unmatch",
-                    f"--pathspec-from-file={update_pathspec}",
-                    "--pathspec-file-nul",
-                ],
-                cwd=worktree,
-                timeout=timeout,
-                env=env,
-            )
-        if selected.add_paths:
-            add_pathspec = temporary_root / "add-paths"
-            add_pathspec.write_bytes(
-                b"\0".join(os.fsencode(path) for path in selected.add_paths) + b"\0"
-            )
-            git_utils.run(
-                [
-                    "git",
-                    "--literal-pathspecs",
-                    "add",
-                    "-A",
-                    f"--pathspec-from-file={add_pathspec}",
-                    "--pathspec-file-nul",
-                ],
-                cwd=worktree,
-                timeout=timeout,
-                env=env,
-            )
-        if not selected.update_paths and not selected.add_paths:
-            raise RuntimeError("dirty writer has no publishable non-secret tree change")
-        tree = git_utils.run(
-            ["git", "write-tree"],
-            cwd=worktree,
-            timeout=timeout,
-            env=env,
-        ).stdout.strip()
-        if not _is_full_commit_sha(tree):
-            raise RuntimeError("candidate commit tree is unavailable")
-        diff = _run_bounded_git_output(
-            (
-                "git",
-                "-c",
-                "core.fsmonitor=false",
-                "diff",
-                "--no-ext-diff",
-                "--no-textconv",
-                "--no-renames",
-                "--binary",
-                "--full-index",
-                head,
-                tree,
-            ),
-            cwd=worktree,
-            timeout=timeout,
-            max_bytes=IMPLEMENTATION_INSPECTION_DIFF_MAX_BYTES,
-            retain_text=True,
-            env=env,
-        )
-    return tree, diff
-
-
-def _inspect_candidate_with_private_git(
-    worktree: Path,
-    head: str,
-    *,
-    timeout: int,
-    linked_env: dict[str, str],
-) -> tuple[_DirtySnapshotEvidence, _BoundedGitOutput, str, _BoundedGitOutput, CommitPaths | None]:
-    """Inspect one candidate without use of repository-local Git configuration."""
-    with _private_linked_worktree_git_env(linked_env, detached_head=head) as env:
-        private_head = git_utils.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=worktree,
-            timeout=timeout,
-            env=env,
-        ).stdout.strip()
-        if private_head != head:
-            raise RuntimeError("private Git metadata HEAD changed")
-        before = _dirty_worktree_snapshot_evidence(worktree, timeout=timeout, git_env=env)
-        status_result = _run_bounded_git_output(
-            (
-                "git",
-                "-c",
-                "core.fsmonitor=false",
-                "-c",
-                "status.relativePaths=false",
-                "status",
-                "--short",
-                "--untracked-files=all",
-                "--no-renames",
-            ),
-            cwd=worktree,
-            timeout=timeout,
-            max_bytes=IMPLEMENTATION_INSPECTION_STATUS_MAX_BYTES,
-            retain_text=True,
-            env=env,
-        )
-        selected_paths: CommitPaths | None = None
-        if status_result.text.strip():
-            selected_paths = _bounded_candidate_commit_paths(
-                worktree,
-                head,
-                timeout=timeout,
-                git_env=env,
-            )
-            candidate_tree, diff_result = _candidate_commit_tree_evidence(
-                worktree,
-                head,
-                timeout=timeout,
-                selected=selected_paths,
-                git_env=env,
-            )
-        else:
-            candidate_tree = head
-            diff_result = _BoundedGitOutput(
-                text="",
-                sha256=hashlib.sha256(b"").hexdigest(),
-                byte_count=0,
-            )
-        after = _dirty_worktree_snapshot_evidence(worktree, timeout=timeout, git_env=env)
-        if before != after:
-            raise RuntimeError("dirty writer changed during inspection")
-        return after, status_result, candidate_tree, diff_result, selected_paths
-
-
-def _classify_github_failure(error: BaseException, *, now_epoch: float) -> tuple[str, float] | None:
-    """Return a safe GitHub failure class and its first retry delay."""
-    chain: list[BaseException] = []
-    current: BaseException | None = error
-    while current is not None and all(current is not seen for seen in chain):
-        chain.append(current)
-        current = current.__cause__ or current.__context__
-    rate_error = next((item for item in chain if isinstance(item, GitHubRateLimitError)), None)
-    breaker_error = next(
-        (item for item in chain if isinstance(item, CircuitBreakerOpenError)), None
-    )
-    if isinstance(rate_error, GitHubRateLimitError):
-        delay = (
-            max(0.0, float(rate_error.reset_epoch) - now_epoch)
-            if rate_error.reset_epoch > 0
-            else 60.0
-        )
-        return "github_rate_limit", delay
-    if any(isinstance(item, GitHubUnavailableError) for item in chain) or isinstance(
-        breaker_error, CircuitBreakerOpenError
-    ):
-        delay = (
-            max(0.0, breaker_error.time_until_recovery)
-            if isinstance(breaker_error, CircuitBreakerOpenError)
-            else 60.0
-        )
-        return "github_unavailable", delay
-    if any(isinstance(item, subprocess.CalledProcessError) for item in chain):
-        return "github_cli_error", 1.0
-    if any(isinstance(item, (subprocess.TimeoutExpired, _GitLockTimeoutError)) for item in chain):
-        return "github_timeout", 1.0
-    if any(isinstance(item, CommentJournalReadError) for item in chain):
-        return "comment_journal_read_error", 1.0
-    return None
 
 
 def _dirty_agent_plan_identity(job: AgentJob) -> DirtyPlanIdentity:
@@ -1020,41 +697,8 @@ _LINUX_RESOURCE_LIMIT_BOOTSTRAP = (
 )
 
 
-def _agent_exception_result(exc: Exception) -> JobResult:
-    """Map provider-declared and unexpected agent exceptions to job results."""
-    if isinstance(exc, AgentExecutionError):
-        detail = str(exc)
-        if is_provider_auth_error(detail):
-            return JobResult(
-                ok=False,
-                error=provider_auth_error_message(detail),
-            )
-        if is_provider_transport_error(detail):
-            return JobResult(
-                ok=False,
-                error=provider_transport_timeout_message(detail),
-            )
-        return JobResult(
-            ok=False,
-            error=f"agent_error: {exc!s}"[:_ERR_MAX],
-        )
-    logger.exception("Agent job raised, returning error result")
-    return JobResult(
-        ok=False,
-        error=f"{type(exc).__name__}: {exc!s}"[:_ERR_MAX],
-    )
-
-
 class _HostVerificationBoundaryError(QuotaLifecycleError):
     """Raised when a host verification cannot keep PR code contained."""
-
-
-class _RebaseSigningEnvironmentError(RuntimeError):
-    """Raised when a policy rebase cannot obtain the validated signing bridge."""
-
-
-class _RebaseConflictContextError(RuntimeError):
-    """Raised when conflict context is incomplete or unsafe to retain."""
 
 
 class _PendingRebaseRemoteReadError(RuntimeError):
@@ -1064,239 +708,6 @@ class _PendingRebaseRemoteReadError(RuntimeError):
         """Keep the original failure without treating it as remote drift."""
         super().__init__(result.error)
         self.result = result
-
-
-def _validated_conflict_path(cwd: Path, path: str) -> Path:
-    """Validate every path component before a conflict file read."""
-    target = cwd / path
-    try:
-        target.relative_to(cwd)
-        current = target
-        while True:
-            if current.is_symlink():
-                raise _RebaseConflictContextError("conflict source path is unsafe")
-            if current == cwd:
-                break
-            parent = current.parent
-            if parent == current:
-                raise _RebaseConflictContextError("conflict source path is unsafe")
-            current = parent
-    except (OSError, ValueError) as exc:
-        raise _RebaseConflictContextError("conflict source path is unsafe") from exc
-    return target
-
-
-def _open_bounded_conflict_file(parent_fd: int, name: str) -> int:
-    """Open one conflict file through its bound parent descriptor."""
-    nofollow = getattr(os, "O_NOFOLLOW", None)
-    nonblock = getattr(os, "O_NONBLOCK", None)
-    if not isinstance(nofollow, int) or not nofollow or not isinstance(nonblock, int):
-        raise _RebaseConflictContextError("secure conflict source reads are unavailable")
-    try:
-        return os.open(
-            name,
-            os.O_RDONLY | os.O_CLOEXEC | nofollow | nonblock,
-            dir_fd=parent_fd,
-        )
-    except FileNotFoundError:
-        raise
-    except OSError as exc:
-        raise _RebaseConflictContextError("conflict source path is unsafe") from exc
-
-
-_ConflictFileIdentity = tuple[int, int, int, int, int]
-_ConflictPathBinding = tuple[int, str, int, _ConflictFileIdentity]
-
-
-def _conflict_file_identity(info: os.stat_result) -> _ConflictFileIdentity:
-    """Return metadata that proves one file stayed unchanged."""
-    return (
-        info.st_dev,
-        info.st_ino,
-        info.st_size,
-        info.st_mtime_ns,
-        info.st_ctime_ns,
-    )
-
-
-def _read_conflict_file_chunks(descriptor: int) -> bytes:
-    """Read at most the configured number of bytes from an open file."""
-    chunks: list[bytes] = []
-    size = 0
-    while size < _CONFLICT_FILE_MAX_BYTES:
-        chunk = os.read(descriptor, _CONFLICT_FILE_MAX_BYTES - size)
-        if not chunk:
-            break
-        size += len(chunk)
-        if size > _CONFLICT_FILE_MAX_BYTES:
-            raise _RebaseConflictContextError(
-                f"conflict source exceeds {_CONFLICT_HUNK_MAX} characters"
-            )
-        chunks.append(chunk)
-    return b"".join(chunks)
-
-
-def _read_bounded_conflict_descriptor(descriptor: int) -> bytes:
-    """Read and verify one open conflict file without exceeding its bound."""
-    before = os.fstat(descriptor)
-    if not stat.S_ISREG(before.st_mode):
-        raise _RebaseConflictContextError("conflict source path is unsafe")
-    if before.st_size > _CONFLICT_FILE_MAX_BYTES:
-        raise _RebaseConflictContextError(
-            f"conflict source exceeds {_CONFLICT_HUNK_MAX} characters"
-        )
-    raw = _read_conflict_file_chunks(descriptor)
-    after = os.fstat(descriptor)
-    if after.st_size > _CONFLICT_FILE_MAX_BYTES:
-        raise _RebaseConflictContextError(
-            f"conflict source exceeds {_CONFLICT_HUNK_MAX} characters"
-        )
-    if _conflict_file_identity(before) != _conflict_file_identity(after):
-        raise _RebaseConflictContextError("conflict source changed during read")
-    return raw
-
-
-def _open_conflict_descriptor_chain(
-    cwd: Path,
-    parts: tuple[str, ...],
-    validated_root: os.stat_result,
-) -> tuple[
-    list[int],
-    int,
-    int,
-    list[_ConflictPathBinding],
-    _ConflictFileIdentity,
-    int,
-]:
-    """Open a conflict path and retain each directory-name binding."""
-    nofollow = getattr(os, "O_NOFOLLOW", None)
-    if not isinstance(nofollow, int) or not nofollow:
-        raise _RebaseConflictContextError("secure conflict source reads are unavailable")
-    directory_flags = os.O_RDONLY | os.O_CLOEXEC | nofollow | os.O_DIRECTORY
-    descriptors: list[int] = []
-    try:
-        try:
-            root_fd = os.open(cwd, directory_flags)
-        except FileNotFoundError as exc:
-            raise _RebaseConflictContextError("conflict source changed during read") from exc
-        descriptors.append(root_fd)
-        root_identity = _conflict_file_identity(os.fstat(root_fd))
-        if _conflict_file_identity(validated_root) != root_identity:
-            raise _RebaseConflictContextError("conflict source changed during read")
-        bindings: list[_ConflictPathBinding] = []
-        parent_fd = root_fd
-        for component in parts[:-1]:
-            try:
-                named = os.stat(component, dir_fd=parent_fd, follow_symlinks=False)
-            except FileNotFoundError as exc:
-                raise _RebaseConflictContextError("conflict source changed during read") from exc
-            if not stat.S_ISDIR(named.st_mode) or stat.S_ISLNK(named.st_mode):
-                raise _RebaseConflictContextError("conflict source path is unsafe")
-            try:
-                child_fd = os.open(component, directory_flags, dir_fd=parent_fd)
-            except FileNotFoundError as exc:
-                raise _RebaseConflictContextError("conflict source changed during read") from exc
-            descriptors.append(child_fd)
-            opened = os.fstat(child_fd)
-            expected = _conflict_file_identity(opened)
-            if _conflict_file_identity(named) != expected:
-                raise _RebaseConflictContextError("conflict source changed during read")
-            bindings.append((parent_fd, component, child_fd, expected))
-            parent_fd = child_fd
-
-        descriptor = _open_bounded_conflict_file(parent_fd, parts[-1])
-        descriptors.append(descriptor)
-        return (
-            descriptors,
-            descriptor,
-            parent_fd,
-            bindings,
-            root_identity,
-            directory_flags,
-        )
-    except BaseException:
-        for descriptor in reversed(descriptors):
-            os.close(descriptor)
-        raise
-
-
-def _revalidate_conflict_descriptor_chain(
-    cwd: Path,
-    leaf_name: str,
-    descriptor: int,
-    parent_fd: int,
-    bindings: list[_ConflictPathBinding],
-    root_identity: _ConflictFileIdentity,
-    directory_flags: int,
-) -> None:
-    """Confirm that the conflict path still names all retained descriptors."""
-    try:
-        current_leaf = os.stat(leaf_name, dir_fd=parent_fd, follow_symlinks=False)
-        if _conflict_file_identity(current_leaf) != _conflict_file_identity(os.fstat(descriptor)):
-            raise _RebaseConflictContextError("conflict source changed during read")
-        for bound_parent, component, child_fd, expected in bindings:
-            current = os.stat(component, dir_fd=bound_parent, follow_symlinks=False)
-            if (
-                _conflict_file_identity(current) != expected
-                or _conflict_file_identity(os.fstat(child_fd)) != expected
-            ):
-                raise _RebaseConflictContextError("conflict source changed during read")
-        current_root_fd = os.open(cwd, directory_flags)
-        try:
-            if _conflict_file_identity(os.fstat(current_root_fd)) != root_identity:
-                raise _RebaseConflictContextError("conflict source changed during read")
-        finally:
-            os.close(current_root_fd)
-    except _RebaseConflictContextError:
-        raise
-    except OSError as exc:
-        raise _RebaseConflictContextError("conflict source changed during read") from exc
-
-
-def _read_bounded_conflict_file(cwd: Path, path: str) -> bytes:
-    """Read one regular conflict file without following links or exceeding its bound."""
-    try:
-        validated_root = cwd.lstat()
-        if not stat.S_ISDIR(validated_root.st_mode) or stat.S_ISLNK(validated_root.st_mode):
-            raise _RebaseConflictContextError("conflict source path is unsafe")
-        target = _validated_conflict_path(cwd, path)
-        relative = target.relative_to(cwd)
-        parts = relative.parts
-        if not parts or any(component in {"", ".", ".."} for component in parts):
-            raise _RebaseConflictContextError("conflict source path is unsafe")
-        (
-            descriptors,
-            descriptor,
-            parent_fd,
-            bindings,
-            root_identity,
-            directory_flags,
-        ) = _open_conflict_descriptor_chain(cwd, parts, validated_root)
-        try:
-            raw = _read_bounded_conflict_descriptor(descriptor)
-            _revalidate_conflict_descriptor_chain(
-                cwd,
-                parts[-1],
-                descriptor,
-                parent_fd,
-                bindings,
-                root_identity,
-                directory_flags,
-            )
-            return raw
-        finally:
-            for open_descriptor in reversed(descriptors):
-                os.close(open_descriptor)
-    except _RebaseConflictContextError:
-        raise
-    except FileNotFoundError:
-        raise
-    except (OSError, ValueError) as exc:
-        raise _RebaseConflictContextError("conflict source cannot be read") from exc
-
-
-class _RemoteGitAuthenticationError(RuntimeError):
-    """Raised when a remote Git operation cannot use trusted authentication."""
 
 
 def _sandbox_string(path: Path) -> str:
@@ -2675,1019 +2086,6 @@ def _trusted_gh_executable(extra_path_root: Path | None = None) -> str | None:
     return _shared_trusted_gh_executable(extra_path_root)
 
 
-def _unsafe_local_git_config_key(config: str) -> str | None:
-    """Return an unsafe repository/worktree config key, if *config* contains one."""
-    return unsafe_local_git_config_key(config)
-
-
-def _checkout_preflight_error(  # noqa: C901
-    checkout: Path,
-    timeout_s: int,
-    *,
-    max_config_bytes: int | None = None,
-) -> str | None:
-    """Return a reusable-checkout metadata safety failure before synchronization."""
-    git_marker = checkout / ".git"
-    if not git_marker.exists():
-        return None
-    if git_marker.is_symlink():
-        return "checkout has unsafe Git metadata"
-    config_paths: list[Path]
-    if git_marker.is_dir():
-        config_paths = [git_marker / "config"]
-        worktree_config = git_marker / "config.worktree"
-    elif git_marker.is_file():
-        pointer, _identity = _portable_read_git_pointer(git_marker)
-        if not pointer.startswith("gitdir: "):
-            return "checkout has unsafe Git metadata"
-        admin_dir = _normalized_metadata_path(checkout, pointer.removeprefix("gitdir: "))
-        if admin_dir.parent.name != "worktrees":
-            return "checkout has unsafe Git metadata"
-        repo_git_dir = admin_dir.parent.parent
-        if not repo_git_dir.is_dir():
-            return "checkout has unsafe Git metadata"
-        config_paths = [repo_git_dir / "config"]
-        worktree_config = admin_dir / "config.worktree"
-    else:
-        return "checkout has unsafe Git metadata"
-    if worktree_config.exists():
-        config_paths.append(worktree_config)
-    config_parts: list[str] = []
-    if max_config_bytes is None:
-        for config_path in config_paths:
-            neutral_cwd = Path(config_path.anchor)
-            config_parts.append(
-                git_utils.run(
-                    [
-                        "git",
-                        "config",
-                        "--file",
-                        str(config_path),
-                        "--no-includes",
-                        "--null",
-                        "--list",
-                    ],
-                    cwd=neutral_cwd,
-                    timeout=timeout_s,
-                    env=_controlled_git_env(),
-                ).stdout
-            )
-    else:
-        remaining = max_config_bytes
-        for config_path in config_paths:
-            neutral_cwd = Path(config_path.anchor)
-            output = _run_bounded_git_output(
-                (
-                    "git",
-                    "config",
-                    "--file",
-                    str(config_path),
-                    "--no-includes",
-                    "--null",
-                    "--list",
-                ),
-                cwd=neutral_cwd,
-                timeout=timeout_s,
-                max_bytes=remaining,
-                retain_text=True,
-            ).text
-            config_parts.append(output)
-            remaining -= len(output.encode("utf-8", "surrogateescape"))
-    config = "\0".join(config_parts)
-    unsafe_config = _unsafe_local_git_config_key(config)
-    if unsafe_config is not None:
-        return "checkout has unsafe local Git configuration"
-    graft_value = git_utils.run(
-        ["git", "rev-parse", "--git-path", "info/grafts"],
-        cwd=checkout,
-        timeout=timeout_s,
-        env=_controlled_git_env(),
-    ).stdout.strip()
-    if not graft_value:
-        return None
-    graft_path = Path(graft_value)
-    if not graft_path.is_absolute():
-        graft_path = checkout / graft_path
-    if graft_path.is_file():
-        return "checkout has unsafe legacy Git grafts"
-    return None
-
-
-@dataclass(frozen=True)
-class _FilesystemIdentity:
-    """Identify one open file-system object."""
-
-    device: int
-    inode: int
-    file_type: int
-
-
-@dataclass(frozen=True)
-class _LinkedWorktreeBinding:
-    """Bind one linked worktree to its validated Git metadata graph."""
-
-    repo_root: Path
-    worktree: Path
-    common_dir: Path
-    admin_dir: Path
-    index: Path
-    objects: Path
-    branch_ref: str
-    branch_sha: str
-    common_identity: _FilesystemIdentity
-    index_identity: _FilesystemIdentity
-    structural_identity: tuple[_FilesystemIdentity, ...]
-
-
-@dataclass(frozen=True)
-class _RepositoryGitRootBinding:
-    """Bind a checkout root to its common Git metadata directory."""
-
-    common_dir: Path
-    common_identity: _FilesystemIdentity
-    intake_admin_name: str | None
-    intake_admin_identity: _FilesystemIdentity | None
-    structural_identity: tuple[_FilesystemIdentity, ...]
-
-
-class _LinkedWorktreeGitEnvironment(dict[str, str]):
-    """Carry a Git child environment and its structural binding."""
-
-    def __init__(self, values: dict[str, str], binding: _LinkedWorktreeBinding) -> None:
-        """Initialize the environment for one validated binding."""
-        super().__init__(values)
-        self.binding = binding
-
-
-class _PrivateLinkedWorktreeGitEnvironment(dict[str, str]):
-    """Carry private Git metadata and its real linked-worktree binding."""
-
-    def __init__(self, values: dict[str, str], linked_env: dict[str, str]) -> None:
-        """Initialize one private environment from a validated real binding."""
-        super().__init__(values)
-        self.linked_env = linked_env
-        self.binding = getattr(linked_env, "binding", None)
-
-
-def _filesystem_identity(metadata: os.stat_result) -> _FilesystemIdentity:
-    """Return the stable identity fields for one open object."""
-    return _FilesystemIdentity(
-        device=metadata.st_dev,
-        inode=metadata.st_ino,
-        file_type=stat.S_IFMT(metadata.st_mode),
-    )
-
-
-def _open_directory_no_follow(path: Path) -> tuple[int, _FilesystemIdentity]:
-    """Open one directory and reject a final-component link or replacement."""
-    metadata = path.lstat()
-    if path.is_symlink() or not stat.S_ISDIR(metadata.st_mode):
-        raise RuntimeError("linked worktree metadata directory is unsafe")
-    flags = os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_DIRECTORY", 0)
-    if os.name == "posix":
-        flags |= getattr(os, "O_NOFOLLOW", 0)
-    descriptor = os.open(path, flags)
-    try:
-        opened = os.fstat(descriptor)
-        if (opened.st_dev, opened.st_ino) != (
-            metadata.st_dev,
-            metadata.st_ino,
-        ) or not stat.S_ISDIR(opened.st_mode):
-            raise RuntimeError("linked worktree metadata directory changed")
-    except BaseException:
-        os.close(descriptor)
-        raise
-    return descriptor, _filesystem_identity(opened)
-
-
-def _open_directory_at_no_follow(
-    parent_fd: int,
-    name: str,
-) -> tuple[int, _FilesystemIdentity]:
-    """Open one child directory without following a path component link."""
-    metadata = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
-    if not stat.S_ISDIR(metadata.st_mode):
-        raise RuntimeError("linked worktree metadata directory is unsafe")
-    flags = os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_DIRECTORY", 0)
-    if os.name == "posix":
-        flags |= getattr(os, "O_NOFOLLOW", 0)
-    descriptor = os.open(name, flags, dir_fd=parent_fd)
-    try:
-        opened = os.fstat(descriptor)
-        if (opened.st_dev, opened.st_ino) != (
-            metadata.st_dev,
-            metadata.st_ino,
-        ) or not stat.S_ISDIR(opened.st_mode):
-            raise RuntimeError("linked worktree metadata directory changed")
-    except BaseException:
-        os.close(descriptor)
-        raise
-    return descriptor, _filesystem_identity(opened)
-
-
-def _open_absolute_directory_no_follow(
-    path: Path,
-    *,
-    bound_path: Path | None = None,
-    bound_identity: _FilesystemIdentity | None = None,
-) -> tuple[int, _FilesystemIdentity, Path]:
-    """Open an absolute directory through its raw path components."""
-    if not path.is_absolute():
-        raise RuntimeError("linked worktree metadata path is not absolute")
-    current = Path(path.anchor)
-    descriptor, identity = _open_directory_no_follow(current)
-    descriptors = [descriptor]
-    try:
-        for component in path.parts[1:]:
-            if component == ".":
-                continue
-            if component == "..":
-                if len(descriptors) == 1:
-                    raise RuntimeError("linked worktree metadata path escapes its anchor")
-                os.close(descriptors.pop())
-                current = current.parent
-                descriptor = descriptors[-1]
-                identity = _filesystem_identity(os.fstat(descriptor))
-                continue
-            descriptor, identity = _open_directory_at_no_follow(descriptors[-1], component)
-            descriptors.append(descriptor)
-            current /= component
-            if bound_path is not None and current == bound_path and identity != bound_identity:
-                raise RuntimeError("linked worktree metadata directory changed")
-    except BaseException:
-        for open_descriptor in reversed(descriptors):
-            os.close(open_descriptor)
-        raise
-    for open_descriptor in descriptors[:-1]:
-        os.close(open_descriptor)
-    return descriptors[-1], identity, current
-
-
-def _metadata_path(base: Path, value: str) -> tuple[Path, bool]:
-    """Return an absolute raw metadata path and its relative-path state."""
-    raw = Path(value)
-    relative = not raw.is_absolute()
-    return (base / raw if relative else raw), relative
-
-
-def _open_root_metadata_directory_no_follow(
-    base: Path,
-    value: str,
-    *,
-    base_identity: _FilesystemIdentity,
-    error: str,
-) -> tuple[int, _FilesystemIdentity, Path]:
-    """Open a Git metadata directory through the pointer's raw path."""
-    raw, relative = _metadata_path(base, value)
-    try:
-        return _open_absolute_directory_no_follow(
-            raw,
-            bound_path=base if relative else None,
-            bound_identity=base_identity if relative else None,
-        )
-    except RuntimeError as exc:
-        if ".." in raw.parts:
-            raise RuntimeError(error) from exc
-        raise
-    except OSError as exc:
-        raise RuntimeError(error) from exc
-
-
-def _root_metadata_file_identity_no_follow(
-    base: Path,
-    value: str,
-    *,
-    base_identity: _FilesystemIdentity,
-    error: str,
-) -> tuple[Path, _FilesystemIdentity]:
-    """Identify a Git metadata file through the pointer's raw path."""
-    raw, relative = _metadata_path(base, value)
-    parent_fd = -1
-    try:
-        parent_fd, _parent_identity, parent = _open_absolute_directory_no_follow(
-            raw.parent,
-            bound_path=base if relative else None,
-            bound_identity=base_identity if relative else None,
-        )
-        return parent / raw.name, _regular_file_identity_at(parent_fd, raw.name)
-    except RuntimeError as exc:
-        if ".." in raw.parts:
-            raise RuntimeError(error) from exc
-        raise
-    except OSError as exc:
-        raise RuntimeError(error) from exc
-    finally:
-        if parent_fd >= 0:
-            os.close(parent_fd)
-
-
-def _read_bounded_regular_at(
-    parent_fd: int,
-    name: str,
-    *,
-    max_bytes: int,
-) -> tuple[bytes, _FilesystemIdentity]:
-    """Read one bounded regular file through a bound parent descriptor."""
-    metadata = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
-    if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > max_bytes:
-        raise RuntimeError("linked worktree metadata file is unsafe")
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
-    if os.name == "posix":
-        flags |= getattr(os, "O_NOFOLLOW", 0)
-    descriptor = os.open(name, flags, dir_fd=parent_fd)
-    try:
-        opened = os.fstat(descriptor)
-        if (opened.st_dev, opened.st_ino) != (metadata.st_dev, metadata.st_ino) or not stat.S_ISREG(
-            opened.st_mode
-        ):
-            raise RuntimeError("linked worktree metadata file changed")
-        payload = os.read(descriptor, max_bytes + 1)
-        if len(payload) > max_bytes or os.read(descriptor, 1):
-            raise RuntimeError("linked worktree metadata file is too large")
-    finally:
-        os.close(descriptor)
-    return payload, _filesystem_identity(opened)
-
-
-def _read_bounded_git_pointer_at(parent_fd: int, name: str) -> tuple[str, _FilesystemIdentity]:
-    """Read one small regular Git metadata file without following a link."""
-    payload, identity = _read_bounded_regular_at(parent_fd, name, max_bytes=4096)
-    try:
-        return payload.decode("utf-8").strip(), identity
-    except UnicodeDecodeError as exc:
-        raise RuntimeError("linked worktree metadata pointer is invalid") from exc
-
-
-def _reject_object_alternates_at(objects_fd: int) -> None:
-    """Reject a repository object store that can redirect object reads."""
-    try:
-        info_fd, _identity = _open_directory_at_no_follow(objects_fd, "info")
-    except FileNotFoundError:
-        return
-    try:
-        try:
-            os.stat("alternates", dir_fd=info_fd, follow_symlinks=False)
-        except FileNotFoundError:
-            return
-        raise RuntimeError("linked worktree object store has unsafe alternates")
-    finally:
-        os.close(info_fd)
-
-
-def _reject_portable_object_alternates(objects: Path) -> None:
-    """Reject an alternate-object entry without following a portable path."""
-    info = objects / "info"
-    try:
-        _portable_path_identity(info, directory=True)
-    except FileNotFoundError:
-        return
-    try:
-        (info / "alternates").lstat()
-    except FileNotFoundError:
-        return
-    raise RuntimeError("linked worktree object store has unsafe alternates")
-
-
-def _regular_file_identity_at(parent_fd: int, name: str) -> _FilesystemIdentity:
-    """Open one regular metadata file and return its no-follow identity."""
-    metadata = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
-    if not stat.S_ISREG(metadata.st_mode):
-        raise RuntimeError("linked worktree metadata file is unsafe")
-    flags = os.O_RDONLY | os.O_CLOEXEC
-    if os.name == "posix":
-        flags |= getattr(os, "O_NOFOLLOW", 0)
-    descriptor = os.open(name, flags, dir_fd=parent_fd)
-    try:
-        opened = os.fstat(descriptor)
-        if (opened.st_dev, opened.st_ino) != (metadata.st_dev, metadata.st_ino) or not stat.S_ISREG(
-            opened.st_mode
-        ):
-            raise RuntimeError("linked worktree metadata file changed")
-        return _filesystem_identity(opened)
-    finally:
-        os.close(descriptor)
-
-
-def _read_branch_ref(
-    common_fd: int,
-    common_dir: Path,
-    branch_ref: str,
-) -> str:
-    """Read one direct loose or packed branch reference from bound metadata."""
-    components = tuple(branch_ref.split("/"))
-    if (
-        len(components) < 3
-        or components[:2] != ("refs", "heads")
-        or any(component in {"", ".", ".."} for component in components)
-    ):
-        raise RuntimeError("linked worktree branch reference is invalid")
-    descriptors: list[int] = []
-    parent_fd = common_fd
-    try:
-        try:
-            for component in components[:-1]:
-                parent_fd, _identity = _open_directory_at_no_follow(parent_fd, component)
-                descriptors.append(parent_fd)
-            value, _identity = _read_bounded_git_pointer_at(parent_fd, components[-1])
-        except FileNotFoundError:
-            value = ""
-    finally:
-        for descriptor in reversed(descriptors):
-            os.close(descriptor)
-    if value:
-        if not _is_full_commit_sha(value):
-            raise RuntimeError("linked worktree branch reference is invalid")
-        return value
-
-    try:
-        packed_bytes, _packed_identity = _read_bounded_regular_at(
-            common_fd,
-            "packed-refs",
-            max_bytes=IMPLEMENTATION_INSPECTION_METADATA_MAX_BYTES,
-        )
-    except FileNotFoundError:
-        packed_bytes = b""
-    try:
-        packed = packed_bytes.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise RuntimeError("linked worktree packed references are invalid") from exc
-    matches = [
-        line.partition(" ")[0]
-        for line in packed.splitlines()
-        if not line.startswith(("#", "^")) and line.partition(" ")[2] == branch_ref
-    ]
-    if len(matches) != 1 or not _is_full_commit_sha(matches[0]):
-        raise RuntimeError("linked worktree branch reference is unavailable")
-    return matches[0]
-
-
-def _portable_path_identity(
-    path: Path,
-    *,
-    directory: bool,
-    bound_path: Path | None = None,
-    bound_identity: _FilesystemIdentity | None = None,
-) -> _FilesystemIdentity:
-    """Validate the raw components of one absolute portable path."""
-    if not path.is_absolute():
-        raise RuntimeError("linked worktree metadata path is not absolute")
-    current = Path(path.anchor)
-    final = current.lstat()
-    metadata_stack = [final]
-    components = path.parts[1:]
-    for offset, component in enumerate(components):
-        if component == ".":
-            continue
-        if component == "..":
-            if len(metadata_stack) == 1:
-                raise RuntimeError("linked worktree metadata path escapes its anchor")
-            metadata_stack.pop()
-            current = current.parent
-            final = metadata_stack[-1]
-            continue
-        current /= component
-        metadata = current.lstat()
-        reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
-        if stat.S_ISLNK(metadata.st_mode) or (
-            getattr(metadata, "st_file_attributes", 0) & reparse_flag
-        ):
-            raise RuntimeError("linked worktree metadata path has a reparse point")
-        if offset != len(components) - 1 and not stat.S_ISDIR(metadata.st_mode):
-            raise RuntimeError("linked worktree metadata path prefix is unsafe")
-        final = metadata
-        metadata_stack.append(metadata)
-        identity = _filesystem_identity(metadata)
-        if bound_path is not None and current == bound_path and identity != bound_identity:
-            raise RuntimeError("linked worktree metadata directory changed")
-    expected_type = stat.S_ISDIR if directory else stat.S_ISREG
-    if not expected_type(final.st_mode):
-        raise RuntimeError("linked worktree metadata path has an unsafe type")
-    return _filesystem_identity(final)
-
-
-def _portable_read_bounded_regular(
-    path: Path,
-    *,
-    max_bytes: int,
-) -> tuple[bytes, _FilesystemIdentity]:
-    """Read one bounded regular file after portable reparse-point validation."""
-    identity = _portable_path_identity(path, directory=False)
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
-    descriptor = os.open(path, flags)
-    try:
-        opened = os.fstat(descriptor)
-        if _filesystem_identity(opened) != identity or opened.st_size > max_bytes:
-            raise RuntimeError("linked worktree metadata file changed")
-        payload = os.read(descriptor, max_bytes + 1)
-        if len(payload) > max_bytes or os.read(descriptor, 1):
-            raise RuntimeError("linked worktree metadata file is too large")
-    finally:
-        os.close(descriptor)
-    return payload, identity
-
-
-def _portable_read_git_pointer(path: Path) -> tuple[str, _FilesystemIdentity]:
-    """Read one portable bounded Git pointer."""
-    payload, identity = _portable_read_bounded_regular(path, max_bytes=4096)
-    try:
-        return payload.decode("utf-8").strip(), identity
-    except UnicodeDecodeError as exc:
-        raise RuntimeError("linked worktree metadata pointer is invalid") from exc
-
-
-def _normalized_metadata_path(base: Path, value: str) -> Path:
-    """Return one absolute lexical metadata path without resolving links."""
-    raw = Path(value)
-    candidate = raw if raw.is_absolute() else base / raw
-    return Path(os.path.abspath(candidate))
-
-
-def _portable_root_metadata_identity(
-    base: Path,
-    value: str,
-    *,
-    directory: bool,
-    base_identity: _FilesystemIdentity,
-    error: str,
-) -> tuple[Path, _FilesystemIdentity]:
-    """Validate and identify one portable Git metadata pointer."""
-    raw, relative = _metadata_path(base, value)
-    try:
-        identity = _portable_path_identity(
-            raw,
-            directory=directory,
-            bound_path=base if relative else None,
-            bound_identity=base_identity if relative else None,
-        )
-    except RuntimeError as exc:
-        if ".." in raw.parts:
-            raise RuntimeError(error) from exc
-        raise
-    except OSError as exc:
-        raise RuntimeError(error) from exc
-    return _normalized_metadata_path(base, value), identity
-
-
-def _portable_repository_git_root(repo_root: Path) -> _RepositoryGitRootBinding:
-    """Bind a primary or linked checkout to portable common Git metadata."""
-    repo_identity = _portable_path_identity(repo_root, directory=True)
-    marker = repo_root / ".git"
-    marker_metadata = marker.lstat()
-    if stat.S_ISDIR(marker_metadata.st_mode):
-        common_identity = _portable_path_identity(marker, directory=True)
-        return _RepositoryGitRootBinding(
-            common_dir=marker,
-            common_identity=common_identity,
-            intake_admin_name=None,
-            intake_admin_identity=None,
-            structural_identity=(repo_identity, common_identity),
-        )
-    if not stat.S_ISREG(marker_metadata.st_mode):
-        raise RuntimeError("repository root Git metadata is unsafe")
-    pointer, marker_identity = _portable_read_git_pointer(marker)
-    if not pointer.startswith("gitdir: "):
-        raise RuntimeError("repository root gitfile is invalid")
-    admin_dir, admin_identity = _portable_root_metadata_identity(
-        repo_root,
-        pointer.removeprefix("gitdir: "),
-        directory=True,
-        base_identity=repo_identity,
-        error="repository root gitfile is invalid",
-    )
-    back_pointer, back_pointer_identity = _portable_read_git_pointer(admin_dir / "gitdir")
-    back_path, back_identity = _portable_root_metadata_identity(
-        admin_dir,
-        back_pointer,
-        directory=False,
-        base_identity=admin_identity,
-        error="repository root admin back-pointer changed",
-    )
-    if back_path != marker or back_identity != marker_identity:
-        raise RuntimeError("repository root admin back-pointer changed")
-    common_pointer, common_pointer_identity = _portable_read_git_pointer(admin_dir / "commondir")
-    common_dir, common_identity = _portable_root_metadata_identity(
-        admin_dir,
-        common_pointer,
-        directory=True,
-        base_identity=admin_identity,
-        error="repository root common directory changed",
-    )
-    if admin_dir.parent != common_dir / "worktrees":
-        raise RuntimeError("repository root admin directory is unregistered")
-    return _RepositoryGitRootBinding(
-        common_dir=common_dir,
-        common_identity=common_identity,
-        intake_admin_name=admin_dir.name,
-        intake_admin_identity=admin_identity,
-        structural_identity=(
-            repo_identity,
-            marker_identity,
-            admin_identity,
-            back_pointer_identity,
-            common_pointer_identity,
-            common_identity,
-        ),
-    )
-
-
-def _repository_git_root(
-    repo_fd: int,
-    repo_root: Path,
-    repo_identity: _FilesystemIdentity,
-) -> tuple[int, _RepositoryGitRootBinding]:
-    """Bind a primary or linked checkout to common Git metadata."""
-    marker_metadata = os.stat(".git", dir_fd=repo_fd, follow_symlinks=False)
-    if stat.S_ISDIR(marker_metadata.st_mode):
-        common_fd, common_identity = _open_directory_at_no_follow(repo_fd, ".git")
-        return common_fd, _RepositoryGitRootBinding(
-            common_dir=repo_root / ".git",
-            common_identity=common_identity,
-            intake_admin_name=None,
-            intake_admin_identity=None,
-            structural_identity=(repo_identity, common_identity),
-        )
-    if not stat.S_ISREG(marker_metadata.st_mode):
-        raise RuntimeError("repository root Git metadata is unsafe")
-    pointer, marker_identity = _read_bounded_git_pointer_at(repo_fd, ".git")
-    if not pointer.startswith("gitdir: "):
-        raise RuntimeError("repository root gitfile is invalid")
-    admin_fd, admin_identity, admin_dir = _open_root_metadata_directory_no_follow(
-        repo_root,
-        pointer.removeprefix("gitdir: "),
-        base_identity=repo_identity,
-        error="repository root gitfile is invalid",
-    )
-    try:
-        back_pointer, back_pointer_identity = _read_bounded_git_pointer_at(admin_fd, "gitdir")
-        back_path, back_identity = _root_metadata_file_identity_no_follow(
-            admin_dir,
-            back_pointer,
-            base_identity=admin_identity,
-            error="repository root admin back-pointer changed",
-        )
-        if back_path != repo_root / ".git" or back_identity != marker_identity:
-            raise RuntimeError("repository root admin back-pointer changed")
-        common_pointer, common_pointer_identity = _read_bounded_git_pointer_at(
-            admin_fd, "commondir"
-        )
-        common_fd, common_identity, common_dir = _open_root_metadata_directory_no_follow(
-            admin_dir,
-            common_pointer,
-            base_identity=admin_identity,
-            error="repository root common directory changed",
-        )
-    finally:
-        os.close(admin_fd)
-    if admin_dir.parent != common_dir / "worktrees":
-        os.close(common_fd)
-        raise RuntimeError("repository root admin directory is unregistered")
-    return common_fd, _RepositoryGitRootBinding(
-        common_dir=common_dir,
-        common_identity=common_identity,
-        intake_admin_name=admin_dir.name,
-        intake_admin_identity=admin_identity,
-        structural_identity=(
-            repo_identity,
-            marker_identity,
-            admin_identity,
-            back_pointer_identity,
-            common_pointer_identity,
-            common_identity,
-        ),
-    )
-
-
-def _validate_registered_repository_admin(
-    registry_fd: int,
-    root: _RepositoryGitRootBinding,
-) -> None:
-    """Verify the linked repository root administration directory."""
-    if root.intake_admin_name is None:
-        return
-    descriptor, identity = _open_directory_at_no_follow(
-        registry_fd,
-        root.intake_admin_name,
-    )
-    try:
-        if identity != root.intake_admin_identity:
-            raise RuntimeError("repository root admin directory changed")
-    finally:
-        os.close(descriptor)
-
-
-def _portable_read_branch_ref(common_dir: Path, branch_ref: str) -> str:
-    """Read one loose or packed branch through portable validated paths."""
-    components = tuple(branch_ref.split("/"))
-    windows_components = tuple(PureWindowsPath(component) for component in components)
-    if (
-        len(components) < 3
-        or components[:2] != ("refs", "heads")
-        or any(component in {"", ".", ".."} for component in components)
-        or any(
-            component.drive or component.root or component.parts != (value,)
-            for value, component in zip(components, windows_components, strict=True)
-        )
-    ):
-        raise RuntimeError("linked worktree branch reference is invalid")
-    loose = common_dir.joinpath(*components)
-    if not loose.is_relative_to(common_dir):
-        raise RuntimeError("linked worktree branch reference is invalid")
-    try:
-        payload, _identity = _portable_read_bounded_regular(loose, max_bytes=4096)
-    except FileNotFoundError:
-        payload = b""
-    if payload:
-        try:
-            value = payload.decode("utf-8").strip()
-        except UnicodeDecodeError as exc:
-            raise RuntimeError("linked worktree branch reference is invalid") from exc
-        if not _is_full_commit_sha(value):
-            raise RuntimeError("linked worktree branch reference is invalid")
-        return value
-    try:
-        packed, _identity = _portable_read_bounded_regular(
-            common_dir / "packed-refs",
-            max_bytes=IMPLEMENTATION_INSPECTION_METADATA_MAX_BYTES,
-        )
-    except FileNotFoundError:
-        packed = b""
-    try:
-        packed_text = packed.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise RuntimeError("linked worktree packed references are invalid") from exc
-    matches = [
-        line.partition(" ")[0]
-        for line in packed_text.splitlines()
-        if not line.startswith(("#", "^")) and line.partition(" ")[2] == branch_ref
-    ]
-    if len(matches) != 1 or not _is_full_commit_sha(matches[0]):
-        raise RuntimeError("linked worktree branch reference is unavailable")
-    return matches[0]
-
-
-def _git_environment_for_binding(
-    binding: _LinkedWorktreeBinding,
-) -> _LinkedWorktreeGitEnvironment:
-    """Return one controlled Git environment for a validated binding."""
-    env = _isolated_checkout_git_env()
-    env.update(
-        {
-            "GIT_DIR": str(binding.admin_dir),
-            "GIT_COMMON_DIR": str(binding.common_dir),
-            "GIT_INDEX_FILE": str(binding.index),
-            "GIT_WORK_TREE": str(binding.worktree),
-            "GIT_OBJECT_DIRECTORY": str(binding.objects),
-        }
-    )
-    return _LinkedWorktreeGitEnvironment(env, binding)
-
-
-def _linked_worktree_git_env_portable(
-    repo_root: Path,
-    worktree: Path,
-) -> _LinkedWorktreeGitEnvironment:
-    """Bind a linked worktree on a host without descriptor-relative traversal."""
-    root = _portable_repository_git_root(repo_root)
-    worktree_identity = _portable_path_identity(worktree, directory=True)
-    common_dir = root.common_dir
-    common_identity = root.common_identity
-    registered_root = common_dir / "worktrees"
-    registry_identity = _portable_path_identity(registered_root, directory=True)
-    if root.intake_admin_name is not None:
-        intake_admin_identity = _portable_path_identity(
-            registered_root / root.intake_admin_name,
-            directory=True,
-        )
-        if intake_admin_identity != root.intake_admin_identity:
-            raise RuntimeError("repository root admin directory changed")
-    pointer, marker_identity = _portable_read_git_pointer(worktree / ".git")
-    if not pointer.startswith("gitdir: "):
-        raise RuntimeError("linked worktree gitfile is invalid")
-    admin_dir = _normalized_metadata_path(worktree, pointer.removeprefix("gitdir: "))
-    if admin_dir.parent != registered_root:
-        raise RuntimeError("linked worktree admin directory is unregistered")
-    admin_identity = _portable_path_identity(admin_dir, directory=True)
-    back_pointer, back_pointer_identity = _portable_read_git_pointer(admin_dir / "gitdir")
-    if _normalized_metadata_path(admin_dir, back_pointer) != worktree / ".git":
-        raise RuntimeError("linked worktree admin back-pointer changed")
-    common_pointer, common_pointer_identity = _portable_read_git_pointer(admin_dir / "commondir")
-    if _normalized_metadata_path(admin_dir, common_pointer) != common_dir:
-        raise RuntimeError("linked worktree common directory changed")
-    head_pointer, head_identity = _portable_read_git_pointer(admin_dir / "HEAD")
-    if not head_pointer.startswith("ref: "):
-        raise RuntimeError("linked worktree HEAD is detached")
-    branch_ref = head_pointer.removeprefix("ref: ")
-    branch_sha = _portable_read_branch_ref(common_dir, branch_ref)
-    index = admin_dir / "index"
-    index_identity = _portable_path_identity(index, directory=False)
-    objects = common_dir / "objects"
-    objects_identity = _portable_path_identity(objects, directory=True)
-    _reject_portable_object_alternates(objects)
-    binding = _LinkedWorktreeBinding(
-        repo_root=repo_root,
-        worktree=worktree,
-        common_dir=common_dir,
-        admin_dir=admin_dir,
-        index=index,
-        objects=objects,
-        branch_ref=branch_ref,
-        branch_sha=branch_sha,
-        common_identity=common_identity,
-        index_identity=index_identity,
-        structural_identity=(
-            *root.structural_identity,
-            worktree_identity,
-            registry_identity,
-            admin_identity,
-            marker_identity,
-            back_pointer_identity,
-            common_pointer_identity,
-            head_identity,
-            objects_identity,
-        ),
-    )
-    return _git_environment_for_binding(binding)
-
-
-def _linked_worktree_git_env(
-    repo_root: Path,
-    worktree: Path,
-) -> _LinkedWorktreeGitEnvironment:
-    """Bind Git commands to one registered linked-worktree metadata graph."""
-    if not _secure_dir_fd_supported():
-        return _linked_worktree_git_env_portable(repo_root, worktree)
-    repo_fd, repo_identity = _open_directory_no_follow(repo_root)
-    descriptors = [repo_fd]
-    try:
-        worktree_fd, worktree_identity = _open_directory_no_follow(worktree)
-        descriptors.append(worktree_fd)
-        common_fd, root = _repository_git_root(repo_fd, repo_root, repo_identity)
-        descriptors.append(common_fd)
-        common_dir = root.common_dir
-        common_identity = root.common_identity
-        registry_fd, registry_identity = _open_directory_at_no_follow(common_fd, "worktrees")
-        descriptors.append(registry_fd)
-        _validate_registered_repository_admin(registry_fd, root)
-        pointer, marker_identity = _read_bounded_git_pointer_at(worktree_fd, ".git")
-        prefix = "gitdir: "
-        if not pointer.startswith(prefix):
-            raise RuntimeError("linked worktree gitfile is invalid")
-        registered_root = common_dir / "worktrees"
-        raw_admin = Path(pointer.removeprefix(prefix))
-        if not raw_admin.is_absolute():
-            raw_admin = worktree / raw_admin
-        admin_dir = raw_admin.resolve(strict=True)
-        if admin_dir.parent != registered_root or raw_admin.is_symlink():
-            raise RuntimeError("linked worktree admin directory is unregistered")
-        admin_fd, admin_identity = _open_directory_at_no_follow(registry_fd, admin_dir.name)
-        descriptors.append(admin_fd)
-        back_pointer, back_pointer_identity = _read_bounded_git_pointer_at(admin_fd, "gitdir")
-        raw_back_pointer = Path(back_pointer)
-        if not raw_back_pointer.is_absolute():
-            raw_back_pointer = admin_dir / raw_back_pointer
-        if raw_back_pointer.resolve(strict=True) != worktree / ".git":
-            raise RuntimeError("linked worktree admin back-pointer changed")
-        common_pointer, common_pointer_identity = _read_bounded_git_pointer_at(
-            admin_fd, "commondir"
-        )
-        raw_common = Path(common_pointer)
-        if not raw_common.is_absolute():
-            raw_common = admin_dir / raw_common
-        if raw_common.resolve(strict=True) != common_dir:
-            raise RuntimeError("linked worktree common directory changed")
-        head_pointer, head_identity = _read_bounded_git_pointer_at(admin_fd, "HEAD")
-        head_prefix = "ref: "
-        if not head_pointer.startswith(head_prefix):
-            raise RuntimeError("linked worktree HEAD is detached")
-        branch_ref = head_pointer.removeprefix(head_prefix)
-        branch_sha = _read_branch_ref(common_fd, common_dir, branch_ref)
-        index_identity = _regular_file_identity_at(admin_fd, "index")
-        objects_fd, objects_identity = _open_directory_at_no_follow(common_fd, "objects")
-        descriptors.append(objects_fd)
-        _reject_object_alternates_at(objects_fd)
-        index = admin_dir / "index"
-        objects = common_dir / "objects"
-        binding = _LinkedWorktreeBinding(
-            repo_root=repo_root,
-            worktree=worktree,
-            common_dir=common_dir,
-            admin_dir=admin_dir,
-            index=index,
-            objects=objects,
-            branch_ref=branch_ref,
-            branch_sha=branch_sha,
-            common_identity=common_identity,
-            index_identity=index_identity,
-            structural_identity=(
-                *root.structural_identity,
-                worktree_identity,
-                registry_identity,
-                admin_identity,
-                marker_identity,
-                back_pointer_identity,
-                common_pointer_identity,
-                head_identity,
-                objects_identity,
-            ),
-        )
-    finally:
-        for descriptor in reversed(descriptors):
-            os.close(descriptor)
-    return _git_environment_for_binding(binding)
-
-
-@contextmanager
-def _private_linked_worktree_git_env(
-    linked_env: dict[str, str],
-    *,
-    detached_head: str,
-    durable_git_dir: Path | None = None,
-) -> Iterator[dict[str, str]]:
-    """Use private Git metadata with the validated real index and object store."""
-    if not _is_full_commit_sha(detached_head):
-        raise RuntimeError("private Git metadata HEAD is invalid")
-    with ExitStack() as stack:
-        if durable_git_dir is None:
-            temporary = stack.enter_context(
-                tempfile.TemporaryDirectory(prefix="hephaestus-recovery-git-")
-            )
-            git_dir = Path(temporary) / "git"
-            git_dir.mkdir(mode=0o700)
-        else:
-            git_dir = durable_git_dir.resolve(strict=True)
-            if durable_git_dir.is_symlink() or not git_dir.is_dir():
-                raise RuntimeError("durable private Git metadata is invalid")
-        (git_dir / "refs" / "heads").mkdir(parents=True, exist_ok=True)
-        (git_dir / "refs" / "tags").mkdir(parents=True, exist_ok=True)
-        head_path = git_dir / "HEAD"
-        if head_path.exists():
-            if (
-                head_path.is_symlink()
-                or head_path.read_text(encoding="ascii").strip() != detached_head
-            ):
-                raise RuntimeError("durable private Git HEAD changed")
-        else:
-            write_secure(head_path, f"{detached_head}\n", permissions=0o600)
-        if len(detached_head) == 64:
-            write_secure(
-                git_dir / "config",
-                "[core]\n\trepositoryformatversion = 1\n[extensions]\n\tobjectformat = sha256\n",
-                permissions=0o600,
-            )
-        binding = getattr(linked_env, "binding", None)
-        if isinstance(binding, _LinkedWorktreeBinding):
-            rebound = _linked_worktree_git_env(binding.repo_root, binding.worktree)
-            if not _linked_binding_matches(linked_env, rebound, include_index=True):
-                kind = "durable" if durable_git_dir is not None else "temporary"
-                raise RuntimeError(
-                    f"linked worktree metadata changed before {kind} private Git use "
-                    f"({binding.index_identity!r} != {rebound.binding.index_identity!r})"
-                )
-            linked_env = rebound
-            binding = rebound.binding
-        objects = (
-            binding.objects
-            if isinstance(binding, _LinkedWorktreeBinding)
-            else Path(linked_env["GIT_COMMON_DIR"]) / "objects"
-        )
-        env = dict(linked_env)
-        env.update(
-            {
-                "GIT_DIR": str(git_dir),
-                "GIT_COMMON_DIR": str(git_dir),
-                "GIT_OBJECT_DIRECTORY": str(objects),
-                "GIT_OPTIONAL_LOCKS": "0",
-            }
-        )
-        env.pop("GIT_CONFIG", None)
-        yield _PrivateLinkedWorktreeGitEnvironment(env, linked_env)
-
-
-def _linked_binding_matches(
-    expected_env: dict[str, str],
-    current_env: dict[str, str],
-    *,
-    include_index: bool,
-) -> bool:
-    """Return whether two environments bind to the same metadata objects."""
-    expected = getattr(expected_env, "binding", None)
-    current = getattr(current_env, "binding", None)
-    if isinstance(expected, _LinkedWorktreeBinding) and isinstance(current, _LinkedWorktreeBinding):
-        return (
-            expected.repo_root == current.repo_root
-            and expected.worktree == current.worktree
-            and expected.common_dir == current.common_dir
-            and expected.admin_dir == current.admin_dir
-            and expected.index == current.index
-            and expected.objects == current.objects
-            and expected.branch_ref == current.branch_ref
-            and expected.structural_identity == current.structural_identity
-            and (not include_index or expected.index_identity == current.index_identity)
-        )
-    keys = ("GIT_DIR", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_WORK_TREE")
-    return all(expected_env.get(key) == current_env.get(key) for key in keys)
-
-
 def _git_job_checkout_candidate(job: GitJob) -> Path | None:
     """Return one operation-supplied existing checkout candidate."""
     candidates: list[object] = []
@@ -3739,12 +2137,6 @@ def _intake_common_lock_path(manager: RepoIntakeManager) -> Path:
     return common_dir / lock_path.name
 
 
-def _repository_lock_operation(description: str, fallback: str) -> str:
-    """Return one bounded operation name for repository-lock metadata."""
-    selected = description if isinstance(description, str) and description else fallback
-    return selected[:200]
-
-
 def _git_start_failure(
     job: GitJob,
     *,
@@ -3757,24 +2149,6 @@ def _git_start_failure(
     if job.deadline_s is not None and job.deadline_s <= started_s:
         return JobResult(ok=False, error="timeout")
     return None
-
-
-class _GitLockTimeoutError(TimeoutError):
-    """Carry the checkout lock layer and path for one bounded timeout."""
-
-    def __init__(
-        self,
-        *,
-        lock_path: Path | None = None,
-        lock_layer: str = "unknown",
-    ) -> None:
-        super().__init__("checkout lock timeout")
-        self.lock_path = lock_path
-        self.lock_layer = lock_layer
-
-
-class _GitLockInterruptedError(RuntimeError):
-    """Raised when shutdown interrupts a Git job while it waits for the repo lock."""
 
 
 class _GitCheckoutBindingError(RuntimeError):
@@ -3852,94 +2226,6 @@ def _revalidate_compatibility_lock_specs(
                 os.close(descriptor)
     except (OSError, RuntimeError, UnicodeError) as exc:
         raise RepoIntakeError("repository-intake lock path is unavailable") from exc
-
-
-def _ignore_local_agent_failure(error: BaseException) -> bool:
-    """Count only transport failures against the provider circuit."""
-    if isinstance(error, ConnectionError):
-        return False
-    if isinstance(error, AgentExecutionError) and error.__cause__ is not None:
-        error = error.__cause__
-    return not is_transient_subprocess_error(error)
-
-
-def _git_lock_failure_result(
-    exc: RepositoryLockError | _GitLockTimeoutError | _GitLockInterruptedError,
-    *,
-    job: GitJob | None = None,
-    attempt_started_s: float | None = None,
-) -> JobResult:
-    """Map a typed Git-lock failure to the corresponding bounded job result."""
-    if isinstance(exc, RepositoryLockError):
-        details = dict(exc.details)
-        if job is not None:
-            details["repository"] = job.repo
-            details["waiting_operation"] = _repository_lock_operation(job.descr, job.op)
-        if isinstance(exc, (LockTimeoutError, LockMetadataError)):
-            return JobResult(ok=False, error=exc.failure_kind, value=details)
-        return JobResult(
-            ok=False,
-            interrupted=True,
-            error="interrupted_waiting_for_git_lock",
-            value=details,
-        )
-    if isinstance(exc, _GitLockTimeoutError):
-        if job is None or attempt_started_s is None:
-            return JobResult(ok=False, error="lock_metadata_error")
-        value: dict[str, object] = {
-            "failure_kind": "lock_metadata_error",
-            "repository": job.repo,
-            "waiting_operation": _repository_lock_operation(job.descr, job.op),
-            "waiting_process_id": os.getpid(),
-            "holder_operation": None,
-            "holder_process_id": None,
-            "holder_acquired_at": None,
-            "holder_source": "lock_metadata",
-            "wait_duration_s": round(max(time.monotonic() - attempt_started_s, 0.0), 3),
-        }
-        return JobResult(ok=False, error="lock_metadata_error", value=value)
-    return JobResult(
-        ok=False,
-        interrupted=True,
-        error="interrupted_waiting_for_git_lock",
-    )
-
-
-def _dirty_direct_failure_result(
-    exc: Exception,
-    *,
-    fallback_error: str,
-    fallback_value: dict[str, object],
-    timeout_value: dict[str, object] | None = None,
-) -> JobResult:
-    """Map one dirty writer timeout and preserve the operation failure contract."""
-    if (
-        isinstance(exc, SourceWorkspacePreparationError)
-        and exc.cause is SourceWorkspacePreparationCause.GIT_TIMEOUT
-    ):
-        logger.warning(
-            "dirty direct continuation was not claimed: operation deadline hit "
-            "before the claim could complete",
-        )
-        return JobResult(ok=False, error="timeout", value=timeout_value)
-    logger.warning("dirty direct continuation was not claimed: %s", exc, exc_info=True)
-    return JobResult(
-        ok=False,
-        error=fallback_error,
-        value=fallback_value,
-    )
-
-
-def _git_environment_failure_result(
-    exc: _RebaseSigningEnvironmentError | _RemoteGitAuthenticationError,
-) -> JobResult:
-    """Map a controlled Git environment failure to a typed job result."""
-    failure_kind = (
-        "signing_configuration"
-        if isinstance(exc, _RebaseSigningEnvironmentError)
-        else "remote_authentication"
-    )
-    return JobResult(ok=False, error=str(exc), value={"failure_kind": failure_kind})
 
 
 @contextmanager
@@ -4021,445 +2307,6 @@ def _git_evidence_fields(job: GitJob, result: JobResult) -> dict[str, object]:
         if isinstance(summary, str) and summary:
             fields["rebase_conflict_agent_summary"] = redact_diagnostic_text(summary)[:500]
     return fields
-
-
-def _uses_codex_implementation_adapter(job: AgentJob) -> bool:
-    """Return true for a Codex implementation job with an adapter selection."""
-    return bool(
-        agent_runtime.requires_codex_implementation_isolation(job.agent)
-        and job.execution_request is not None
-        and job.execution_request.role is AgentRole.IMPLEMENTER
-        and any(
-            value is not None
-            for value in (
-                job.codex_isolation_adapter,
-                job.codex_isolation_deployment_lock,
-                job.codex_isolation_deployment_lock_sha256,
-                job.codex_isolation_request,
-            )
-        )
-    )
-
-
-@contextmanager
-def _codex_git_boundary(cwd: Path) -> Iterator[codex_worktree_boundary.CodexWorktreeBoundary]:
-    """Map Git receipt failures to one stable adapter error."""
-    try:
-        with codex_worktree_boundary.capture_codex_worktree_boundary(cwd) as boundary:
-            yield boundary
-    except codex_worktree_boundary.CodexWorktreeBoundaryError:
-        raise CodexIsolationError("codex_adapter_request_mismatch") from None
-
-
-def _codex_implementation_command(
-    *,
-    executable: Path,
-    worktree: Path,
-    model: str,
-    session_id: str | None,
-    sandbox: str,
-    operation: AgentOperation,
-    allowed_tools: tuple[str, ...],
-) -> tuple[str, ...]:
-    """Build one exact guest command from frozen worker inputs."""
-    command = [str(executable), "exec"]
-    if session_id:
-        command.extend(("resume", session_id))
-    selection = resolve_codex_model_selection(model)
-    if selection.model:
-        command.extend(("--model", selection.model))
-    if selection.reasoning_effort not in {"", "default"}:
-        command.extend(("-c", f"model_reasoning_effort={json.dumps(selection.reasoning_effort)}"))
-    if session_id:
-        command.extend(
-            (
-                "-c",
-                f"sandbox_mode={json.dumps(sandbox)}",
-                "-c",
-                'approval_policy="never"',
-            )
-        )
-    else:
-        command.extend(
-            (
-                "--cd",
-                str(worktree),
-                "--sandbox",
-                sandbox,
-                "-c",
-                'approval_policy="never"',
-            )
-        )
-    command.extend(
-        (
-            "-c",
-            f"hephaestus_automation.operation={json.dumps(operation.value)}",
-            "-c",
-            "hephaestus_automation.allowed_tools="
-            + json.dumps(list(allowed_tools), separators=(",", ":")),
-            "--json",
-            "-",
-        )
-    )
-    return tuple(command)
-
-
-_CODEX_TOOL_CAPABILITIES = {
-    "Bash": "bash",
-    "Edit": "edit",
-    "Glob": "find",
-    "Grep": "grep",
-    "Read": "read",
-    "Write": "write",
-}
-_CODEX_NON_APPLICABLE_TOOLS = {
-    AgentOperation.ADDRESS_REVIEW: frozenset({"Skill", "Task"}),
-}
-_CODEX_OPERATION_TOOLS = {
-    AgentOperation.IMPLEMENT_INSPECT: ("Glob", "Grep", "Read"),
-    AgentOperation.IMPLEMENT: ("Bash", "Edit", "Glob", "Grep", "Read", "Write"),
-    AgentOperation.REBASE_CONFLICT: ("Edit", "Glob", "Grep", "Read", "Write"),
-    AgentOperation.TEST_FIX: ("Bash", "Edit", "Glob", "Grep", "Read", "Write"),
-    AgentOperation.ADDRESS_REVIEW: ("Bash", "Edit", "Glob", "Grep", "Read", "Write"),
-}
-
-
-def _codex_implementation_grants(job: AgentJob) -> tuple[str, tuple[str, ...], bool]:
-    """Resolve and validate the operation-specific Codex grants."""
-    execution = job.execution_request
-    if execution is None or execution.role is not AgentRole.IMPLEMENTER:
-        raise CodexIsolationError("codex_adapter_request_mismatch")
-    try:
-        operation_policy = resolve_policy(execution)
-    except ExecutionPolicyError:
-        raise CodexIsolationError("codex_adapter_request_mismatch") from None
-    workspace_write = operation_policy.filesystem is FilesystemMode.WORKTREE_RW
-    sandbox = "workspace-write" if workspace_write else "read-only"
-    if job.sandbox != sandbox:
-        raise CodexIsolationError("codex_adapter_request_mismatch")
-    expected_tools = _CODEX_OPERATION_TOOLS.get(execution.operation)
-    if expected_tools is None:
-        raise CodexIsolationError("codex_adapter_request_mismatch")
-    declared_tools = {
-        value.strip()
-        for value in (job.allowed_tools or ",".join(expected_tools)).split(",")
-        if value.strip()
-    }
-    non_applicable = _CODEX_NON_APPLICABLE_TOOLS.get(execution.operation, frozenset())
-    allowed_tools = tuple(sorted(declared_tools - non_applicable))
-    capabilities = {_CODEX_TOOL_CAPABILITIES.get(value, "") for value in allowed_tools}
-    if (
-        allowed_tools != expected_tools
-        or "" in capabilities
-        or not capabilities <= operation_policy.builtins
-    ):
-        raise CodexIsolationError("codex_adapter_request_mismatch")
-    return sandbox, allowed_tools, workspace_write
-
-
-def _reject_codex_terminal_cleanup_tombstone(profiles: Path) -> None:
-    """Reject a session store while terminal cleanup is incomplete."""
-    terminal_cleanup = profiles.with_name(profiles.name + ".terminal-cleanup")
-    try:
-        terminal_cleanup.lstat()
-    except FileNotFoundError:
-        return
-    except OSError:
-        raise CodexIsolationError("codex_adapter_inventory_uncertain") from None
-    raise CodexIsolationError("codex_adapter_inventory_uncertain")
-
-
-def _codex_private_profile(job: AgentJob, build_root: Path) -> Path:
-    """Return one durable profile that is bound to the issue and cycle."""
-    logical_session = job.session_key or job.session_agent
-    if not logical_session:
-        raise CodexIsolationError("codex_adapter_request_mismatch")
-    identity = canonical_sha256(
-        (job.repo, int(job.issue), logical_session, str(job.cwd.resolve(strict=True)), job.model)
-    )
-    worktree = job.cwd.resolve(strict=True)
-    profiles = worktree.parent / f".{worktree.name}-codex-sessions"
-    _reject_codex_terminal_cleanup_tombstone(profiles)
-    descriptor = -1
-    try:
-        with suppress(FileExistsError):
-            profiles.mkdir(mode=0o700)
-        lexical = profiles.lstat()
-        descriptor = os.open(
-            profiles,
-            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
-        )
-        opened = os.fstat(descriptor)
-        if (
-            not stat.S_ISDIR(lexical.st_mode)
-            or lexical.st_uid != os.geteuid()
-            or (lexical.st_dev, lexical.st_ino) != (opened.st_dev, opened.st_ino)
-        ):
-            raise OSError("invalid Codex profile root")
-        os.fchmod(descriptor, 0o700)
-        canonical_profiles = profiles.resolve(strict=True)
-        if canonical_profiles != profiles.absolute():
-            raise OSError("Codex profile root is not canonical")
-    except OSError:
-        raise CodexIsolationError("codex_adapter_protocol_mismatch") from None
-    finally:
-        if descriptor >= 0:
-            os.close(descriptor)
-    if canonical_profiles.is_relative_to(worktree) or not build_root.is_relative_to(worktree):
-        raise CodexIsolationError("codex_adapter_protocol_mismatch")
-    profile = canonical_profiles / identity
-    if profile.is_symlink():
-        raise CodexIsolationError("codex_adapter_protocol_mismatch")
-    receipt_paths = (profile / ".active.json", profile / ".quarantine.json")
-    if any(path.exists() or path.is_symlink() for path in receipt_paths):
-        raise CodexIsolationError("codex_adapter_inventory_uncertain")
-    try:
-        with suppress(FileExistsError):
-            profile.mkdir(mode=0o700)
-        profile_status = profile.lstat()
-        if (
-            not stat.S_ISDIR(profile_status.st_mode)
-            or profile_status.st_uid != os.geteuid()
-            or stat.S_IMODE(profile_status.st_mode) != 0o700
-        ):
-            raise OSError("invalid Codex durable store")
-        runs = profile / ".runs"
-        with suppress(FileExistsError):
-            runs.mkdir(mode=0o700)
-        runs_status = runs.lstat()
-        if (
-            not stat.S_ISDIR(runs_status.st_mode)
-            or runs_status.st_uid != os.geteuid()
-            or stat.S_IMODE(runs_status.st_mode) != 0o700
-        ):
-            raise OSError("invalid Codex run store")
-    except OSError:
-        raise CodexIsolationError("codex_adapter_protocol_mismatch") from None
-    return profile
-
-
-def _initialize_codex_adapter(
-    admission: codex_adapter_admission.CodexAdapterAdmission,
-) -> CodexIsolationAdapterV1:
-    """Initialize one admitted adapter and check its locked identity."""
-    factory = admission.factory
-    if (
-        not callable(factory)
-        or getattr(factory, "codex_isolation_api_version", None)
-        != admission.lock.adapter_api_version
-    ):
-        raise CodexIsolationError("codex_adapter_protocol_mismatch")
-    try:
-        adapter = factory()
-    except CodexIsolationError:
-        raise
-    except BaseException:
-        raise CodexIsolationError("codex_adapter_initialization_failed") from None
-    return cast(CodexIsolationAdapterV1, adapter)
-
-
-@contextmanager
-def _owned_codex_adapter(
-    admission: codex_adapter_admission.CodexAdapterAdmission,
-) -> Iterator[CodexIsolationAdapterV1]:
-    """Close one admitted helper on all initialization and execution paths."""
-    adapter: CodexIsolationAdapterV1 | None = None
-    try:
-        adapter = _initialize_codex_adapter(admission)
-        yield adapter
-    finally:
-        owner = adapter if adapter is not None else admission.factory
-        close_adapter = getattr(owner, "_close", None)
-        if callable(close_adapter):
-            close_adapter()
-
-
-def _validate_staged_codex_executable(executable: StagedLinuxExecutable) -> None:
-    """Recheck the staged path identity and bytes without following a link."""
-    descriptor = -1
-    try:
-        descriptor = os.open(
-            executable.path,
-            os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
-        )
-        value = os.fstat(descriptor)
-        identity = (
-            value.st_dev,
-            value.st_ino,
-            value.st_mode,
-            value.st_uid,
-            value.st_size,
-            value.st_mtime_ns,
-        )
-        digest = hashlib.sha256()
-        offset = 0
-        while True:
-            chunk = os.pread(descriptor, 1024 * 1024, offset)
-            if not chunk:
-                break
-            digest.update(chunk)
-            offset += len(chunk)
-        if identity != executable.file_identity or digest.hexdigest() != executable.digest:
-            raise CodexIsolationError("codex_adapter_request_mismatch")
-    except CodexIsolationError:
-        raise
-    except OSError:
-        raise CodexIsolationError("codex_adapter_request_mismatch") from None
-    finally:
-        if descriptor >= 0:
-            os.close(descriptor)
-
-
-def _run_isolated_codex_effort_attempts(
-    execute: Callable[[str], agent_runtime.AgentRunResult], model: str
-) -> agent_runtime.AgentRunResult:
-    """Retry one verified pre-work effort failure through the admitted boundary."""
-    selection = resolve_codex_model_selection(model)
-    try:
-        return execute(selection.reference)
-    except agent_runtime._CodexReasoningEffortRejectedError:
-        if selection.reasoning_effort in {"", "default"}:
-            raise
-    return execute(AgentModelSelection(selection.model, "default"))
-
-
-def _codex_implementation_request(
-    *,
-    job: AgentJob,
-    worktree: Path,
-    prompt: str,
-    private_profile: Path,
-    admission: codex_adapter_admission.CodexAdapterAdmission,
-    git_receipt: CodexGitReceiptV1,
-    executable: StagedLinuxExecutable,
-    model_reference: str | None = None,
-    deadline_s: float | None = None,
-) -> CodexIsolationRequestV1:
-    """Build the complete frozen request for one admitted adapter."""
-    lock = admission.lock
-    execution = job.execution_request
-    if execution is None:
-        raise CodexIsolationError("codex_adapter_request_mismatch")
-    sandbox, allowed_tools, workspace_write = _codex_implementation_grants(job)
-    if executable.digest != lock.extracted_elf_sha256:
-        raise CodexIsolationError("codex_adapter_request_mismatch")
-    run_nonce = new_run_nonce()
-    ephemeral_profile = private_profile / ".runs" / run_nonce / "profile"
-    fixed_git_environment = dict(git_receipt.fixed_environment)
-    environment = tuple(
-        sorted(
-            build_codex_implementation_child_env(
-                codex_home=ephemeral_profile,
-                fixed_git_environment=fixed_git_environment,
-            ).items()
-        )
-    )
-    if execution.lifecycle is SessionLifecycle.RESUME_REQUIRED:
-        if job.resume_binding is not None:
-            raise CodexIsolationError("codex_adapter_request_mismatch")
-        session_id = job.resume_session_id
-        if not session_id:
-            raise CodexIsolationError("codex_adapter_request_mismatch")
-    elif job.resume_binding is not None or job.resume_session_id is not None:
-        raise CodexIsolationError("codex_adapter_request_mismatch")
-    else:
-        session_id = None
-    session = json.dumps(
-        {
-            "allowed_tools": list(allowed_tools),
-            "lifecycle": execution.lifecycle.value,
-            "operation": execution.operation.value,
-            "session_id": session_id,
-        },
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    command = _codex_implementation_command(
-        executable=executable.path,
-        worktree=worktree,
-        model=job.model if model_reference is None else model_reference,
-        session_id=session_id,
-        sandbox=sandbox,
-        operation=execution.operation,
-        allowed_tools=allowed_tools,
-    )
-    profile_read_only, profile_read_write = agent_runtime._codex_profile_policy_paths(
-        ephemeral_profile,
-        run_nonce,
-    )
-    read_only_mounts = {
-        *git_receipt.read_only_paths,
-        str(executable.path),
-        *profile_read_only,
-    }
-    read_write_mounts = set(profile_read_write)
-    if workspace_write:
-        read_write_mounts.update(git_receipt.read_write_paths)
-    else:
-        read_only_mounts.update(git_receipt.read_write_paths)
-    policy = CodexExecutionPolicyV1(
-        schema_version=1,
-        read_only_mounts=tuple(sorted(read_only_mounts)),
-        read_write_mounts=tuple(sorted(read_write_mounts)),
-        protected_overlay_mounts=tuple(sorted(git_receipt.protected_paths)),
-        provider_relay=_CODEX_IMPLEMENTATION_PROVIDER_RELAY,
-        command_network="deny",
-        max_output_bytes=_CODEX_IMPLEMENTATION_OUTPUT_MAX_BYTES,
-        term_grace_seconds=_CODEX_IMPLEMENTATION_GRACE_SECONDS,
-        kill_grace_seconds=_CODEX_IMPLEMENTATION_GRACE_SECONDS,
-        pipe_close_grace_seconds=_CODEX_IMPLEMENTATION_GRACE_SECONDS,
-        inventory_quiescence_seconds=_CODEX_IMPLEMENTATION_INVENTORY_QUIESCENCE_SECONDS,
-        total_deadline=float(job.timeout_s),
-    )
-    worktree_identity = git_receipt.canonical_worktree
-    model = job.model
-    issue = int(job.issue)
-    session_identity = (
-        job.repo,
-        issue,
-        "implementer",
-        worktree_identity,
-        model,
-        session,
-    )
-    return CodexIsolationRequestV1(
-        schema_version=1,
-        run_nonce=run_nonce,
-        entry_point_name=lock.entry_point_name,
-        adapter_api_version=lock.adapter_api_version,
-        package_version=lock.adapter_version,
-        deployment_lock_digest=admission.deployment_lock_sha256,
-        wheel_digest=lock.wheel_sha256,
-        installed_tree_digest=lock.installed_tree_sha256,
-        command=command,
-        command_digest=canonical_sha256(command),
-        executable_platform="linux",
-        executable_target=lock.codex_target,
-        executable_release=lock.codex_release_tag,
-        executable_asset_name=lock.codex_archive_asset,
-        executable_path=str(executable.path),
-        executable_digest=executable.digest,
-        executable_file_identity=executable.file_identity,
-        guest_image_digest=lock.guest_image_sha256,
-        environment=environment,
-        environment_digest=canonical_sha256(environment),
-        prompt=prompt,
-        prompt_digest=canonical_sha256(prompt),
-        worktree_path=str(worktree),
-        private_profile_path=str(ephemeral_profile),
-        policy=policy,
-        policy_digest=canonical_sha256(policy),
-        git_receipt=git_receipt,
-        git_receipt_digest=canonical_sha256(git_receipt),
-        repository=job.repo,
-        issue=issue,
-        role="implementer",
-        worktree_identity=worktree_identity,
-        model=model,
-        session=session,
-        session_identity_digest=canonical_sha256(session_identity),
-        monotonic_deadline=(time.monotonic() + job.timeout_s if deadline_s is None else deadline_s),
-    )
 
 
 def _is_direct_writer_branch(issue: int, branch: str) -> bool:
