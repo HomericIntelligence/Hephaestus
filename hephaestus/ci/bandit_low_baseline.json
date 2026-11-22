@@ -1,5 +1,5 @@
 {
-  "generated_by": "issue #3687",
+  "generated_by": "issue #3698",
   "severity": "LOW",
   "counts": {
     "B101": 58,
@@ -8,7 +8,7 @@
     "B112": 1,
     "B311": 1,
     "B403": 3,
-    "B404": 91,
+    "B404": 92,
     "B603": 61,
     "B607": 20
   },
@@ -63,6 +63,7 @@
     "hephaestus/automation/pipeline/coordinator_sources.py::B101": 1,
     "hephaestus/automation/pipeline/git_cleanup.py::B101": 1,
     "hephaestus/automation/pipeline/implementer_checkpoint.py::B404": 1,
+    "hephaestus/automation/pipeline/job_failures.py::B404": 1,
     "hephaestus/automation/pipeline/repository_lock.py::B404": 1,
     "hephaestus/automation/pipeline/routing.py::B105": 1,
     "hephaestus/automation/pipeline/stages/implementation/implementation.py::B101": 1,
