@@ -19,6 +19,16 @@ from hephaestus.diagnostics import (
     redact_truncated_diagnostic_prefix,
 )
 
+__all__ = [
+    "_JOB_RESULT_ERROR_MAX",
+    "_JOB_RESULT_TAIL",
+    "bounded_pipeline_diagnostic",
+    "bounded_source_workspace_recovery",
+    "rebase_conflict_event_fields",
+    "redact_bounded_diagnostic_tails",
+    "redact_diagnostic_text",
+]
+
 _JOB_RESULT_TAIL = 4000  # chars of stdout/stderr retained in a JobResult
 _JOB_RESULT_ERROR_MAX = 500  # chars of error detail retained in a JobResult
 
