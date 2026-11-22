@@ -10522,9 +10522,11 @@ class WorkerPool:
                         "direct_scope_stale_state": {
                             "predicate": STALE_PREDICATE_CHECKOUT_PIN,
                             "branch": branch_name,
-                            "detail": f"checkout pin {base_sha} mismatch",
+                            "detail": (
+                                f"expected checkout pin {base_sha}, "
+                                f"observed checkout HEAD {checkout_head}"
+                            ),
                         },
-                        "direct_scope_reservation": {"branch": branch_name, "base_sha": base_sha},
                     },
                 )
         git_utils.reserve_remote_branch_if_absent(

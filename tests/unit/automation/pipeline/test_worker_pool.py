@@ -9327,10 +9327,10 @@ class TestGitOps:
             "direct_scope_stale_state": {
                 "predicate": "checkout_pin_mismatch",
                 "branch": "7-auto",
-                "detail": f"checkout pin {pinned_sha} mismatch",
+                "detail": f"expected checkout pin {pinned_sha}, observed checkout HEAD {'b' * 40}",
             },
-            "direct_scope_reservation": {"branch": "7-auto", "base_sha": pinned_sha},
         }
+        assert "direct_scope_reservation" not in result.value
         mock_manager.assert_not_called()
 
     def test_direct_pinned_impl_writer_lane_accepts_the_advanced_pin(
@@ -9440,10 +9440,10 @@ class TestGitOps:
             "direct_scope_stale_state": {
                 "predicate": "checkout_pin_mismatch",
                 "branch": branch,
-                "detail": f"checkout pin {second} mismatch",
+                "detail": f"expected checkout pin {second}, observed checkout HEAD {first}",
             },
-            "direct_scope_reservation": {"branch": branch, "base_sha": second},
         }
+        assert "direct_scope_reservation" not in result.value
 
     def test_direct_pinned_worktree_reserves_remote_branch_before_agent_admission(
         self,

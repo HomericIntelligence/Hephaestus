@@ -3757,6 +3757,7 @@ class TestWorktreeAndAdvise:
         assert outcome == Continue(next_state="WORKTREE_WAIT")
         assert item.attempts["implement"] == 0
         assert "git_error_retries" not in item.payload
+        assert "_direct_scope_reservation" not in item.payload
         assert "continuing from the managed lane" in caplog.text
         item.state = outcome.next_state
         retry = stage.step(item, ctx)

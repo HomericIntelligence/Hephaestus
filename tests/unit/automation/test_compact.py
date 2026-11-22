@@ -18,6 +18,7 @@ from hephaestus.agents.pi_session import create_pi_binding
 from hephaestus.automation.agent_config import (
     AGENT_PLAN_REVIEWER,
     AGENT_PR_REVIEWER,
+    learn_claude_timeout,
     session_uuid,
 )
 from hephaestus.automation.learn import compact_agent_session, compact_session
@@ -176,8 +177,8 @@ class TestCompactSession:
             output_fmt_idx = cmd.index("--output-format")
             assert cmd[output_fmt_idx + 1] == "text"
 
-    def test_compact_session_default_timeout_is_1200(self, tmp_path: Path) -> None:
-        """Verify compact_session uses a 1200s default subprocess timeout.
+    def test_compact_session_uses_the_learn_timeout_default(self, tmp_path: Path) -> None:
+        """Verify compact_session uses the bounded learn timeout by default.
 
         Slow sessions should be allowed to finish because throughput matters
         more than minimizing per-attempt latency.
@@ -187,7 +188,7 @@ class TestCompactSession:
 
             compact_session("test-repo", 42, AGENT_PLAN_REVIEWER, tmp_path)
 
-            assert mock_run.call_args[1]["timeout"] == 1200
+            assert mock_run.call_args[1]["timeout"] == learn_claude_timeout()
 
     def test_compact_session_uses_explicit_learn_timeout(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
