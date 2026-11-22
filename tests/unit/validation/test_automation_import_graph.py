@@ -34,6 +34,42 @@ _WORKER_FAILURE_ENTRYPOINTS = frozenset(
     }
 )
 _WORKER_REPOSITORY_LOCK_ENTRYPOINTS = frozenset({"_repository_lock_operation"})
+_WORKER_GIT_INSPECTION_ENTRYPOINTS = frozenset(
+    {
+        "_bounded_candidate_commit_paths",
+        "_candidate_commit_tree_evidence",
+        "_checkout_preflight_error",
+        "_filesystem_identity",
+        "_git_environment_for_binding",
+        "_inspect_candidate_with_private_git",
+        "_linked_binding_matches",
+        "_linked_worktree_git_env",
+        "_linked_worktree_git_env_portable",
+        "_metadata_path",
+        "_normalized_metadata_path",
+        "_open_absolute_directory_no_follow",
+        "_open_directory_at_no_follow",
+        "_open_directory_no_follow",
+        "_open_root_metadata_directory_no_follow",
+        "_portable_path_identity",
+        "_portable_read_bounded_regular",
+        "_portable_read_branch_ref",
+        "_portable_read_git_pointer",
+        "_portable_repository_git_root",
+        "_portable_root_metadata_identity",
+        "_private_linked_worktree_git_env",
+        "_read_bounded_git_pointer_at",
+        "_read_bounded_regular_at",
+        "_read_branch_ref",
+        "_regular_file_identity_at",
+        "_reject_object_alternates_at",
+        "_reject_portable_object_alternates",
+        "_repository_git_root",
+        "_root_metadata_file_identity_no_follow",
+        "_unsafe_local_git_config_key",
+        "_validate_registered_repository_admin",
+    }
+)
 _COMMIT_FORBIDDEN_PREFIXES = (
     "hephaestus.automation.pr_manager",
     "hephaestus.automation.github_api",
@@ -447,6 +483,7 @@ def test_worker_commit_call_path_excludes_github_product_modules() -> None:
         ("worker_pool.py", _WORKER_COMMIT_ENTRYPOINTS),
         ("job_failures.py", _WORKER_FAILURE_ENTRYPOINTS),
         ("repository_lock.py", _WORKER_REPOSITORY_LOCK_ENTRYPOINTS),
+        ("worker_git_inspection.py", _WORKER_GIT_INSPECTION_ENTRYPOINTS),
     )
     for filename, entrypoints in sources:
         source = _AUTOMATION_ROOT / "pipeline" / filename

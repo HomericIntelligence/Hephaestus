@@ -166,6 +166,7 @@ WRITING_STANDARD_SENTINEL = "ASD-STE100 Simplified Technical English, Issue 9"
 _WP = "hephaestus.automation.pipeline.worker_pool"
 _WCI = "hephaestus.automation.pipeline.worker_conflict_io"
 _JF = "hephaestus.automation.pipeline.job_failures"
+_WGI = "hephaestus.automation.pipeline.worker_git_inspection"
 
 
 def test_github_job_log_preserves_the_failure_cause_and_retry_action(
@@ -861,9 +862,9 @@ def test_metadata_directory_open_closes_descriptor_when_fstat_fails(
     real_close = os.close
     try:
         with (
-            patch(f"{_WP}.os.open", return_value=123),
-            patch(f"{_WP}.os.fstat", side_effect=OSError("injected fstat failure")),
-            patch(f"{_WP}.os.close") as close,
+            patch(f"{_WGI}.os.open", return_value=123),
+            patch(f"{_WGI}.os.fstat", side_effect=OSError("injected fstat failure")),
+            patch(f"{_WGI}.os.close") as close,
             pytest.raises(OSError, match="injected fstat failure"),
         ):
             if open_kind == "path":
@@ -884,12 +885,12 @@ def test_linked_worktree_binding_closes_repo_after_worktree_open_fails(
 
     identity = worker_pool_module._FilesystemIdentity(1, 2, stat.S_IFDIR)
     with (
-        patch(f"{_WP}._secure_dir_fd_supported", return_value=True),
+        patch(f"{_WGI}._secure_dir_fd_supported", return_value=True),
         patch(
-            f"{_WP}._open_directory_no_follow",
+            f"{_WGI}._open_directory_no_follow",
             side_effect=[(123, identity), OSError("injected worktree open failure")],
         ),
-        patch(f"{_WP}.os.close") as close,
+        patch(f"{_WGI}.os.close") as close,
         pytest.raises(OSError, match="injected worktree open failure"),
     ):
         worker_pool_module._linked_worktree_git_env(tmp_path, tmp_path / "writer")
@@ -6758,7 +6759,7 @@ class TestGitOps:
         _git(repo, "worktree", "add", "--detach", str(intake), head)
 
         with patch(
-            f"{_WP}._secure_dir_fd_supported",
+            f"{_WGI}._secure_dir_fd_supported",
             return_value=secure_descriptors,
         ):
             linked = worker_pool_module._linked_worktree_git_env(intake, writer)
@@ -6852,7 +6853,7 @@ class TestGitOps:
 
         with (
             patch(
-                f"{_WP}._secure_dir_fd_supported",
+                f"{_WGI}._secure_dir_fd_supported",
                 return_value=secure_descriptors,
             ),
             pytest.raises(RuntimeError, match=message),
@@ -6877,7 +6878,7 @@ class TestGitOps:
         _git(repo, "worktree", "add", "--detach", str(intake), head)
 
         with patch(
-            f"{_WP}._secure_dir_fd_supported",
+            f"{_WGI}._secure_dir_fd_supported",
             return_value=secure_descriptors,
         ):
             linked = worker_pool_module._linked_worktree_git_env(intake, writer)
@@ -6937,7 +6938,11 @@ class TestGitOps:
                 return_value=secure_descriptors,
             ),
             patch(
-                f"{_WP}._candidate_commit_tree_evidence",
+                f"{_WGI}._secure_dir_fd_supported",
+                return_value=secure_descriptors,
+            ),
+            patch(
+                f"{_WGI}._candidate_commit_tree_evidence",
                 side_effect=replace_after_capture,
             ),
         ):
@@ -6979,7 +6984,7 @@ class TestGitOps:
 
         with (
             patch(
-                f"{_WP}._secure_dir_fd_supported",
+                f"{_WGI}._secure_dir_fd_supported",
                 return_value=secure_descriptors,
             ),
             pytest.raises(RuntimeError, match="admin directory is unregistered"),
@@ -7004,7 +7009,7 @@ class TestGitOps:
         from hephaestus.automation.pipeline import worker_pool as worker_pool_module
 
         with (
-            patch(f"{_WP}._portable_read_bounded_regular") as read_regular,
+            patch(f"{_WGI}._portable_read_bounded_regular") as read_regular,
             pytest.raises(RuntimeError, match="branch reference is invalid"),
         ):
             worker_pool_module._portable_read_branch_ref(tmp_path, branch_ref)
@@ -7071,6 +7076,7 @@ class TestGitOps:
 
         with (
             patch(f"{_WP}._secure_dir_fd_supported", return_value=False),
+            patch(f"{_WGI}._secure_dir_fd_supported", return_value=False),
             patch(
                 "hephaestus.git.snapshot._secure_dir_fd_supported",
                 return_value=False,
@@ -7378,7 +7384,7 @@ class TestGitOps:
             return tree
 
         with patch(
-            f"{_WP}._candidate_commit_tree_evidence",
+            f"{_WGI}._candidate_commit_tree_evidence",
             side_effect=capture_then_change,
         ):
             result = pool._git_inspect_implementation_worktree(
@@ -7609,7 +7615,7 @@ class TestGitOps:
             return candidate
 
         with patch(
-            f"{_WP}._candidate_commit_tree_evidence",
+            f"{_WGI}._candidate_commit_tree_evidence",
             side_effect=replace_after_capture,
         ):
             result = pool._git_inspect_implementation_worktree(
@@ -7992,7 +7998,7 @@ class TestGitOps:
         porcelain = "".join(f"?? file-{index:04d}.txt\0" for index in range(513))
         with (
             patch(
-                f"{_WP}._run_bounded_git_output",
+                f"{_WGI}._run_bounded_git_output",
                 return_value=MagicMock(text=porcelain),
             ),
             pytest.raises(

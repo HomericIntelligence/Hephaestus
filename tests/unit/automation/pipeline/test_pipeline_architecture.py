@@ -76,6 +76,7 @@ _WORKER_SIDE_MODULES = (
     "jobs.py",
     "worker_codex.py",
     "worker_conflict_io.py",
+    "worker_git_inspection.py",
     "worker_pool.py",
 )
 _FORBIDDEN_WORKER_MODULES = ("github_api", "pr_manager")
