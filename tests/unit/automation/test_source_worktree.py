@@ -3477,6 +3477,62 @@ def _terminal_failed_transition(
     return manager, reference
 
 
+def _receiptless_terminal_failed_transition(
+    tmp_path: Path,
+) -> tuple[SourceWorkspaceManager, source_worktree.SourceWorkspaceTerminalReference]:
+    repo, first, second = _repository(tmp_path)
+    manager = SourceWorkspaceManager(repo, repository="example/project")
+    manager.prepare(9, SourceLane.IMPLEMENTATION, first)
+    with pytest.raises(source_worktree.SourceWorkspaceTerminalError) as raised:
+        with manager.implementation_writer_handoff(9) as handoff:
+            manager.authorize_direct_implementation_writer_transition(
+                9, branch="writer-branch", base_sha=second, handoff=handoff
+            )
+            manager._receipt_path(9, SourceLane.IMPLEMENTATION).unlink()
+            raise source_worktree.SourceWorkspaceTerminalError(
+                "terminal failure",
+                requested_branch="writer-branch",
+                requested_base_sha=second,
+            )
+    reference = raised.value.terminal_reference
+    assert reference is not None
+    return manager, reference
+
+
+def test_terminal_failure_round_trips_without_a_source_receipt(tmp_path: Path) -> None:
+    """Absent source evidence remains readable and fail closed."""
+    manager, reference = _receiptless_terminal_failed_transition(tmp_path)
+    payload = json.loads((manager.state_dir / reference.identity).read_text())
+
+    view = manager.read_terminal_failure(9, reference)
+
+    assert payload["source_receipt_sha256"] is None
+    assert view.cause == "source_workspace_recovery_receipt_invalid"
+    assert view.outcome == "manual_recovery_required"
+    assert not manager._receipt_path(9, SourceLane.IMPLEMENTATION).exists()
+
+
+@pytest.mark.parametrize("replacement", ["changed", "foreign"])
+def test_terminal_failure_rejects_a_changed_or_foreign_source_receipt(
+    tmp_path: Path, replacement: str
+) -> None:
+    """A source receipt changed after capture fails closed with a bounded cause."""
+    manager, reference = _terminal_failed_transition(tmp_path)
+    receipt = manager._receipt_path(9, SourceLane.IMPLEMENTATION)
+    payload = json.loads(receipt.read_text())
+    if replacement == "foreign":
+        payload["item_number"] = 10
+    else:
+        payload["generation"] += 1
+    receipt.write_text(json.dumps(payload))
+
+    with pytest.raises(
+        SourceWorkspaceError,
+        match="source workspace terminal source receipt changed",
+    ):
+        manager.read_terminal_failure(9, reference)
+
+
 @pytest.mark.parametrize("phase", sorted(source_worktree._TRANSITION_PHASES))
 def test_terminal_failure_retains_each_durable_phase(tmp_path: Path, phase: str) -> None:
     """Each incomplete phase preserves its cause and exact retry request."""

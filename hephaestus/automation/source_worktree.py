@@ -2669,6 +2669,28 @@ class SourceWorkspaceManager:
             f"manager only. Durable phase {phase}: {meanings[phase]}."
         )
 
+    def _verify_terminal_source_receipt(self, item_number: int, source_digest: object) -> None:
+        """Require the recorded source receipt state to match the filesystem."""
+        receipt_path = self._receipt_path(item_number, SourceLane.IMPLEMENTATION)
+        if source_digest is None:
+            try:
+                _terminal_read_bytes(receipt_path)
+            except FileNotFoundError:
+                return
+            except (OSError, SourceWorkspaceError) as exc:
+                raise SourceWorkspaceError(
+                    "source workspace terminal source receipt changed"
+                ) from exc
+            raise SourceWorkspaceError("source workspace terminal source receipt changed")
+        if not _terminal_digest_valid(source_digest):
+            raise SourceWorkspaceError("source workspace terminal source receipt changed")
+        try:
+            observed = hashlib.sha256(_terminal_read_bytes(receipt_path)).hexdigest()
+        except (OSError, SourceWorkspaceError) as exc:
+            raise SourceWorkspaceError("source workspace terminal source receipt changed") from exc
+        if observed != source_digest:
+            raise SourceWorkspaceError("source workspace terminal source receipt changed")
+
     def read_terminal_failure(
         self, item_number: int, reference: SourceWorkspaceTerminalReference
     ) -> SourceWorkspaceTerminalView:
@@ -2799,15 +2821,7 @@ class SourceWorkspaceManager:
             or cause == "source_workspace_transition_incomplete"
         ):
             raise SourceWorkspaceError("source workspace terminal journal proof is missing")
-        source_digest = payload["source_receipt_sha256"]
-        if (
-            not _terminal_digest_valid(source_digest)
-            or hashlib.sha256(
-                _terminal_read_bytes(self._receipt_path(item_number, lane))
-            ).hexdigest()
-            != source_digest
-        ):
-            raise SourceWorkspaceError("source workspace terminal source receipt changed")
+        self._verify_terminal_source_receipt(item_number, payload["source_receipt_sha256"])
         return SourceWorkspaceTerminalView(
             phase=phase,
             outcome=outcome,
