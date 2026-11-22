@@ -19,6 +19,9 @@ from hephaestus.diagnostics import (
     redact_truncated_diagnostic_prefix,
 )
 
+_JOB_RESULT_TAIL = 4000  # chars of stdout/stderr retained in a JobResult
+_JOB_RESULT_ERROR_MAX = 500  # chars of error detail retained in a JobResult
+
 _REDACTION = "<redacted>"
 _REBASE_CONFLICT_OUTCOMES = frozenset(
     {"no_edit", "residual_markers", "out_of_scope_edit", "resolved_content"}

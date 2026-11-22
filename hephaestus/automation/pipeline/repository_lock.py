@@ -878,3 +878,27 @@ def _remaining(deadline: float | None, now: float) -> float:
     if deadline is None:
         return _POLL_S
     return max(deadline - now, 0.0)
+
+
+def _repository_lock_operation(description: str, fallback: str) -> str:
+    """Return one bounded operation name for repository-lock metadata."""
+    selected = description if isinstance(description, str) and description else fallback
+    return selected[:200]
+
+
+class _GitLockTimeoutError(TimeoutError):
+    """Carry the checkout lock layer and path for one bounded timeout."""
+
+    def __init__(
+        self,
+        *,
+        lock_path: Path | None = None,
+        lock_layer: str = "unknown",
+    ) -> None:
+        super().__init__("checkout lock timeout")
+        self.lock_path = lock_path
+        self.lock_layer = lock_layer
+
+
+class _GitLockInterruptedError(RuntimeError):
+    """Raised when shutdown interrupts a Git job while it waits for the repo lock."""

@@ -165,6 +165,7 @@ WRITING_STANDARD_SENTINEL = "ASD-STE100 Simplified Technical English, Issue 9"
 
 _WP = "hephaestus.automation.pipeline.worker_pool"
 _WCI = "hephaestus.automation.pipeline.worker_conflict_io"
+_JF = "hephaestus.automation.pipeline.job_failures"
 
 
 def test_github_job_log_preserves_the_failure_cause_and_retry_action(
@@ -5388,7 +5389,7 @@ class TestAgentErrorHandling:
     ) -> None:
         """An unexpected exception inside the job is bounded by the shared cap."""
         small_err_max = 40
-        monkeypatch.setattr(f"{_WP}._ERR_MAX", small_err_max)
+        monkeypatch.setattr(f"{_JF}._ERR_MAX", small_err_max)
 
         def exploding_builder() -> str:
             raise RuntimeError("prompt builder exploded " + ("x" * 200))
