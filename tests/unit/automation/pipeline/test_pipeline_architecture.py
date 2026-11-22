@@ -74,6 +74,7 @@ _WORKER_SIDE_MODULES = (
     "auxiliary_worker_pool.py",
     "git_cleanup.py",
     "jobs.py",
+    "worker_codex.py",
     "worker_conflict_io.py",
     "worker_pool.py",
 )
