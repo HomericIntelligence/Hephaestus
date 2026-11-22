@@ -3214,3 +3214,25 @@ class TestFinalizedPlanAdmission:
 
         assert outcome == StageOutcome(Disposition.FAIL_BACK, "plan_changed")
         assert github.mutation_log == []
+class TestStalePlanRecheck:
+    """A stale-plan recheck NO-GO re-plans instead of blocking for a human."""
+
+    def test_stale_plan_nogo_amends_the_accepted_plan(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """The armed recheck NO-GO charges a normal NOGO round and amends."""
+        stage = PlanReviewStage()
+        github = FakeStageGitHub(labels=[STATE_PLAN_GO])
+        _seed_canonical_plan(github, 1)
+        item = _review_item(make_work_item, github, issue=1, state="EVAL")
+        item.payload["stale_plan_recheck"] = {"plan_sha256": "a" * 64, "age_days": 9}
+        item.payload["review_verdict"] = _verdict("NOGO")
+
+        outcome = stage.step(item, make_ctx(github=github))
+
+        assert outcome == Continue(next_state="AMEND_WAIT")
+        assert github.labels[1] == {STATE_PLAN_NO_GO}
+        assert "stale_plan_recheck" not in item.payload
+        assert not any(
+            "hephaestus-stale-plan-block" in str(comment) for comment in github.comments[1]
+        )

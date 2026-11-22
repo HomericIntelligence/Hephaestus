@@ -89,16 +89,11 @@ MAX_CURRENT_REVISION_CONTEXT_CHARS: Final[int] = 12_000
 _TRUSTED_ASSOCIATIONS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
 
 #: An accepted plan older than this age gets one plan_review recheck round
-#: against the current tree. The plan itself stays valid; the recheck names
-#: tweaks and never redoes the plan.
+#: against the current tree. A GO keeps the plan; a NO-GO re-plans it.
 STALE_PLAN_RECHECK_AGE_DAYS: Final[float] = 7.0
 
 #: Durable marker of one completed stale-plan recheck for one plan identity.
 STALE_PLAN_RECHECK_MARKER: Final[str] = "<!-- hephaestus-stale-plan-recheck -->"
-
-#: Durable marker of a stale-plan recheck that failed: the plan no longer
-#: applies and a human must intervene.
-STALE_PLAN_RECHECK_BLOCK_MARKER: Final[str] = "<!-- hephaestus-stale-plan-block -->"
 
 
 #: A comment that names any automation marker family can change the current
@@ -538,18 +533,6 @@ def render_stale_plan_recheck_record(plan_fingerprint_value: str, checked_at: st
         f"{STALE_PLAN_RECHECK_MARKER}\n\n"
         f"plan_sha256: {plan_fingerprint_value}\n"
         f"checked_at: {checked_at}\n"
-    )
-
-
-def render_stale_plan_recheck_block(reason: str) -> str:
-    """Render the durable human-intervention block for a failed recheck."""
-    return (
-        f"{STALE_PLAN_RECHECK_BLOCK_MARKER}\n\n"
-        "stale-plan recheck failed: the accepted plan no longer applies to "
-        "the current tree. Human intervention is required. The plan was not "
-        "redone and stays the authority; update or replace it manually, then "
-        "re-run the loop.\n\n"
-        f"reviewer reason: {reason}\n"
     )
 
 

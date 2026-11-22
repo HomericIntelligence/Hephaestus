@@ -110,7 +110,6 @@ from hephaestus.automation.protocol import (
 )
 from hephaestus.automation.review_journal import (
     MAX_CURRENT_REVISION_CONTEXT_CHARS,
-    STALE_PLAN_RECHECK_BLOCK_MARKER,
     STALE_PLAN_RECHECK_MARKER,
     CommentJournalReadError,
     IssueComment,
@@ -124,7 +123,6 @@ from hephaestus.automation.review_journal import (
     parse_plan_review_state,
     plan_fingerprint,
     render_current_review,
-    render_stale_plan_recheck_block,
     render_stale_plan_recheck_record,
 )
 from hephaestus.automation.review_types import ReviewVerdict
@@ -1251,8 +1249,8 @@ class PlanReviewStage(Stage):
                 if item.payload.get("stale_plan_recheck"):
                     # An armed stale-plan recheck runs one review round: the
                     # plan stays valid, the reviewer names tweaks, and a
-                    # NO-GO blocks for human intervention instead of
-                    # failing back to re-planning.
+                    # NO-GO re-plans the accepted plan against the current
+                    # tree instead of blocking for a human.
                     logger.info(
                         "plan_review:%d: stale-plan recheck armed; running the "
                         "recheck round against the current tree",
@@ -1734,34 +1732,16 @@ class PlanReviewStage(Stage):
         assert round_done is not None  # noqa: S101 - EVAL charges the review
         verdict = review.verdict
 
-        # A stale-plan recheck NO-GO never re-plans: the accepted plan stays
-        # the authority, the item blocks, and a human decides.
+        # A stale-plan recheck NO-GO means the accepted plan no longer
+        # applies to the current tree. The plan is amended against the
+        # current tree under the ordinary NOGO rules: a human is never asked
+        # to resolve tree drift that the planner can re-plan.
         if item.payload.pop("stale_plan_recheck", None) is not None:
-            reason = verdict.raw or verdict.verdict
             logger.warning(
-                "plan_review:%d: stale-plan recheck failed (%s); blocking for "
-                "human intervention — the plan is not redone",
+                "plan_review:%d: stale-plan recheck failed (%s); re-planning "
+                "the accepted plan against the current tree",
                 item.issue,
                 verdict.verdict,
-            )
-            try:
-                ctx.github.upsert_issue_comment(
-                    item.issue,
-                    STALE_PLAN_RECHECK_BLOCK_MARKER,
-                    render_stale_plan_recheck_block(str(reason)),
-                )
-            except RuntimeError as exc:
-                logger.warning(
-                    "plan_review:%d: stale-plan recheck block comment write failed: %s",
-                    item.issue,
-                    exc,
-                )
-            _complete_review_cycle(item, ctx)
-            return StageOutcome(
-                Disposition.FINISH_FAIL,
-                "stale plan recheck failed: the accepted plan no longer "
-                "applies to the current tree; human intervention required "
-                "(plan kept, not redone)",
             )
 
         # Every NOGO is durable control state, including rounds that can still
