@@ -135,17 +135,31 @@ def is_semantic_disposition_candidate(title: str, body: str) -> bool:
     )
 
 
+_FENCED_JSON_RE = re.compile(r"```json\s*(?P<body>.*?)```", re.DOTALL | re.IGNORECASE)
+
+
 def _json_object(raw: str) -> dict[str, Any]:
+    """Parse the one JSON object in an agent reply, tolerating fence prose.
+
+    Agents wrap the required object in a fenced block and sometimes add a
+    sentence before or after it. Every candidate is still parsed as one
+    complete JSON object, so schema drift continues to fail closed.
+    """
     text = raw.strip()
-    if text.startswith("```json") and text.endswith("```"):
-        text = text[7:-3].strip()
-    try:
-        value = json.loads(text)
-    except json.JSONDecodeError as exc:
-        raise ValueError("recovery output must be one JSON object") from exc
-    if not isinstance(value, dict):
-        raise ValueError("recovery output must be one JSON object")
-    return value
+    fenced = (_match.group("body").strip() for _match in _FENCED_JSON_RE.finditer(text))
+    candidates = [text, *fenced]
+    start = text.find("{")
+    end = text.rfind("}")
+    if 0 <= start < end:
+        candidates.append(text[start : end + 1])
+    for candidate in candidates:
+        try:
+            value = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            return value
+    raise ValueError("recovery output must be one JSON object")
 
 
 def _required_text(value: object, field: str, *, allow_empty: bool = False) -> str:
