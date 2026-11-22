@@ -164,6 +164,7 @@ from tests.unit.automation.pipeline.conftest import FakeSigningProvider
 WRITING_STANDARD_SENTINEL = "ASD-STE100 Simplified Technical English, Issue 9"
 
 _WP = "hephaestus.automation.pipeline.worker_pool"
+_WCI = "hephaestus.automation.pipeline.worker_conflict_io"
 
 
 def test_github_job_log_preserves_the_failure_cause_and_retry_action(
@@ -13995,7 +13996,7 @@ class TestGitOps:
             return original_read(descriptor, size)
 
         monkeypatch.setattr(os, "read", record_read)
-        with patch(f"{_WP}._validated_conflict_path", side_effect=validate_then_replace):
+        with patch(f"{_WCI}._validated_conflict_path", side_effect=validate_then_replace):
             raised: _RebaseConflictContextError | None = None
             try:
                 _read_bounded_conflict_file(root, "directory/conflict.py")
