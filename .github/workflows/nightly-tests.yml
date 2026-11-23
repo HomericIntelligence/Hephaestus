@@ -165,24 +165,28 @@ jobs:
       - name: Provision Codex Sigstore fixture
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: python scripts/provision_codex_sigstore_fixture.py --root "$PWD/build/test-fixtures/codex-sigstore/rust-v0.153.4"
+        run: |
+          tag="$(python scripts/provision_codex_sigstore_fixture.py --print-tag)"
+          python scripts/provision_codex_sigstore_fixture.py \
+            --root "$PWD/build/test-fixtures/codex-sigstore/$tag"
       - name: Prepare the shared CI image
         uses: ./.github/actions/setup-ci-image
         with:
           image: ${{ needs.ci-image.outputs.image }}
           registry-token: ${{ secrets.GITHUB_TOKEN }}
       - name: Validate offline Codex artifacts
-        run: >
-          podman run --rm --network=none --tmpfs /tmp:rw,size=4g,mode=1777
-          -v "$PWD:/workspace:Z"
-          -v "$PWD/build/test-fixtures/codex-sigstore/rust-v0.153.4:/codex-sigstore/rust-v0.153.4:ro"
-          -v "$PWD/build/test-fixtures/codex-sigstore/rust-v0.153.4:/workspace/build/test-fixtures/codex-sigstore/rust-v0.153.4:ro"
-          -e HEPHAESTUS_CODEX_SIGSTORE_FIXTURE_ROOT=/codex-sigstore/rust-v0.153.4
-          -e UV_NO_SYNC=1 -e PYTHONPATH=/workspace
-          --userns=keep-id:uid=1000,gid=1000
-          hephaestus-ci:local uv run pytest tests/integration
-          --override-ini="addopts=" --basetemp=build/pytest-codex-artifacts
-          -v --strict-markers -m codex_release_artifact
+        run: |
+          tag="$(python scripts/provision_codex_sigstore_fixture.py --print-tag)"
+          podman run --rm --network=none --tmpfs /tmp:rw,size=4g,mode=1777 \
+            -v "$PWD:/workspace:Z" \
+            -v "$PWD/build/test-fixtures/codex-sigstore/$tag:/codex-sigstore/$tag:ro" \
+            -v "$PWD/build/test-fixtures/codex-sigstore/$tag:/workspace/build/test-fixtures/codex-sigstore/$tag:ro" \
+            -e HEPHAESTUS_CODEX_SIGSTORE_FIXTURE_ROOT=/codex-sigstore/$tag \
+            -e UV_NO_SYNC=1 -e PYTHONPATH=/workspace \
+            --userns=keep-id:uid=1000,gid=1000 \
+            hephaestus-ci:local uv run pytest tests/integration \
+            --override-ini="addopts=" --basetemp=build/pytest-codex-artifacts \
+            -v --strict-markers -m codex_release_artifact
 
   nats-integration:
     name: NATS real-broker integration tests

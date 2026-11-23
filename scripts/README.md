@@ -74,7 +74,11 @@ through installed `hephaestus-*` console scripts.
   these tools to provision and extract the fixed Codex artifact before it
   starts the network-free test container.
 - **`provision_codex_sigstore_fixture.py`** — Provision and validate the fixed
-  offline Codex release evidence for the nightly artifact test lane.
+  offline Codex release evidence for the nightly artifact test lane. Run
+  `--print-tag` to print the validated release tag from
+  `tests/fixtures/sigstore/codex-sigstore-fixture.json`. The `--root` path must
+  end with `build/test-fixtures/codex-sigstore/<tag>`. The `--root` and
+  `--print-tag` options are mutually exclusive.
 - **`prepare_host_verification_pyxis_image.py`** — Build `ci/Containerfile`
   with local Podman or Docker and export a local Enroot squashfs image for
   Linux PR-review host verification. The command builds an exact committed

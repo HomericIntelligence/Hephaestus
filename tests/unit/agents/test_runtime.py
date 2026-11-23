@@ -2660,6 +2660,50 @@ def test_codex_implementation_profile_admits_only_validated_athena(
         agent_runtime._create_codex_authentication_bridge(auth_path, '{"token":"x"}')
 
 
+def test_codex_profile_rejects_unreviewed_athena_digest(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The private profile rejects an Athena tree that differs from the reviewed digest."""
+    source_home = tmp_path / "source-codex-home"
+    athena = source_home / "plugins" / "cache" / "athena" / "athena" / "0.5.1"
+    athena.mkdir(parents=True)
+    athena.chmod(0o700)
+    (athena / ".codex-marketplace-install.json").write_text(
+        json.dumps(
+            {
+                "revision": "5df1b2f9fd8037fe0655edb36a37e0189eaab8c9",
+                "source": "https://github.com/HomericIntelligence/Athena.git",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (athena / "package.json").write_text(
+        json.dumps({"version": "0.5.1"}),
+        encoding="utf-8",
+    )
+    (athena / "skill.md").write_text("unreviewed Athena\n", encoding="utf-8")
+    for artifact in athena.iterdir():
+        artifact.chmod(0o600)
+    request = _codex_implementation_request(tmp_path)
+    monkeypatch.setattr(
+        agent_runtime,
+        "_codex_child_env",
+        lambda: {"CODEX_HOME": str(source_home)},
+    )
+    monkeypatch.setattr(agent_runtime, "CODEX_ATHENA_ARTIFACT_SHA256", "0" * 64)
+
+    with pytest.raises(
+        CodexIsolationError,
+        match="codex_adapter_initialization_failed",
+    ):
+        agent_runtime._populate_codex_implementation_profile(request)
+
+    profile = Path(request.private_profile_path)
+    assert not profile.exists()
+    assert not profile.parent.exists()
+
+
 def test_codex_rollout_export_rejects_a_symlinked_store_ancestor(tmp_path: Path) -> None:
     """A durable rollout cannot escape through a replaced date directory."""
     identity = tmp_path / "identity"

@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "release": {
     "repository": "openai/codex",
     "tag": "rust-v0.153.4",
@@ -27,6 +27,11 @@
     "name": "codex-aarch64-unknown-linux-musl",
     "size": 222567456,
     "sha256": "4d76e542c222ea8c75861d8c4ade60a1a332a63255ce1c60bdaebf7c2a2869e6"
+  },
+  "rekor": {
+    "log_id": "c0d23d6ad406973f9559f3ba2d1ca01f84147d8ffc5b8445c224f98b9591801d",
+    "log_index": 2717156140,
+    "integration_time": 1788562514
   },
   "retained": [
     {

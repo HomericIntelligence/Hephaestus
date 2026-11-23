@@ -2,14 +2,16 @@
 """Provision the retained Codex Sigstore artifact test fixture.
 
 Usage:
+    python3 scripts/provision_codex_sigstore_fixture.py --print-tag
     python3 scripts/provision_codex_sigstore_fixture.py \
-        --root /absolute/build/test-fixtures/codex-sigstore/rust-v0.153.4
+        --root /absolute/build/test-fixtures/codex-sigstore/<tag>
 """
 
 from __future__ import annotations
 
 import argparse
 import contextlib
+import dataclasses
 import functools
 import hashlib
 import json
@@ -29,7 +31,7 @@ from typing import Any
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 MANIFEST_PATH = REPOSITORY_ROOT / "tests" / "fixtures" / "sigstore" / "codex-sigstore-fixture.json"
 RETAINED_SOURCE_ROOT = REPOSITORY_ROOT / "tests" / "fixtures" / "sigstore"
-_ROOT_SUFFIX = ("build", "test-fixtures", "codex-sigstore", "rust-v0.153.4")
+_ROOT_PREFIX = ("build", "test-fixtures", "codex-sigstore")
 _CHUNK_SIZE = 1024 * 1024
 _TIMEOUT_SECONDS = 60
 _METADATA_MAX_BYTES = 64 * 1024
@@ -37,6 +39,16 @@ _METADATA_MAX_BYTES = 64 * 1024
 
 class ProvisionError(RuntimeError):
     """Report an invalid or incomplete external artifact fixture."""
+
+
+@dataclasses.dataclass(frozen=True)
+class _Manifest:
+    """Hold the validated fixture identity and retained objects."""
+
+    tag: str
+    assets: tuple[dict[str, Any], ...]
+    extracted_elf: dict[str, Any]
+    retained: tuple[dict[str, Any], ...]
 
 
 def _absolute_root(value: str) -> Path:
@@ -55,6 +67,27 @@ def _safe_name(value: object) -> str:
     if not name or Path(name).name != name or name in {".", ".."}:
         raise ProvisionError("fixture object name is invalid")
     return name
+
+
+def _is_sha256(value: object) -> bool:
+    """Return whether one value is a lowercase SHA-256 digest."""
+    return (
+        type(value) is str
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _required_text(value: object, *, label: str) -> str:
+    """Return one required manifest string or reject the manifest."""
+    if type(value) is not str or not value:
+        raise ProvisionError(f"{label} is invalid")
+    return value
+
+
+def _root_suffix(tag: str) -> tuple[str, ...]:
+    """Return the owner-controlled root suffix for one release tag."""
+    return (*_ROOT_PREFIX, _safe_name(tag))
 
 
 def _digest_descriptor(descriptor: int) -> tuple[int, str]:
@@ -81,27 +114,48 @@ def _expected_record(value: object, *, label: str) -> dict[str, Any]:
     digest = value.get("sha256")
     if type(size) is not int or size < 1:
         raise ProvisionError(f"{label} size is invalid")
-    if (
-        type(digest) is not str
-        or len(digest) != 64
-        or any(character not in "0123456789abcdef" for character in digest)
-    ):
+    if not _is_sha256(digest):
         raise ProvisionError(f"{label} digest is invalid")
     return {**value, "name": name, "size": size, "sha256": digest}
 
 
-def _manifest() -> tuple[list[dict[str, Any]], dict[str, Any], list[dict[str, Any]]]:
-    """Load the fixed release manifest."""
+def _release(value: object) -> tuple[str, str]:
+    """Validate the release record and return its repository and tag."""
+    if not isinstance(value, dict):
+        raise ProvisionError("release manifest record is invalid")
+    repository = _required_text(value.get("repository"), label="release repository")
+    parts = repository.split("/")
+    if len(parts) != 2 or any(not part for part in parts):
+        raise ProvisionError("release repository is invalid")
+    tag = _safe_name(value.get("tag"))
+    _required_text(value.get("target"), label="release target")
+    return repository, tag
+
+
+def _rekor(value: object) -> None:
+    """Validate the retained Rekor entry identity."""
+    if not isinstance(value, dict) or not _is_sha256(value.get("log_id")):
+        raise ProvisionError("Rekor log ID is invalid")
+    for field in ("log_index", "integration_time"):
+        entry = value.get(field)
+        if type(entry) is not int or entry < 0:
+            raise ProvisionError("Rekor entry is invalid")
+
+
+def _manifest() -> _Manifest:
+    """Load and validate the fixed release manifest."""
     try:
         document = json.loads(MANIFEST_PATH.read_bytes())
     except (OSError, json.JSONDecodeError) as exc:
         raise ProvisionError("fixture manifest is invalid") from exc
-    if not isinstance(document, dict) or document.get("schema_version") != 1:
+    if not isinstance(document, dict) or document.get("schema_version") != 2:
         raise ProvisionError("fixture manifest is invalid")
     assets_value = document.get("assets")
     retained_value = document.get("retained")
     if not isinstance(assets_value, list) or not isinstance(retained_value, list):
         raise ProvisionError("fixture manifest is invalid")
+    repository, tag = _release(document.get("release"))
+    _rekor(document.get("rekor"))
     assets = [_expected_record(value, label="asset") for value in assets_value]
     retained = [_expected_record(value, label="retained") for value in retained_value]
     elf = _expected_record(document.get("extracted_elf"), label="extracted ELF")
@@ -115,7 +169,20 @@ def _manifest() -> tuple[list[dict[str, Any]], dict[str, Any], list[dict[str, An
             or type(asset.get("download_url")) is not str
         ):
             raise ProvisionError("asset manifest record is invalid")
-    return assets, elf, retained
+        expected = {
+            "api_url": f"https://api.github.com/repos/{repository}/releases/assets/{asset['id']}",
+            "download_url": (
+                f"https://github.com/{repository}/releases/download/{tag}/{asset['name']}"
+            ),
+        }
+        if any(asset[key] != value for key, value in expected.items()):
+            raise ProvisionError("asset manifest record is invalid")
+    return _Manifest(
+        tag=tag,
+        assets=tuple(assets),
+        extracted_elf=elf,
+        retained=tuple(retained),
+    )
 
 
 class _HeldDirectory:
@@ -181,11 +248,13 @@ def _open_directory_at(
 
 
 @contextlib.contextmanager
-def _prepare_root(root: Path) -> Iterator[tuple[_HeldDirectory, _HeldDirectory]]:
+def _prepare_root(
+    root: Path, *, suffix: Sequence[str]
+) -> Iterator[tuple[_HeldDirectory, _HeldDirectory]]:
     """Hold the exact owner-only artifact and cache directories."""
     if not root.is_absolute():
         raise ProvisionError("fixture root must be absolute")
-    if tuple(root.parts[-len(_ROOT_SUFFIX) :]) != _ROOT_SUFFIX:
+    if tuple(root.parts[-len(suffix) :]) != tuple(suffix):
         raise ProvisionError("fixture root does not have the required suffix")
     descriptors: list[int] = []
     current_path = Path(root.anchor)
@@ -193,7 +262,7 @@ def _prepare_root(root: Path) -> Iterator[tuple[_HeldDirectory, _HeldDirectory]]
         current = os.open(root.anchor, _directory_flags())
         descriptors.append(current)
         _validate_directory(current, managed=False)
-        managed_at = len(root.parts) - len(_ROOT_SUFFIX)
+        managed_at = len(root.parts) - len(suffix)
         for index, name in enumerate(root.parts[1:], start=1):
             managed = index >= managed_at
             current = _open_directory_at(
@@ -607,8 +676,9 @@ def _publish(
 
 def provision(root: Path) -> tuple[Path, ...]:
     """Provision and validate the exact external release fixture."""
-    assets, elf_record, retained = _manifest()
-    with _prepare_root(root) as (root_directory, cache):
+    manifest = _manifest()
+    assets, elf_record, retained = manifest.assets, manifest.extracted_elf, manifest.retained
+    with _prepare_root(root, suffix=_root_suffix(manifest.tag)) as (root_directory, cache):
         for record in (*assets, elf_record, *retained):
             _reject_unsafe_output(root_directory, str(record["name"]))
         retained_cache: list[tuple[dict[str, Any], str]] = []
@@ -644,14 +714,23 @@ def provision(root: Path) -> tuple[Path, ...]:
 def build_parser() -> argparse.ArgumentParser:
     """Build the command-line parser."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--root", required=True, type=_absolute_root)
+    selection = parser.add_mutually_exclusive_group(required=True)
+    selection.add_argument("--root", type=_absolute_root)
+    selection.add_argument(
+        "--print-tag",
+        action="store_true",
+        help="print the validated manifest release tag",
+    )
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Provision the configured fixture root."""
+    """Provision the configured fixture root or report its release tag."""
     arguments = build_parser().parse_args(argv)
     try:
+        if arguments.print_tag:
+            print(_manifest().tag)
+            return 0
         provision(arguments.root)
     except ProvisionError as exc:
         build_parser().error(str(exc))

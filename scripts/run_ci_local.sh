@@ -509,14 +509,18 @@ _run_in_container() {
     fi
 
     if [ -n "${codex_fixture_root}" ]; then
+        local codex_fixture_tag
+        codex_fixture_tag="$(
+            python3 "${PROJECT_ROOT}/scripts/provision_codex_sigstore_fixture.py" --print-tag
+        )" || return 1
         # Use the installed tools and mounted source without an editable rebuild.
         codex_fixture_mount+=(
             --network=none
             --env UV_NO_SYNC=1
             --env PYTHONPATH=/workspace
-            --volume "${codex_fixture_root}:/codex-sigstore/rust-v0.153.4:ro"
-            --volume "${codex_fixture_root}:/workspace/build/test-fixtures/codex-sigstore/rust-v0.153.4:ro"
-            --env "HEPHAESTUS_CODEX_SIGSTORE_FIXTURE_ROOT=/codex-sigstore/rust-v0.153.4"
+            --volume "${codex_fixture_root}:/codex-sigstore/${codex_fixture_tag}:ro"
+            --volume "${codex_fixture_root}:/workspace/build/test-fixtures/codex-sigstore/${codex_fixture_tag}:ro"
+            --env "HEPHAESTUS_CODEX_SIGSTORE_FIXTURE_ROOT=/codex-sigstore/${codex_fixture_tag}"
         )
     fi
 
@@ -538,7 +542,11 @@ run_in_container() {
 }
 
 run_in_container_with_codex_fixture() {
-    local fixture_root="${PROJECT_ROOT}/build/test-fixtures/codex-sigstore/rust-v0.153.4"
+    local tag
+    tag="$(
+        python3 "${PROJECT_ROOT}/scripts/provision_codex_sigstore_fixture.py" --print-tag
+    )" || return 1
+    local fixture_root="${PROJECT_ROOT}/build/test-fixtures/codex-sigstore/${tag}"
 
     _run_in_container "${fixture_root}" "$@"
 }
@@ -595,12 +603,16 @@ run_cli() {
 
 run_build() {
     log_step "Reproducible artifact and package lifecycle validation"
+    local tag
+    tag="$(
+        python3 "${PROJECT_ROOT}/scripts/provision_codex_sigstore_fixture.py" --print-tag
+    )" || return 1
     if ! zstd --version >/dev/null 2>&1; then
         log_error "Host zstd is required for the build subset."
         return 1
     fi
     python3 "${PROJECT_ROOT}/scripts/provision_codex_sigstore_fixture.py" \
-        --root "${PROJECT_ROOT}/build/test-fixtures/codex-sigstore/rust-v0.153.4" || return 1
+        --root "${PROJECT_ROOT}/build/test-fixtures/codex-sigstore/${tag}" || return 1
     run_in_container env UV_NO_SYNC=1 PYTHONPATH=/workspace \
         uv run pytest tests/integration \
         --override-ini="addopts=" \
