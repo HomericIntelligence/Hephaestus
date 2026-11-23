@@ -64,7 +64,10 @@ def test_test_fix_requires_one_current_scope_read_per_turn(
         assert isinstance(following, JobRequest)
         assert isinstance(following.job, AgentJob)
         assert following.job.source_operation is not None
-        assert following.job.source_operation.allowed_paths == ("tracked.txt",)
+        # #3696 decoupled test repair from the plan file scope: the correlated
+        # scope read still authorizes the turn, but a fix may touch any file.
+        assert following.job.source_operation.kind == "test-fix"
+        assert following.job.source_operation.allowed_paths == ()
         assert following.job.workspace == binding
         next_turn = stage.step(item, ctx)
         assert isinstance(next_turn, JobRequest)

@@ -123,7 +123,7 @@ def test_missing_plan_retry_advances_only_after_fresh_confirmation(
 def test_second_plan_lookup_has_the_same_failure_bound(
     make_ctx: Any, make_work_item: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Repeated errors on the final lookup stop after the plan budget."""
+    """Repeated errors on the final lookup hold after the plan budget."""
     github = FakeStageGitHub(labels=[STATE_NEEDS_PLAN])
     lookups = iter(
         [
@@ -144,8 +144,13 @@ def test_second_plan_lookup_has_the_same_failure_bound(
     assert isinstance(first, StageOutcome)
     assert isinstance(second, StageOutcome)
     assert first.disposition is Disposition.RETRY
-    assert second.disposition is Disposition.FINISH_FAIL
+    assert second.disposition is Disposition.BLOCKED
+    assert "read unavailable" in second.note
+    assert "holding without changing the plan-review verdict" in second.note
     assert item.attempts["plan"] == 2
+    assert item.state == "VERIFY"
+    assert github.labels[502] == {STATE_NEEDS_PLAN}
+    assert github.mutation_log == []
 
 
 def test_verdict_publication_retry_counts_one_review(make_ctx: Any, make_work_item: Any) -> None:
