@@ -797,9 +797,9 @@ def _restore_review_conversation(
                 item.issue,
             )
             reset = True
+        selected_provider = agent_provider(ctx, "reviewer")
+        selected_model = _selected_reviewer_model(item, ctx)
         if active is not None and not reset:
-            selected_provider = agent_provider(ctx, "reviewer")
-            selected_model = _selected_reviewer_model(item, ctx)
             previous_model = _restore_reviewer_selection(
                 active.provider, active.reviewer_model, active.reviewer_config
             )
@@ -824,13 +824,13 @@ def _restore_review_conversation(
                 plan_fingerprint=plan_fingerprint(plan_text),
             )
         if active is None or reset:
-            provider = agent_provider(ctx, "reviewer")
-            selected_model = _selected_reviewer_model(item, ctx)
-            stored_model, selection_config = _durable_reviewer_selection(provider, selected_model)
+            stored_model, selection_config = _durable_reviewer_selection(
+                selected_provider, selected_model
+            )
             active = store.start_cycle(
                 repo=item.repo,
                 issue=item.issue,
-                provider=provider,
+                provider=selected_provider,
                 model=stored_model,
                 reviewer_config=selection_config,
                 cwd=ctx.paths.worktree,
