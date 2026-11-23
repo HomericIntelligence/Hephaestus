@@ -107,6 +107,11 @@ CODEX_PARENT_CONTEXT_ENV_VARS = ("CODEX_THREAD_ID",)
 CODEX_ATHENA_MARKETPLACE_SOURCE = "https://github.com/HomericIntelligence/Athena.git"
 CODEX_ATHENA_MARKETPLACE_REF = "5df1b2f9fd8037fe0655edb36a37e0189eaab8c9"
 CODEX_ATHENA_VERSION = "0.5.1"
+# The Athena cache is an unsigned checkout, so this digest is the only check
+# that binds its exact bytes to a reviewed value. Keep it until Athena publishes
+# a signature over the exact cache bytes, Hephaestus has an offline verifier with
+# a reviewed trust root, and a real-artifact test fails closed on tamper.
+# See ADR-0072.
 CODEX_ATHENA_ARTIFACT_SHA256 = "7fbfb710a8da2c36e276276c1ff2d33ee40fe8f2365348c06c40696a9dfe0af1"
 CODEX_ATHENA_CACHE_RELATIVE_PATH = Path("plugins") / "cache" / "athena" / "athena"
 CODEX_AUTH_MAX_BYTES = 1024 * 1024
