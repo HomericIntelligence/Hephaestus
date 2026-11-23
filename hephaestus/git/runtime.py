@@ -12,7 +12,6 @@ from pathlib import Path
 from typing import Any, cast
 
 from hephaestus.config.child_environments import read_approved_parent_env
-from hephaestus.diagnostics import redact_git_diagnostic as _redact_git_diagnostics
 from hephaestus.utils.cache import ThreadSafeCache
 from hephaestus.utils.file_lock import (
     ExclusiveLockUnavailableError,
@@ -241,7 +240,7 @@ def run(
                 # codeql[py/clear-text-logging-sensitive-data]
                 logger.error(
                     "Subprocess timed out; %s",
-                    _redact_git_diagnostics(_format_git_failure_context(cmd, cwd, error)),
+                    _format_git_failure_context(cmd, cwd, error),
                 )
             else:
                 logger.error("Subprocess timed out")
@@ -254,7 +253,7 @@ def run(
                 logger.error(
                     "Subprocess failed with exit code %s; %s",
                     error.returncode,
-                    _redact_git_diagnostics(_format_git_failure_context(cmd, cwd, error)),
+                    _format_git_failure_context(cmd, cwd, error),
                 )
             else:
                 logger.error("Subprocess failed with exit code %s", error.returncode)

@@ -227,6 +227,26 @@ class TestRun:
         ):
             assert secret not in message
 
+    def test_git_failure_does_not_corrupt_redacted_fields_on_a_second_pass(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        stderr = "api_key=stderr-api-secret\nAuthorization: Bearer stderr-auth-token\nstderr-tail"
+        failure = subprocess.CalledProcessError(128, ["git", "status"], stderr=stderr)
+        with (
+            caplog.at_level(logging.ERROR, logger="hephaestus.git.runtime"),
+            patch("hephaestus.git.runtime._shared_run_git", side_effect=failure),
+            pytest.raises(subprocess.CalledProcessError),
+        ):
+            git_runtime.run(["git", "status"])
+
+        message = _runtime_error_messages(caplog)[0]
+        assert "api_key=<redacted-value>" in message
+        assert "Authorization: Bearer <redacted-value>" in message
+        assert "stderr-tail" in message
+        assert "; stderr=" in message
+        assert "stderr-api-secret" not in message
+        assert "stderr-auth-token" not in message
+
     @pytest.mark.parametrize(
         "failure",
         [
