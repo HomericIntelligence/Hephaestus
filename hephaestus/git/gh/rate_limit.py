@@ -37,6 +37,10 @@ from hephaestus.utils.helpers import run_subprocess
 
 logger = logging.getLogger(__name__)
 
+# Darwin's confstr name is not exposed in Python's os.confstr_names. The
+# integer value comes from <unistd.h> and selects the per-user temporary dir.
+_CS_DARWIN_USER_TEMP_DIR = 65537
+
 
 class OperationDeadlineExpired(subprocess.TimeoutExpired):
     """Report an exhausted GitHub request deadline without a fabricated duration."""
@@ -386,7 +390,7 @@ def _owned_by_current_user(path: Path) -> bool:
 def _darwin_user_temp_dir() -> Path | None:
     """Return the macOS per-user temporary directory, or ``None``."""
     try:
-        value = os.confstr("CS_DARWIN_USER_TEMP_DIR")
+        value = os.confstr(_CS_DARWIN_USER_TEMP_DIR)
     except (ValueError, OSError) as exc:
         logger.debug("CS_DARWIN_USER_TEMP_DIR is unavailable: %s", exc)
         return None

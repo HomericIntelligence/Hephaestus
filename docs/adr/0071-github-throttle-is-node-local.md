@@ -18,13 +18,15 @@ issue removed this shared-filesystem lock path.
 
 ## Decision
 
-1. The global throttle budget has machine scope. `GLOBAL_THROTTLE_SCOPE` is
-   `"machine"`. The state file coordinates processes in one operating-system
-   instance. It does not coordinate separate hosts.
+1. The global throttle budget has one-user machine scope. `GLOBAL_THROTTLE_SCOPE`
+   is `"machine"`. The state file coordinates processes for one operating-system
+   user on one machine. It does not coordinate separate hosts or different
+   operating-system users.
 2. The state root comes from a node-local runtime directory. On Linux, the
    order is `XDG_RUNTIME_DIR`, `/run/user/<uid>`, then `/dev/shm`. On macOS,
-   the root is `os.confstr("CS_DARWIN_USER_TEMP_DIR")`. The code does not read
-   `TMPDIR`, `TMP`, or `TEMP`.
+   the root is `os.confstr(_CS_DARWIN_USER_TEMP_DIR)`, where the constant is
+   the integer `65537` from `<unistd.h>`. The code does not read `TMPDIR`,
+   `TMP`, or `TEMP`.
 3. The code probes each candidate and keeps the first writable candidate. A
    per-user `hephaestus-<uid>` directory keeps the state private. If no
    candidate is usable, the throttle stops with an error that names the
@@ -35,7 +37,8 @@ issue removed this shared-filesystem lock path.
    local.
 5. The process lock is a nonblocking `fcntl.flock` poll loop. Every caller uses
    the loop. The wait obeys the existing deadline and cancellation. A file lock
-   cannot wait without a bound inside the storage client. The lock stays on the
+   does not wait inside the storage client. A caller with no deadline can still
+   wait while another process holds the lock. The lock stays on the
    state-file inode, so the code does not publish the state with `os.replace`.
 6. The existing private-directory, ownership, symlink, persisted-state,
    cancellation, and deadline behavior stays.
@@ -59,8 +62,9 @@ issue removed this shared-filesystem lock path.
   to one budget per machine. An operator must divide `--gh-global-rate` across
   the machines.
 - The old state file below `TMPDIR` stays on disk and is ignored. The first
-  call on the new root starts with a full bucket. The refill and burst contract
-  does not change.
+  call on the new root starts with a full bucket. While old and new processes
+  run together, the account can use up to two machine budgets. The refill and
+  burst contract does not change.
 - A container with a private `/dev/shm` has a per-container budget. A host
   that needs one budget must bind-mount a node-local directory and pass it
   with `--gh-throttle-dir`.

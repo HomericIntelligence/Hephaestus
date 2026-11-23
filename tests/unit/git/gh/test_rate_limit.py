@@ -1082,9 +1082,14 @@ class TestGlobalThrottleStateRoot:
         assert Path("relative") not in _node_local_runtime_candidates()
 
     def test_macos_uses_the_confstr_directory(self, monkeypatch, tmp_path) -> None:
-        """The macOS runtime root uses the per-user confstr directory."""
+        """The macOS runtime root uses the numeric per-user confstr name."""
         monkeypatch.setattr("sys.platform", "darwin")
-        monkeypatch.setattr("os.confstr", lambda _name: str(tmp_path))
+
+        def fake_confstr(name: int) -> str:
+            assert name == 65537
+            return str(tmp_path)
+
+        monkeypatch.setattr("os.confstr", fake_confstr)
 
         assert _node_local_runtime_candidates() == [tmp_path]
 
@@ -1092,7 +1097,7 @@ class TestGlobalThrottleStateRoot:
     def test_macos_confstr_failure_yields_no_candidate(self, monkeypatch, error) -> None:
         """An unavailable macOS runtime directory fails closed."""
 
-        def fail(_name: str) -> str:
+        def fail(_name: int) -> str:
             raise error
 
         monkeypatch.setattr("sys.platform", "darwin")

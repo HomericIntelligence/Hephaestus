@@ -149,7 +149,7 @@ APPROVED_ENV_VARS: tuple[EnvVarSpec, ...] = (
     _parent("TZ", "Timezone stability"),
     _parent(
         "TMPDIR",
-        "Temporary and runtime directory",
+        "Temporary directory for child tools",
         sensitivity="private",
         validation="path",
         readers=(_PARENT_READER, _NESTED_READER),

@@ -32,6 +32,7 @@ hephaestus-prepare-pr-worktree
   [--gh-timeout SECONDS]
   [--gh-global-rate FLOAT]
   [--gh-global-burst FLOAT]
+  [--gh-throttle-dir PATH]
   [--json]
 ```
 
@@ -46,6 +47,7 @@ hephaestus-publish-pr-worktree
   [--gh-timeout SECONDS]
   [--gh-global-rate FLOAT]
   [--gh-global-burst FLOAT]
+  [--gh-throttle-dir PATH]
   [--json]
 ```
 
