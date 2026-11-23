@@ -227,6 +227,37 @@ class TestRun:
         ):
             assert secret not in message
 
+    @pytest.mark.parametrize(
+        "failure",
+        [
+            pytest.param(
+                subprocess.CalledProcessError(128, ["git", "status"], stderr="fatal"),
+                id="called-process-error",
+            ),
+            pytest.param(subprocess.TimeoutExpired(["git", "status"], 3), id="timeout"),
+        ],
+    )
+    def test_git_failure_redacts_url_shaped_path_cwd(
+        self,
+        caplog: pytest.LogCaptureFixture,
+        failure: subprocess.CalledProcessError | subprocess.TimeoutExpired,
+    ) -> None:
+        cwd = Path("https://operator:synthetic-cwd-credential@example.invalid/repository")
+        with (
+            caplog.at_level(logging.ERROR, logger="hephaestus.git.runtime"),
+            patch("hephaestus.git.runtime._shared_run_git", side_effect=failure),
+            pytest.raises(type(failure)) as caught,
+        ):
+            git_runtime.run(["git", "status"], cwd=cwd)
+
+        assert caught.value is failure
+        messages = _runtime_error_messages(caplog)
+        assert len(messages) == 1
+        message = messages[0]
+        assert "cwd='<redacted-git-url>'" in message
+        assert "synthetic-cwd-credential" not in message
+        assert str(cwd) not in message
+
     def test_git_timeout_logs_context_and_reraises(self, caplog: pytest.LogCaptureFixture) -> None:
         command = [
             "git",

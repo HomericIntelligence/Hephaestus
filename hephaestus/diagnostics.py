@@ -9,7 +9,7 @@ _REDACTED_GIT_URL = "<redacted-git-url>"
 _REDACTED_PRIVATE_KEY = "<redacted>"
 _REDACTED_VALUE = "<redacted-value>"
 _PIPELINE_SENTINEL_KEYS = frozenset({"api_key", "apikey", "client_secret"})
-_GIT_URL_RE = re.compile(r"(?:https?|ssh|git)://\S+", re.IGNORECASE)
+_GIT_URL_RE = re.compile(r"(?:https?|ssh|git):/{1,2}\S+", re.IGNORECASE)
 _GIT_SCP_REMOTE_RE = re.compile(r"(?<![\w./-])(?:[\w.-]+@[\w.-]+|[\w-]+(?:\.[\w-]+)+):\S+")
 _GIT_SECRET_ASSIGNMENT_RE = re.compile(
     r"(?i)\b(access[_-]?token|auth_token|oauth_token|token|api[_-]?key|apikey|"
