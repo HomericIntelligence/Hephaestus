@@ -237,11 +237,9 @@ def run(
         if log_errors:
             if is_git_command:
                 # The formatter redacts secrets from every field.
+                context = _format_git_failure_context(cmd, cwd, error)
                 # codeql[py/clear-text-logging-sensitive-data]
-                logger.error(
-                    "Subprocess timed out; %s",
-                    _format_git_failure_context(cmd, cwd, error),
-                )
+                logger.error("Subprocess timed out; %s", context)
             else:
                 logger.error("Subprocess timed out")
         raise
@@ -249,11 +247,12 @@ def run(
         if log_errors:
             if is_git_command:
                 # The formatter redacts secrets from every field.
+                context = _format_git_failure_context(cmd, cwd, error)
                 # codeql[py/clear-text-logging-sensitive-data]
                 logger.error(
                     "Subprocess failed with exit code %s; %s",
                     error.returncode,
-                    _format_git_failure_context(cmd, cwd, error),
+                    context,
                 )
             else:
                 logger.error("Subprocess failed with exit code %s", error.returncode)
