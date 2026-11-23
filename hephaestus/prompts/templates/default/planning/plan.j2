@@ -16,6 +16,12 @@ verification command per acceptance criterion, and the skills you used. Do not
 include diffs. When you re-plan, output the full revised plan and end it with a
 short `## Changes from Review` list of the improvements made.
 
+Include an `## Older generation affected` section in the plan. Answer this
+question: what breaks the older running generation? Name the component and the
+surface that the older generation uses. Add a contract rule and a behavior test
+that keep the older generation working. If nothing breaks, write `None:` and one
+line of proof.
+
 Do not present a measured metric or run result as a deliverable unless a real
 run produced it. Plan the command and leave the measured result to a separate
 evidence step.

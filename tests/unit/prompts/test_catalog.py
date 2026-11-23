@@ -42,6 +42,15 @@ def test_packaged_plan_template_renders_the_issue_number() -> None:
     assert "{{ issue_number }}" not in rendered
 
 
+def test_plan_template_asks_what_breaks_the_older_running_generation() -> None:
+    """The plan prompt requires an older-generation impact section."""
+    rendered = PromptCatalog().render("planning/plan.j2", issue_number=7)
+
+    assert "## Older generation affected" in rendered
+    assert "what breaks the older running generation?" in rendered
+    assert "`None:`" in rendered
+
+
 def test_complete_agent_prompt_carries_the_writing_standard() -> None:
     """A complete agent prompt is wrapped by the immutable writing policy."""
     rendered = PromptCatalog().render("planning/plan.j2", issue_number=42)
