@@ -22,6 +22,15 @@ def _clear_runtime_caches() -> Generator[None]:
     git_runtime.clear_repo_caches()
 
 
+def _runtime_error_messages(caplog: pytest.LogCaptureFixture) -> list[str]:
+    """Return rendered runtime error records without unrelated logger output."""
+    return [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "hephaestus.git.runtime" and record.levelno >= logging.ERROR
+    ]
+
+
 @pytest.mark.requires_posix
 class TestRun:
     """Tests for subprocess delegation and redacted diagnostics."""
@@ -98,6 +107,247 @@ class TestRun:
             input_text=None,
             retries=0,
         )
+
+    @pytest.mark.parametrize(
+        ("returncode", "command", "cwd", "stdout", "stderr"),
+        [
+            pytest.param(
+                128,
+                ["git", "fetch", "origin"],
+                Path("/repo/fetch"),
+                "remote: fetch incomplete\n",
+                "fatal: remote repository unavailable\n",
+                id="exit-128",
+            ),
+            pytest.param(
+                129,
+                ["git", "worktree", "list", "--porcelain", "-z"],
+                Path("/repo/usage"),
+                "usage: git worktree list\n",
+                "error: unknown switch `z'\n",
+                id="exit-129",
+            ),
+        ],
+    )
+    def test_git_failure_logs_context_and_reraises(
+        self,
+        caplog: pytest.LogCaptureFixture,
+        returncode: int,
+        command: list[str],
+        cwd: Path,
+        stdout: str,
+        stderr: str,
+    ) -> None:
+        failure = subprocess.CalledProcessError(returncode, command, output=stdout, stderr=stderr)
+        with (
+            caplog.at_level(logging.ERROR, logger="hephaestus.git.runtime"),
+            patch("hephaestus.git.runtime._shared_run_git", side_effect=failure) as mock_run,
+            pytest.raises(subprocess.CalledProcessError) as caught,
+        ):
+            git_runtime.run(command, cwd=cwd)
+
+        assert caught.value is failure
+        mock_run.assert_called_once_with(
+            command,
+            cwd=cwd,
+            timeout=None,
+            check=True,
+            log_on_error=False,
+            env=None,
+            input_text=None,
+            retries=0,
+        )
+        messages = _runtime_error_messages(caplog)
+        assert len(messages) == 1
+        message = messages[0]
+        assert f"Subprocess failed with exit code {returncode}" in message
+        assert " ".join(command) in message
+        assert str(cwd) in message
+        assert stdout.strip() in message
+        assert stderr.strip() in message
+
+    def test_git_failure_redacts_and_bounds_diagnostic_fields(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        command_url = "https://operator:command-credential@example.invalid/repository.git"
+        command = ["git", "clone", "c" * 2200 + "\n" + command_url]
+        cwd = Path("/repo/" + "d" * 2100 + "\ntoken=cwd-token-secret\ncwd-tail")
+        private_key_type = "OPENSSH PRIVATE " + "KEY"
+        private_key = (
+            f"-----BEGIN {private_key_type}-----\n"
+            "private-key-material\n"
+            f"-----END {private_key_type}-----"
+        )
+        stdout = "s" * 2100 + "\n" + private_key + "\nstdout-tail"
+        stderr = (
+            "e" * 2100
+            + "\napi_key=stderr-api-secret"
+            + "\nAuthorization: Bearer stderr-auth-token\nstderr-tail"
+        )
+        failure = subprocess.CalledProcessError(128, command, output=stdout, stderr=stderr)
+        with (
+            caplog.at_level(logging.ERROR, logger="hephaestus.git.runtime"),
+            patch("hephaestus.git.runtime._shared_run_git", side_effect=failure),
+            pytest.raises(subprocess.CalledProcessError),
+        ):
+            git_runtime.run(command, cwd=cwd)
+
+        messages = _runtime_error_messages(caplog)
+        assert len(messages) == 1
+        message = messages[0]
+        assert "\n" not in message
+        assert "\\n" in message
+        command_text, remainder = message.split("; command=", 1)[1].split("; cwd=", 1)
+        cwd_text, remainder = remainder.split("; stdout=", 1)
+        stdout_text, stderr_text = remainder.split("; stderr=", 1)
+        fields = {
+            "command": ast.literal_eval(command_text),
+            "cwd": ast.literal_eval(cwd_text),
+            "stdout": ast.literal_eval(stdout_text),
+            "stderr": ast.literal_eval(stderr_text),
+        }
+        for value in fields.values():
+            assert value.startswith("...(")
+            assert len(value) <= 2048
+        assert fields["command"].endswith("\n<redacted-git-url>")
+        assert fields["cwd"].endswith("cwd-tail")
+        assert fields["stdout"].endswith("<redacted>\nstdout-tail")
+        assert fields["stderr"].endswith("stderr-tail")
+        assert "token=<redacted-value>" in fields["cwd"]
+        assert "api_key=<redacted-value>" in fields["stderr"]
+        assert "Authorization: Bearer <redacted-value>" in fields["stderr"]
+        for secret in (
+            command_url,
+            "command-credential",
+            "cwd-token-secret",
+            "private-key-material",
+            "OPENSSH PRIVATE KEY",
+            "stderr-api-secret",
+            "stderr-auth-token",
+        ):
+            assert secret not in message
+
+    def test_git_timeout_logs_context_and_reraises(self, caplog: pytest.LogCaptureFixture) -> None:
+        command = [
+            "git",
+            "fetch",
+            "https://operator:timeout-credential@example.invalid/repository.git",
+        ]
+        timeout = subprocess.TimeoutExpired(
+            command,
+            7,
+            output=b"output password=timeout-password\n",
+            stderr=b"fatal: operation timed out\n",
+        )
+        with (
+            caplog.at_level(logging.ERROR, logger="hephaestus.git.runtime"),
+            patch("hephaestus.git.runtime._shared_run_git", side_effect=timeout),
+            pytest.raises(subprocess.TimeoutExpired) as caught,
+        ):
+            git_runtime.run(command, cwd=Path("/repo/timeout"), timeout=7)
+
+        assert caught.value is timeout
+        messages = _runtime_error_messages(caplog)
+        assert len(messages) == 1
+        message = messages[0]
+        assert message.startswith("Subprocess timed out")
+        assert "exit code 128" not in message
+        assert "exit code 129" not in message
+        assert "<redacted-git-url>" in message
+        assert "timeout-credential" not in message
+        assert "/repo/timeout" in message
+        assert "password=<redacted-value>" in message
+        assert "timeout-password" not in message
+        assert "fatal: operation timed out" in message
+
+    @pytest.mark.parametrize(
+        "failure",
+        [
+            pytest.param(
+                subprocess.CalledProcessError(128, ["git", "status"], stderr="fatal"),
+                id="called-process-error",
+            ),
+            pytest.param(subprocess.TimeoutExpired(["git", "status"], 3), id="timeout"),
+        ],
+    )
+    def test_git_failure_logging_can_be_disabled(
+        self,
+        caplog: pytest.LogCaptureFixture,
+        failure: subprocess.CalledProcessError | subprocess.TimeoutExpired,
+    ) -> None:
+        with (
+            caplog.at_level(logging.ERROR, logger="hephaestus.git.runtime"),
+            patch("hephaestus.git.runtime._shared_run_git", side_effect=failure) as mock_run,
+            pytest.raises(type(failure)) as caught,
+        ):
+            git_runtime.run(["git", "status"], log_errors=False)
+
+        assert caught.value is failure
+        mock_run.assert_called_once()
+        assert mock_run.call_args.kwargs["log_on_error"] is False
+        assert mock_run.call_args.kwargs["retries"] == 0
+        assert _runtime_error_messages(caplog) == []
+
+    def test_git_nonzero_result_without_check_stays_quiet(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        completed = subprocess.CompletedProcess(
+            ["git", "status"], 128, stdout="", stderr="fatal: tolerated probe"
+        )
+        with (
+            caplog.at_level(logging.ERROR, logger="hephaestus.git.runtime"),
+            patch("hephaestus.git.runtime._shared_run_git", return_value=completed),
+        ):
+            result = git_runtime.run(["git", "status"], check=False, log_errors=True)
+
+        assert result is completed
+        assert _runtime_error_messages(caplog) == []
+
+    def test_real_shared_git_wrapper_does_not_duplicate_failure_log(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        failure = subprocess.CalledProcessError(128, ["git", "status"])
+        with (
+            caplog.at_level(logging.ERROR),
+            patch("hephaestus.utils.git.run_subprocess", side_effect=failure) as mock_run,
+            pytest.raises(subprocess.CalledProcessError) as caught,
+        ):
+            git_runtime.run(["git", "status"])
+
+        assert caught.value is failure
+        mock_run.assert_called_once()
+        assert mock_run.call_args.kwargs["log_on_error"] is False
+        logger_names = {
+            "hephaestus.git.runtime",
+            "hephaestus.utils.git",
+            "hephaestus.utils.helpers",
+        }
+        records = [
+            record
+            for record in caplog.records
+            if record.name in logger_names and record.levelno >= logging.ERROR
+        ]
+        assert len(records) == 1
+        assert records[0].name == "hephaestus.git.runtime"
+        message = records[0].getMessage()
+        assert "cwd='<current working directory>'" in message
+        assert "stdout=" not in message
+        assert "stderr=" not in message
+
+    def test_git_cancellation_propagates_without_failure_log_or_retry(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        cancellation = InterruptedError("Git operation cancelled")
+        with (
+            caplog.at_level(logging.ERROR, logger="hephaestus.git.runtime"),
+            patch("hephaestus.git.runtime._shared_run_git", side_effect=cancellation) as mock_run,
+            pytest.raises(InterruptedError) as caught,
+        ):
+            git_runtime.run(["git", "status"])
+
+        assert caught.value is cancellation
+        mock_run.assert_called_once()
+        assert _runtime_error_messages(caplog) == []
 
 
 def test_get_repo_root_uses_canonical_helper(tmp_path: Path) -> None:

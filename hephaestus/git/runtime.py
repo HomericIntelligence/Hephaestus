@@ -12,13 +12,20 @@ from pathlib import Path
 from typing import Any, cast
 
 from hephaestus.config.child_environments import read_approved_parent_env
+from hephaestus.diagnostics import redact_git_diagnostic as _redact_git_diagnostics
 from hephaestus.utils.cache import ThreadSafeCache
 from hephaestus.utils.file_lock import (
     ExclusiveLockUnavailableError,
     LockUnavailableError,
     file_lock,
 )
-from hephaestus.utils.git import run_git as _shared_run_git
+from hephaestus.utils.git import (
+    _as_text,
+    _format_git_cmd_for_log,
+    _tail_for_git_log,
+    _tail_for_log,
+    run_git as _shared_run_git,
+)
 from hephaestus.utils.helpers import get_repo_root as get_repo_root, run_subprocess
 
 logger = logging.getLogger(__name__)
@@ -163,6 +170,26 @@ def operation_file_lock(path: Path, *, require_exclusive: bool = False) -> Itera
             yield
 
 
+def _format_git_failure_context(
+    cmd: list[str],
+    cwd: Path | None,
+    error: subprocess.TimeoutExpired | subprocess.CalledProcessError,
+) -> str:
+    """Return bounded redacted Git diagnostics with escaped field values."""
+    command = _tail_for_log(_format_git_cmd_for_log(cmd))
+    working_directory = _tail_for_git_log(
+        str(cwd) if cwd is not None else "<current working directory>"
+    )
+    fields = [f"command={command!r}", f"cwd={working_directory!r}"]
+    stdout = _as_text(error.output)
+    stderr = _as_text(error.stderr)
+    if stdout:
+        fields.append(f"stdout={_tail_for_git_log(stdout)!r}")
+    if stderr:
+        fields.append(f"stderr={_tail_for_git_log(stderr)!r}")
+    return "; ".join(fields)
+
+
 def run(
     cmd: list[str],
     cwd: Path | None = None,
@@ -183,8 +210,9 @@ def run(
     timeout = remaining_operation_timeout(timeout)
     shutdown = shutdown or current_operation_shutdown()
     cancellation: dict[str, Any] = {"shutdown": shutdown} if shutdown is not None else {}
+    is_git_command = bool(cmd and cmd[0] == "git")
     try:
-        if cmd and cmd[0] == "git":
+        if is_git_command:
             return _shared_run_git(
                 cmd,
                 cwd=cwd,
@@ -206,13 +234,26 @@ def run(
             input_text=input_text,
             **cancellation,
         )
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as error:
         if log_errors:
-            logger.error("Subprocess timed out")
+            if is_git_command:
+                logger.error(
+                    "Subprocess timed out; %s",
+                    _redact_git_diagnostics(_format_git_failure_context(cmd, cwd, error)),
+                )
+            else:
+                logger.error("Subprocess timed out")
         raise
     except subprocess.CalledProcessError as error:
         if log_errors:
-            logger.error("Subprocess failed with exit code %s", error.returncode)
+            if is_git_command:
+                logger.error(
+                    "Subprocess failed with exit code %s; %s",
+                    error.returncode,
+                    _redact_git_diagnostics(_format_git_failure_context(cmd, cwd, error)),
+                )
+            else:
+                logger.error("Subprocess failed with exit code %s", error.returncode)
         raise
 
 
