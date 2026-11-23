@@ -449,6 +449,7 @@ class TestAddGithubThrottleArgs:
         # the account budget instead of permitting more than it allows.
         assert args.gh_global_rate is None
         assert args.gh_global_burst == 30.0
+        assert args.gh_throttle_dir is None
 
     def test_the_default_rate_paces_below_the_hourly_quota(self) -> None:
         from hephaestus.git.gh.rate_limit import DEFAULT_GLOBAL_RATE
@@ -463,6 +464,30 @@ class TestAddGithubThrottleArgs:
         args = parser.parse_args(["--gh-global-rate", "5.5", "--gh-global-burst", "12"])
         assert args.gh_global_rate == 5.5
         assert args.gh_global_burst == 12.0
+
+    def test_custom_throttle_directory(self) -> None:
+        """An absolute node-local override is accepted."""
+        parser = argparse.ArgumentParser()
+        add_github_throttle_args(parser)
+        args = parser.parse_args(["--gh-throttle-dir", "/var/tmp/gh-throttle"])
+        assert args.gh_throttle_dir == "/var/tmp/gh-throttle"
+
+    def test_home_relative_throttle_directory_expands(self, monkeypatch, tmp_path) -> None:
+        """A home-relative override becomes an absolute path."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        parser = argparse.ArgumentParser()
+        add_github_throttle_args(parser)
+        args = parser.parse_args(["--gh-throttle-dir", "~/gh-throttle"])
+        assert args.gh_throttle_dir == str(tmp_path / "gh-throttle")
+
+    @pytest.mark.parametrize("value", ["relative/path", "."])
+    def test_relative_throttle_directory_exits_2(self, value: str) -> None:
+        """A relative override fails as a usage error."""
+        parser = argparse.ArgumentParser()
+        add_github_throttle_args(parser)
+        with pytest.raises(SystemExit) as exc:
+            parser.parse_args(["--gh-throttle-dir", value])
+        assert exc.value.code == 2
 
     def test_zero_rate_allowed(self) -> None:
         parser = argparse.ArgumentParser()
@@ -493,7 +518,22 @@ class TestAddGithubThrottleArgs:
         args = parser.parse_args(["--gh-global-rate", "4", "--gh-global-burst", "9"])
         with patch("hephaestus.git.gh.rate_limit.configure_gh_global_throttle") as mock_configure:
             configure_github_throttle_from_args(args)
-        mock_configure.assert_called_once_with(rate=4.0, burst=9.0)
+        mock_configure.assert_called_once_with(rate=4.0, burst=9.0, directory=None)
+
+    def test_configure_forwards_throttle_directory(self) -> None:
+        """The CLI override reaches the throttle implementation."""
+        from hephaestus.git.gh.rate_limit import DEFAULT_GLOBAL_RATE
+
+        parser = argparse.ArgumentParser()
+        add_github_throttle_args(parser)
+        args = parser.parse_args(["--gh-throttle-dir", "/var/tmp/gh-throttle"])
+        with patch("hephaestus.git.gh.rate_limit.configure_gh_global_throttle") as mock_configure:
+            configure_github_throttle_from_args(args)
+        mock_configure.assert_called_once_with(
+            rate=DEFAULT_GLOBAL_RATE,
+            burst=30.0,
+            directory="/var/tmp/gh-throttle",
+        )
 
 
 class TestAddGithubReadCacheArgs:

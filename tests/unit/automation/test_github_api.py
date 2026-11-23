@@ -5,6 +5,7 @@ import json
 import subprocess
 import threading
 from collections.abc import Generator
+from pathlib import Path
 from typing import Any
 from unittest.mock import Mock, patch
 
@@ -2130,13 +2131,13 @@ class TestGhCallThrottle:
     """Tests for the globally configured ``gh`` throttle."""
 
     @pytest.fixture(autouse=True)
-    def _reset_throttle(self, monkeypatch: pytest.MonkeyPatch) -> Generator[None]:
+    def _reset_throttle(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Generator[None]:
         # Preserve the compatibility seam while keeping tests independent of
         # process-global throttle state.
         client_module._GH_THROTTLE = threading.local()
-        configure_gh_global_throttle(rate=0, burst=10)
+        configure_gh_global_throttle(rate=0, burst=10, directory=tmp_path)
         yield
-        configure_gh_global_throttle(rate=10.0, burst=30.0)
+        configure_gh_global_throttle(rate=10.0, burst=30.0, directory=tmp_path)
 
     @patch("hephaestus.git.gh.client.run_subprocess")
     def test_calls_do_not_consult_ambient_throttle_configuration(self, mock_run: Any) -> None:
