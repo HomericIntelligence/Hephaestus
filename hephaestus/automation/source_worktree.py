@@ -749,6 +749,159 @@ class _ImplementationWriterTransitionJournal:
         return journal
 
 
+@dataclass(frozen=True, slots=True)
+class _LegacyReceiptReconciliation:
+    """Closed-schema durable record for one pre-intake receipt migration."""
+
+    repository: str
+    repository_identity: str
+    ownership_key: str
+    item_number: int
+    lane: SourceLane
+    predecessor_path: str
+    predecessor_revision: str
+    predecessor_branch: str | None
+    successor_path: str
+    successor_generation: int
+    phase: str
+    record_digest: str
+    schema_version: int = 1
+
+    def _digest_payload(self) -> dict[str, object]:
+        """Return the immutable migration fields used for its digest."""
+        return {
+            "schema_version": self.schema_version,
+            "repository": self.repository,
+            "repository_identity": self.repository_identity,
+            "ownership_key": self.ownership_key,
+            "item_number": self.item_number,
+            "lane": self.lane.value,
+            "predecessor_path": self.predecessor_path,
+            "predecessor_revision": self.predecessor_revision,
+            "predecessor_branch": self.predecessor_branch,
+            "successor_path": self.successor_path,
+            "successor_generation": self.successor_generation,
+        }
+
+    def to_dict(self) -> dict[str, object]:
+        """Return the JSON-compatible migration record."""
+        return {
+            **self._digest_payload(),
+            "phase": self.phase,
+            "record_digest": self.record_digest,
+        }
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        repository: str,
+        repository_identity: str,
+        ownership_key: str,
+        item_number: int,
+        predecessor: SourceWorkspaceReceipt,
+        successor_path: Path,
+        phase: str,
+    ) -> Self:
+        """Create one migration record with a stable identity digest."""
+        record = cls(
+            repository=repository,
+            repository_identity=repository_identity,
+            ownership_key=ownership_key,
+            item_number=item_number,
+            lane=SourceLane.IMPLEMENTATION,
+            predecessor_path=str(predecessor.path),
+            predecessor_revision=predecessor.revision,
+            predecessor_branch=predecessor.branch,
+            successor_path=str(successor_path),
+            successor_generation=predecessor.generation + 1,
+            phase=phase,
+            record_digest="",
+        )
+        digest = hashlib.sha256(
+            json.dumps(record._digest_payload(), sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        return replace(record, record_digest=digest)
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> Self:
+        """Parse and validate the closed migration-record schema."""
+        fields = {
+            "schema_version",
+            "repository",
+            "repository_identity",
+            "ownership_key",
+            "item_number",
+            "lane",
+            "predecessor_path",
+            "predecessor_revision",
+            "predecessor_branch",
+            "successor_path",
+            "successor_generation",
+            "phase",
+            "record_digest",
+        }
+        if set(payload) != fields:
+            raise SourceWorkspaceError("source workspace legacy migration schema mismatch")
+        if (
+            type(payload["schema_version"]) is not int
+            or type(payload["item_number"]) is not int
+            or type(payload["successor_generation"]) is not int
+            or not all(
+                isinstance(payload[name], str)
+                for name in (
+                    "repository",
+                    "repository_identity",
+                    "ownership_key",
+                    "lane",
+                    "predecessor_path",
+                    "predecessor_revision",
+                    "successor_path",
+                    "phase",
+                    "record_digest",
+                )
+            )
+            or (
+                payload["predecessor_branch"] is not None
+                and not isinstance(payload["predecessor_branch"], str)
+            )
+        ):
+            raise SourceWorkspaceError("invalid source workspace legacy migration")
+        try:
+            record = cls(
+                schema_version=payload["schema_version"],
+                repository=str(payload["repository"]),
+                repository_identity=str(payload["repository_identity"]),
+                ownership_key=str(payload["ownership_key"]),
+                item_number=payload["item_number"],
+                lane=SourceLane(payload["lane"]),
+                predecessor_path=str(payload["predecessor_path"]),
+                predecessor_revision=str(payload["predecessor_revision"]),
+                predecessor_branch=payload["predecessor_branch"],
+                successor_path=str(payload["successor_path"]),
+                successor_generation=payload["successor_generation"],
+                phase=str(payload["phase"]),
+                record_digest=str(payload["record_digest"]),
+            )
+        except (TypeError, ValueError) as exc:
+            raise SourceWorkspaceError(f"invalid source workspace legacy migration: {exc}") from exc
+        if (
+            record.schema_version != 1
+            or record.lane is not SourceLane.IMPLEMENTATION
+            or record.phase not in {"prepared", "completed"}
+            or re.fullmatch(r"[0-9a-f]{64}", record.record_digest) is None
+            or re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", record.predecessor_revision) is None
+            or record.successor_generation < 2
+        ):
+            raise SourceWorkspaceError("unsupported source workspace legacy migration")
+        expected_digest = hashlib.sha256(
+            json.dumps(record._digest_payload(), sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        if record.record_digest != expected_digest:
+            raise SourceWorkspaceError("source workspace legacy migration digest mismatch")
+        return record
+
+
 class SourceWorkspaceManager:
     """Create, rebind, validate, and clean the two item source lanes."""
 
@@ -1359,19 +1512,11 @@ class SourceWorkspaceManager:
                 )
             return False
         if old.path.resolve() != expected_path:
-            raise SourceWorkspaceError(
-                "source workspace receipt path is not deterministic",
-                recovery=self._recovery(
-                    SourceWorkspaceRecoveryKind.UNPROVEN_PREDECESSOR,
-                    item_number=item_number,
-                    path=expected_path,
-                    receipt_path=receipt_path,
-                    manual_action=(
-                        f"Inspect and preserve {expected_path}. Use the approved "
-                        "source-workspace cleanup only after you preserve the work. "
-                        f"Then rerun issue #{item_number}."
-                    ),
-                ),
+            old = self._reconcile_legacy_receipt_path(
+                old,
+                item_number=item_number,
+                expected_path=expected_path,
+                receipt_path=receipt_path,
             )
         if (old.detached and old.branch is not None) or (not old.detached and not old.branch):
             raise SourceWorkspaceError(
@@ -2899,6 +3044,384 @@ class SourceWorkspaceManager:
         path = self._transition_path(journal.item_number)
         write_secure(path, json.dumps(journal.to_dict(), sort_keys=True, indent=2) + "\n")
         self._fsync_state_dir()
+
+    def _legacy_reconciliation_path(self, item_number: int, predecessor_path: Path) -> Path:
+        """Return the private durable record path for one legacy receipt migration."""
+        digest = hashlib.sha256(str(predecessor_path).encode()).hexdigest()[:16]
+        return self.state_dir / f"{item_number}-impl-legacy-reconciliation-{digest}.json"
+
+    def _read_legacy_reconciliation(
+        self, item_number: int, predecessor_path: Path
+    ) -> _LegacyReceiptReconciliation | None:
+        """Read and validate one legacy receipt migration record."""
+        path = self._legacy_reconciliation_path(item_number, predecessor_path)
+        if path.is_symlink():
+            raise SourceWorkspaceError(f"refusing invalid source workspace migration: {path}")
+        if not path.exists():
+            return None
+        if not path.is_file():
+            raise SourceWorkspaceError(f"refusing invalid source workspace migration: {path}")
+        try:
+            payload = _terminal_json_object(_terminal_read_bytes(path))
+        except (OSError, ValueError) as exc:
+            raise SourceWorkspaceError(f"cannot read source workspace migration: {path}") from exc
+        if not isinstance(payload, dict):
+            raise SourceWorkspaceError("source workspace migration must be an object")
+        record = _LegacyReceiptReconciliation.from_dict(payload)
+        if (
+            record.repository != self.repository
+            or record.repository_identity != self.repository_identity
+            or record.ownership_key != self.ownership_key(item_number, SourceLane.IMPLEMENTATION)
+            or record.item_number != item_number
+            or record.successor_path != str(self._implementation_path(item_number))
+        ):
+            raise SourceWorkspaceError("source workspace migration identity is invalid")
+        return record
+
+    def _write_legacy_reconciliation(self, record: _LegacyReceiptReconciliation) -> None:
+        """Write and flush one legacy receipt migration record."""
+        if self.state_dir.is_symlink() or (self.state_dir.exists() and not self.state_dir.is_dir()):
+            raise SourceWorkspaceError("source workspace migration state directory is invalid")
+        path = self._legacy_reconciliation_path(record.item_number, Path(record.predecessor_path))
+        write_secure(path, json.dumps(record.to_dict(), sort_keys=True, indent=2) + "\n")
+        self._fsync_state_dir()
+
+    def _legacy_ambiguous_recovery(
+        self,
+        *,
+        item_number: int,
+        receipt: SourceWorkspaceReceipt,
+        expected_path: Path,
+        receipt_path: Path,
+    ) -> SourceWorkspaceRecovery:
+        """Build the recovery record for an unprovable legacy migration."""
+        return self._recovery(
+            SourceWorkspaceRecoveryKind.UNPROVEN_PREDECESSOR,
+            item_number=item_number,
+            path=expected_path,
+            receipt_path=receipt_path,
+            manual_action=(
+                f"Preserve both {receipt.path} and {expected_path}. Inspect the branch "
+                "registration and remove only the checkout you can prove is not the "
+                f"legacy lane. Then rerun issue #{item_number}."
+            ),
+        )
+
+    def _validate_legacy_checkout(
+        self,
+        *,
+        path: Path,
+        receipt: SourceWorkspaceReceipt,
+        item_number: int,
+        expected_path: Path,
+        receipt_path: Path,
+    ) -> str:
+        """Validate one clean legacy or migrated checkout and return its HEAD."""
+        if not path.is_absolute() or path.is_symlink() or path.resolve(strict=False) != path:
+            raise SourceWorkspaceError(
+                "source workspace legacy checkout path is invalid",
+                recovery=self._legacy_ambiguous_recovery(
+                    item_number=item_number,
+                    receipt=receipt,
+                    expected_path=expected_path,
+                    receipt_path=receipt_path,
+                ),
+            )
+        if not path.exists():
+            raise SourceWorkspaceError(
+                f"source workspace receipt path is missing: {path}",
+                recovery=self._recovery(
+                    SourceWorkspaceRecoveryKind.RECEIPT_PATH_MISSING,
+                    item_number=item_number,
+                    path=path,
+                    receipt_path=receipt_path,
+                    manual_action=(
+                        f"Inspect the worktree registration for {path}. Repair the "
+                        "registration if the worktree moved. If it was deleted, preserve "
+                        "reachable refs, prune only that stale registration, remove "
+                        f"{receipt_path}, and rerun issue #{item_number}."
+                    ),
+                ),
+            )
+        if not self._path_is_registered_to_repository(path):
+            raise SourceWorkspaceError(
+                "source workspace legacy checkout is not registered to this repository",
+                recovery=self._legacy_ambiguous_recovery(
+                    item_number=item_number,
+                    receipt=receipt,
+                    expected_path=expected_path,
+                    receipt_path=receipt_path,
+                ),
+            )
+        if self._is_dirty(path):
+            raise SourceWorkspaceError(
+                "implementation writer predecessor has uncommitted changes that the "
+                f"legacy migration would move: {path}",
+                recovery=self._recovery(
+                    SourceWorkspaceRecoveryKind.DIRTY_WORKTREE,
+                    item_number=item_number,
+                    path=path,
+                    receipt_path=receipt_path,
+                    manual_action=(
+                        f"Commit the changes in {path}, then rerun issue #{item_number}."
+                    ),
+                ),
+            )
+        physical_revision = self._head_revision(path)
+        if not self._has_legitimate_descent(path, receipt.revision, physical_revision):
+            raise SourceWorkspaceError(
+                f"source workspace legacy revision drifted and is preserved: {path}",
+                recovery=self._recovery(
+                    SourceWorkspaceRecoveryKind.REVISION_DRIFT,
+                    item_number=item_number,
+                    path=path,
+                    receipt_path=receipt_path,
+                    manual_action=self._revision_recovery_action(
+                        item_number=item_number,
+                        path=path,
+                        receipt=receipt,
+                    ),
+                ),
+            )
+        expected_branch = (
+            None
+            if receipt.detached
+            else f"refs/heads/{receipt.branch}"
+            if receipt.branch
+            else "invalid"
+        )
+        if self._head_branch(path) != expected_branch:
+            raise SourceWorkspaceError(
+                f"source workspace legacy branch does not match its receipt: {path}",
+                recovery=self._recovery(
+                    SourceWorkspaceRecoveryKind.BRANCH_MISMATCH,
+                    item_number=item_number,
+                    path=path,
+                    receipt_path=receipt_path,
+                    manual_action=self._revision_recovery_action(
+                        item_number=item_number,
+                        path=path,
+                        receipt=receipt,
+                    ),
+                ),
+            )
+        if receipt.branch is not None:
+            holder = self._branch_holder(receipt.branch)
+            if holder is None or holder.resolve() != path:
+                raise SourceWorkspaceError(
+                    "source workspace legacy branch is not held by its receipt checkout",
+                    recovery=self._legacy_ambiguous_recovery(
+                        item_number=item_number,
+                        receipt=receipt,
+                        expected_path=expected_path,
+                        receipt_path=receipt_path,
+                    ),
+                )
+        return physical_revision
+
+    def _move_legacy_checkout(
+        self,
+        *,
+        receipt: SourceWorkspaceReceipt,
+        expected_path: Path,
+        item_number: int,
+        receipt_path: Path,
+    ) -> None:
+        """Move one clean legacy checkout to the deterministic intake path."""
+        moved = _git(
+            self.repo_root,
+            "worktree",
+            "move",
+            str(receipt.path),
+            str(expected_path),
+            check=False,
+        )
+        if moved.returncode:
+            detail = moved.stderr.strip() or moved.stdout.strip() or "git worktree move failed"
+            raise SourceWorkspaceError(
+                f"source workspace legacy migration failed: {detail}",
+                recovery=self._legacy_ambiguous_recovery(
+                    item_number=item_number,
+                    receipt=receipt,
+                    expected_path=expected_path,
+                    receipt_path=receipt_path,
+                ),
+            )
+        if (
+            receipt.path.exists()
+            or receipt.path.is_symlink()
+            or not expected_path.exists()
+            or expected_path.is_symlink()
+            or not self._path_is_registered_to_repository(expected_path)
+        ):
+            raise SourceWorkspaceError(
+                "source workspace legacy migration is unconfirmed",
+                recovery=self._legacy_ambiguous_recovery(
+                    item_number=item_number,
+                    receipt=receipt,
+                    expected_path=expected_path,
+                    receipt_path=receipt_path,
+                ),
+            )
+
+    def _reconcile_legacy_receipt_path(
+        self,
+        receipt: SourceWorkspaceReceipt,
+        *,
+        item_number: int,
+        expected_path: Path,
+        receipt_path: Path,
+    ) -> SourceWorkspaceReceipt:
+        """Migrate one valid pre-intake receipt to the deterministic path."""
+        metadata_lock = WorktreeManager.git_metadata_lock_path(self.repo_root)
+        with operation_file_lock(metadata_lock):
+            record = self._read_legacy_reconciliation(item_number, receipt.path)
+            if record is not None:
+                if (
+                    record.phase != "prepared"
+                    or record.predecessor_path != str(receipt.path)
+                    or record.predecessor_revision != receipt.revision
+                    or record.predecessor_branch != receipt.branch
+                    or record.successor_generation != receipt.generation + 1
+                ):
+                    raise SourceWorkspaceError(
+                        "source workspace legacy migration is stale",
+                        recovery=self._legacy_ambiguous_recovery(
+                            item_number=item_number,
+                            receipt=receipt,
+                            expected_path=expected_path,
+                            receipt_path=receipt_path,
+                        ),
+                    )
+                if receipt.path.exists() or receipt.path.is_symlink():
+                    if expected_path.exists() or expected_path.is_symlink():
+                        raise SourceWorkspaceError(
+                            "source workspace legacy migration is ambiguous",
+                            recovery=self._legacy_ambiguous_recovery(
+                                item_number=item_number,
+                                receipt=receipt,
+                                expected_path=expected_path,
+                                receipt_path=receipt_path,
+                            ),
+                        )
+                    self._validate_legacy_checkout(
+                        path=receipt.path,
+                        receipt=receipt,
+                        item_number=item_number,
+                        expected_path=expected_path,
+                        receipt_path=receipt_path,
+                    )
+                    self._move_legacy_checkout(
+                        receipt=receipt,
+                        expected_path=expected_path,
+                        item_number=item_number,
+                        receipt_path=receipt_path,
+                    )
+                    revision = self._validate_legacy_checkout(
+                        path=expected_path,
+                        receipt=receipt,
+                        item_number=item_number,
+                        expected_path=expected_path,
+                        receipt_path=receipt_path,
+                    )
+                else:
+                    if not expected_path.exists() or expected_path.is_symlink():
+                        raise SourceWorkspaceError(
+                            "source workspace legacy migration checkout is missing",
+                            recovery=self._legacy_ambiguous_recovery(
+                                item_number=item_number,
+                                receipt=receipt,
+                                expected_path=expected_path,
+                                receipt_path=receipt_path,
+                            ),
+                        )
+                    revision = self._validate_legacy_checkout(
+                        path=expected_path,
+                        receipt=receipt,
+                        item_number=item_number,
+                        expected_path=expected_path,
+                        receipt_path=receipt_path,
+                    )
+            else:
+                if expected_path.exists() or expected_path.is_symlink():
+                    raise SourceWorkspaceError(
+                        "source workspace legacy target already exists",
+                        recovery=self._legacy_ambiguous_recovery(
+                            item_number=item_number,
+                            receipt=receipt,
+                            expected_path=expected_path,
+                            receipt_path=receipt_path,
+                        ),
+                    )
+                if receipt.obligations:
+                    raise SourceWorkspaceError(
+                        "implementation writer predecessor has durable obligations",
+                        recovery=self._recovery(
+                            SourceWorkspaceRecoveryKind.DURABLE_OBLIGATIONS,
+                            item_number=item_number,
+                            path=expected_path,
+                            receipt_path=receipt_path,
+                            manual_action=(
+                                "Complete or explicitly clear the durable obligations for "
+                                f"{receipt.path} through the owning pipeline. Then rerun "
+                                f"issue #{item_number}."
+                            ),
+                        ),
+                    )
+                if receipt.schema_version != 1 or receipt.dirty_claim is not None:
+                    raise SourceWorkspaceError(
+                        "source workspace legacy receipt is ambiguous",
+                        recovery=self._legacy_ambiguous_recovery(
+                            item_number=item_number,
+                            receipt=receipt,
+                            expected_path=expected_path,
+                            receipt_path=receipt_path,
+                        ),
+                    )
+                self._validate_legacy_checkout(
+                    path=receipt.path,
+                    receipt=receipt,
+                    item_number=item_number,
+                    expected_path=expected_path,
+                    receipt_path=receipt_path,
+                )
+                record = _LegacyReceiptReconciliation.create(
+                    repository=self.repository,
+                    repository_identity=self.repository_identity,
+                    ownership_key=self.ownership_key(item_number, SourceLane.IMPLEMENTATION),
+                    item_number=item_number,
+                    predecessor=receipt,
+                    successor_path=expected_path,
+                    phase="prepared",
+                )
+                self._write_legacy_reconciliation(record)
+                self._move_legacy_checkout(
+                    receipt=receipt,
+                    expected_path=expected_path,
+                    item_number=item_number,
+                    receipt_path=receipt_path,
+                )
+                revision = self._validate_legacy_checkout(
+                    path=expected_path,
+                    receipt=receipt,
+                    item_number=item_number,
+                    expected_path=expected_path,
+                    receipt_path=receipt_path,
+                )
+            migrated = replace(
+                receipt,
+                path=expected_path,
+                revision=revision,
+                generation=record.successor_generation,
+            )
+            self._write_receipt(migrated)
+            self._write_legacy_reconciliation(replace(record, phase="completed"))
+            logger.warning(
+                "source workspace migrated legacy receipt %s to %s",
+                receipt.path,
+                expected_path,
+            )
+            return migrated
 
     def _validate_writer_transition_digest(self, item_number: int, expected_digest: str) -> None:
         """Require the pending journal to match one armed capability."""
