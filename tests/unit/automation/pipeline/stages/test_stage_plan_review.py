@@ -2815,8 +2815,6 @@ def test_missing_verdict_requests_one_clarification_in_the_same_review(
         outcome = stage.step(item, ctx)
 
     assert outcome == StageOutcome(Disposition.RETRY, "review verdict clarification requested")
-    assert isinstance(outcome, StageOutcome)
-    assert outcome.disposition is Disposition.RETRY
     assert sum("invalid review verdict" in message for message in caplog.messages) == 1
     assert item.state == "REVIEW_WAIT"
     assert "review_error_retries" not in item.payload

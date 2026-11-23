@@ -3199,7 +3199,9 @@ class TestPlanningStageOnJobDone:
                 ctx,
             )
             item.state = "VERIFY"
-            outcomes.append(stage.step(item, ctx))
+            result = stage.step(item, ctx)
+            assert isinstance(result, StageOutcome)
+            outcomes.append(result)
 
         assert [outcome.disposition for outcome in outcomes] == [
             Disposition.RETRY,
