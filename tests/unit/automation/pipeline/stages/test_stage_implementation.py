@@ -42,6 +42,7 @@ from hephaestus.automation.pipeline.stages import (
     JobRequest,
     StageOutcome,
 )
+from hephaestus.automation.pipeline.stages.durable_request import PENDING_GITHUB_REQUEST
 from hephaestus.automation.pipeline.stages.implementation import (
     BRANCH_WORKTREE_OWNER_PENDING_DELAY_S,
     GIT_ERROR_RETRY_CAP,
@@ -2839,6 +2840,135 @@ class TestGitErrorRetryCap:
         stage.on_job_done(item, JobResult(ok=True, value=True), ctx)
 
         assert "git_error_retries" not in item.payload
+
+
+class TestPlanScopeReadRetry:
+    """A transient current-plan read retries before the stage holds."""
+
+    @staticmethod
+    def _request(issue: int = 7) -> ReadCurrentPlanScopeRequest:
+        """Return a plan-scope request for the test repository."""
+        return ReadCurrentPlanScopeRequest("test-org/test-repo", issue, 9999999999.0)
+
+    def test_transient_failure_retries_with_the_worker_delay(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A journal read failure parks and then queues one fresh read."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=7, state="TESTFIX_WAIT")
+        request = self._request()
+        item.payload[PENDING_GITHUB_REQUEST] = request
+
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=False,
+                error="comment_journal_read_error",
+                value={
+                    "failure_kind": "comment_journal_read_error",
+                    "retry_delay_s": 5.0,
+                },
+            ),
+            ctx,
+        )
+        outcome = stage.step(item, ctx)
+
+        assert isinstance(outcome, StageOutcome)
+        assert outcome.disposition is Disposition.RETRY
+        assert outcome.note == (
+            "plan scope read failed due to comment_journal_read_error; "
+            f"retrying within {implementation_module.PLAN_SCOPE_RETRY_CAP} attempts"
+        )
+        assert item.state == "TESTFIX_WAIT"
+        assert item.payload["retry_delay_s"] == 5.0
+        assert item.payload[implementation_module._PLAN_SCOPE_RETRIES] == 1
+        assert implementation_module._PLAN_SCOPE_FAILURE not in item.payload
+
+        retry = stage.step(item, ctx)
+
+        assert isinstance(retry, JobRequest)
+        assert isinstance(retry.job, GitHubJob)
+        assert isinstance(retry.job.request, ReadCurrentPlanScopeRequest)
+        assert retry.job.request != request
+        assert item.payload[PENDING_GITHUB_REQUEST] == retry.job.request
+
+    def test_success_clears_retry_markers(self, make_ctx: Any, make_work_item: Any) -> None:
+        """A recovered read removes every stale retry marker."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=7, state="TESTFIX_WAIT")
+        request = self._request()
+        item.payload[PENDING_GITHUB_REQUEST] = request
+        item.payload[implementation_module._PLAN_SCOPE_RETRIES] = 1
+        item.payload[implementation_module._PLAN_SCOPE_FAILURE_CAUSE] = "github_timeout"
+        receipt = CurrentPlanScopeRead(
+            request=request,
+            paths=("a.py",),
+            plan_sha256="a" * 64,
+        )
+
+        stage.on_job_done(item, JobResult(ok=True, value=receipt), ctx)
+
+        assert item.payload[implementation_module._PLAN_SCOPE_RECEIPT] == receipt
+        assert item.payload[implementation_module._PLAN_SCOPE_STATE] == "TESTFIX_WAIT"
+        assert implementation_module._PLAN_SCOPE_RETRIES not in item.payload
+        assert implementation_module._PLAN_SCOPE_FAILURE_CAUSE not in item.payload
+        assert not item.payload.get(implementation_module._PLAN_SCOPE_FAILURE)
+
+    def test_exhausted_transient_failure_holds_with_its_bounded_cause(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Exhaustion keeps the closed failure kind for the operator."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=7, state="TESTFIX_WAIT")
+        item.payload[PENDING_GITHUB_REQUEST] = self._request()
+        item.payload[implementation_module._PLAN_SCOPE_RETRIES] = (
+            implementation_module.PLAN_SCOPE_RETRY_CAP
+        )
+
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=False,
+                error="github_timeout",
+                value={"failure_kind": "github_timeout", "retry_delay_s": 1.0},
+            ),
+            ctx,
+        )
+        outcome = stage.step(item, ctx)
+
+        assert isinstance(outcome, StageOutcome)
+        assert outcome.disposition is Disposition.FINISH_FAIL
+        assert outcome.note == "implementation_plan_scope_unavailable: github_timeout"
+        assert item.payload[implementation_module._PLAN_SCOPE_FAILURE] is True
+        assert item.payload[implementation_module._PLAN_SCOPE_FAILURE_CAUSE] == "github_timeout"
+        assert "retry_delay_s" not in item.payload
+
+    def test_unclassified_read_failure_stays_terminal(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A missing plan or identity conflict does not retry as a transport error."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=7, state="TESTFIX_WAIT")
+        item.payload[PENDING_GITHUB_REQUEST] = self._request()
+
+        stage.on_job_done(
+            item,
+            JobResult(ok=False, error="ValueError: current plan scope is unavailable"),
+            ctx,
+        )
+        outcome = stage.step(item, ctx)
+
+        assert isinstance(outcome, StageOutcome)
+        assert outcome.disposition is Disposition.FINISH_FAIL
+        assert outcome.note == (
+            "implementation_plan_scope_unavailable: ValueError: current plan scope is unavailable"
+        )
+        assert implementation_module._PLAN_SCOPE_RETRIES not in item.payload
+        assert "retry_delay_s" not in item.payload
 
 
 class TestWorktreeAndAdvise:

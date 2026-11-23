@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 import secrets
 import shlex
@@ -362,9 +363,26 @@ _STEP_HANDLER_NAMES: dict[str, str] = {
 
 _DEPENDENCY_RETRY_BACKOFF_S = (1.0, 5.0, 15.0, 60.0, 300.0)
 
+# A complete plan-scope read can fail at the transport boundary after the plan
+# already exists. Those failures get a short bounded retry; an absent plan or
+# an identity conflict stays terminal.
+PLAN_SCOPE_RETRY_CAP = 2
+_PLAN_SCOPE_TRANSIENT_FAILURES = frozenset(
+    {
+        "comment_journal_read_error",
+        "github_cli_error",
+        "github_rate_limit",
+        "github_timeout",
+        "github_unavailable",
+    }
+)
 _PLAN_SCOPE_RECEIPT = "_implementation_plan_scope_receipt"
 _PLAN_SCOPE_STATE = "_implementation_plan_scope_state"
 _PLAN_SCOPE_FAILURE = "_implementation_plan_scope_failure"
+_PLAN_SCOPE_FAILURE_CAUSE = "_implementation_plan_scope_failure_cause"
+_PLAN_SCOPE_RETRIES = "_implementation_plan_scope_retries"
+_PLAN_SCOPE_RETRY_KIND = "_implementation_plan_scope_retry_kind"
+_PLAN_SCOPE_RETRY_DELAY = "_implementation_plan_scope_retry_delay"
 _DIRTY_FINALIZATION_INFLIGHT = "_dirty_direct_finalization_inflight"
 _DIRTY_FINALIZATION_RESULT = "_dirty_direct_finalization_result"
 _SYNC_RESTORED_WRITER_BEFORE_REBASE = "sync_restored_writer_before_rebase"
@@ -845,10 +863,89 @@ def _consume_plan_scope(item: WorkItem) -> None:
     item.payload.pop(_PLAN_SCOPE_STATE, None)
 
 
+def _plan_scope_failure_note(item: WorkItem) -> str:
+    """Return the bounded terminal note for an unavailable current plan."""
+    note = "implementation_plan_scope_unavailable"
+    cause = item.payload.get(_PLAN_SCOPE_FAILURE_CAUSE)
+    if isinstance(cause, str) and cause:
+        note = f"{note}: {cause}"
+    return note[:500]
+
+
+def _record_plan_scope_read_failure(item: WorkItem, result: JobResult) -> None:
+    """Retain a transient read cause or hold a final plan-scope failure."""
+    value = result.value if isinstance(result.value, dict) else {}
+    raw_kind = value.get("failure_kind") or result.error
+    kind = raw_kind if isinstance(raw_kind, str) and raw_kind else None
+    if kind in _PLAN_SCOPE_TRANSIENT_FAILURES:
+        retries = item.payload.get(_PLAN_SCOPE_RETRIES)
+        if type(retries) is not int or retries < 0:
+            retries = 0
+        retries += 1
+        item.payload[_PLAN_SCOPE_RETRIES] = retries
+        if retries <= PLAN_SCOPE_RETRY_CAP:
+            raw_delay = value.get("retry_delay_s")
+            delay = (
+                float(raw_delay)
+                if isinstance(raw_delay, (int, float))
+                and not isinstance(raw_delay, bool)
+                and math.isfinite(float(raw_delay))
+                else 1.0
+            )
+            item.payload[_PLAN_SCOPE_RETRY_KIND] = kind
+            item.payload[_PLAN_SCOPE_RETRY_DELAY] = max(0.0, delay)
+            logger.warning(
+                "implementation:%s: current plan read failed due to %s; "
+                "retrying (%d/%d) after %.1fs",
+                item.issue,
+                kind,
+                retries,
+                PLAN_SCOPE_RETRY_CAP,
+                max(0.0, delay),
+            )
+            return
+        logger.error(
+            "implementation:%s: current plan read failed due to %s after %d attempt(s); "
+            "stopping this attempt with the bounded cause",
+            item.issue,
+            kind,
+            retries,
+        )
+        item.payload[_PLAN_SCOPE_FAILURE_CAUSE] = kind
+    else:
+        cause = redact_diagnostic_text(str(result.error or "unclassified plan read failure"))
+        item.payload[_PLAN_SCOPE_FAILURE_CAUSE] = cause[:200]
+        logger.error(
+            "implementation:%s: current plan read failed without a retryable transport "
+            "classification: %s",
+            item.issue,
+            cause[:200],
+        )
+    item.payload[_PLAN_SCOPE_RETRY_KIND] = None
+    item.payload[_PLAN_SCOPE_RETRY_DELAY] = None
+    item.payload[_PLAN_SCOPE_FAILURE] = True
+
+
 def _require_plan_scope(item: WorkItem, ctx: StageContext) -> JobRequest | StageOutcome | None:
     """Queue a current scope read before the stage can submit source work."""
     if item.payload.get(_PLAN_SCOPE_FAILURE):
-        return StageOutcome(Disposition.FINISH_FAIL, "implementation_plan_scope_unavailable")
+        return StageOutcome(Disposition.FINISH_FAIL, _plan_scope_failure_note(item))
+    retry_kind = item.payload.pop(_PLAN_SCOPE_RETRY_KIND, None)
+    if isinstance(retry_kind, str) and retry_kind:
+        raw_delay = item.payload.pop(_PLAN_SCOPE_RETRY_DELAY, 1.0)
+        delay = (
+            float(raw_delay)
+            if isinstance(raw_delay, (int, float))
+            and not isinstance(raw_delay, bool)
+            and math.isfinite(float(raw_delay))
+            else 1.0
+        )
+        item.payload["retry_delay_s"] = max(0.0, delay)
+        return StageOutcome(
+            Disposition.RETRY,
+            f"plan scope read failed due to {retry_kind}; "
+            f"retrying within {PLAN_SCOPE_RETRY_CAP} attempts",
+        )
     try:
         _pretest_scope(item, ctx)
         return None
@@ -1216,7 +1313,14 @@ class ImplementationStage(Stage):
             return StageOutcome(Disposition.FINISH_FAIL, "no issue number")
         if item.pr is None and not item.payload.get("dirty_direct_active"):
             _consume_plan_scope(item)
-            item.payload.pop(_PLAN_SCOPE_FAILURE, None)
+            for key in (
+                _PLAN_SCOPE_FAILURE,
+                _PLAN_SCOPE_FAILURE_CAUSE,
+                _PLAN_SCOPE_RETRIES,
+                _PLAN_SCOPE_RETRY_KIND,
+                _PLAN_SCOPE_RETRY_DELAY,
+            ):
+                item.payload.pop(key, None)
             if isinstance(item.payload.get(PENDING_GITHUB_REQUEST), ReadCurrentPlanScopeRequest):
                 item.payload.pop(PENDING_GITHUB_REQUEST)
         for key in (
@@ -3263,9 +3367,18 @@ class ImplementationStage(Stage):
                 or pending.repository != f"{ctx.org}/{item.repo}".casefold()
                 or pending.issue_number != item.issue
             ):
-                item.payload[_PLAN_SCOPE_FAILURE] = True
                 _consume_plan_scope(item)
+                if not result.interrupted:
+                    _record_plan_scope_read_failure(item, result)
                 return
+            for key in (
+                _PLAN_SCOPE_FAILURE,
+                _PLAN_SCOPE_FAILURE_CAUSE,
+                _PLAN_SCOPE_RETRIES,
+                _PLAN_SCOPE_RETRY_KIND,
+                _PLAN_SCOPE_RETRY_DELAY,
+            ):
+                item.payload.pop(key, None)
             item.payload[_PLAN_SCOPE_RECEIPT] = receipt
             item.payload[_PLAN_SCOPE_STATE] = item.state
             return
