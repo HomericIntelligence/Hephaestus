@@ -1077,6 +1077,7 @@ def _abort_worker_case(
     conflict: bool = True,
     structural: bool = False,
     pr_number: int | None = 1001,
+    branch: str = "1-repair",
 ) -> Any:
     """Keep real source admission and Git conflicts with controlled external services."""
     import queue
@@ -1096,7 +1097,7 @@ def _abort_worker_case(
     try:
         root, first, base = _repository(tmp_path, origin_repository="acme/repository")
         manager = SourceWorkspaceManager(root, repository="acme/repository")
-        binding = manager.prepare(1, SourceLane.IMPLEMENTATION, first, branch="1-repair")
+        binding = manager.prepare(1, SourceLane.IMPLEMENTATION, first, branch=branch)
         writer_path = "tracked.txt" if conflict else "writer.txt"
         (binding.cwd / writer_path).write_text("writer conflict\n", encoding="utf-8")
         _git(binding.cwd, "add", writer_path)
@@ -1106,7 +1107,7 @@ def _abort_worker_case(
         _git(binding.cwd, "commit", "-s", "-m", "writer conflict input")
         original = _git(binding.cwd, "rev-parse", "HEAD")
         tree = _git(binding.cwd, "rev-parse", "HEAD^{tree}")
-        binding = manager.prepare(1, SourceLane.IMPLEMENTATION, original, branch="1-repair")
+        binding = manager.prepare(1, SourceLane.IMPLEMENTATION, original, branch=branch)
     finally:
         os.umask(prior_umask)
     receipt = manager._require_receipt(1, SourceLane.IMPLEMENTATION)
@@ -1139,7 +1140,7 @@ def _abort_worker_case(
         assert cwd == binding.cwd
         assert kwargs["remote"] == "origin"
         assert kwargs["expected_repo"] == "acme/repository"
-        assert kwargs["branch"] in {"main", "1-repair"}
+        assert kwargs["branch"] in {"main", branch}
         return base if kwargs["branch"] == "main" else original
 
     monkeypatch.setattr(pool, "_read_remote_branch_head", remote_head)
@@ -1168,7 +1169,7 @@ def _abort_worker_case(
             "cwd": binding.cwd,
             "issue_number": 1,
             "pr_number": pr_number,
-            "branch": "1-repair",
+            "branch": branch,
             "rebase_reason": "manual",
             "expected_head_sha": original,
             "expected_remote_sha": original,
@@ -1240,6 +1241,7 @@ def _abort_worker_case(
             original=original,
             tree=tree,
             receipt=receipt,
+            branch=branch,
             backend=backend,
             starts=starts,
             aborts=aborts,
@@ -1349,7 +1351,7 @@ def test_worker_conflict_abort_requires_durable_verified_restoration(
         assert _git(case.binding.cwd, "rev-parse", "HEAD") == case.original
         assert _git(case.binding.cwd, "rev-parse", "HEAD^{tree}") == case.tree
         assert _git(case.binding.cwd, "status", "--porcelain") == ""
-        assert _git(case.binding.cwd, "symbolic-ref", "--short", "HEAD") == "1-repair"
+        assert _git(case.binding.cwd, "symbolic-ref", "--short", "HEAD") == case.branch
         for directory in ("rebase-merge", "rebase-apply"):
             metadata = Path(_git(case.binding.cwd, "rev-parse", "--git-path", directory))
             assert not (case.binding.cwd / metadata).exists()
@@ -1916,7 +1918,12 @@ def _observe_fixture_owner(owner: Any, errors: list[str]) -> Any:
 
 @contextmanager
 def _automatic_local_worker_case(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, conflict: bool, reserved: bool = False
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    conflict: bool,
+    reserved: bool = False,
+    branch: str | None = None,
 ) -> Any:
     """Create the automatic start journal through the real local writer owner."""
     import queue
@@ -1933,7 +1940,7 @@ def _automatic_local_worker_case(
     from tests.unit.automation.test_source_worktree import _git
 
     nonce = "e" * 32
-    branch = f"1-auto-impl-direct-{nonce}" if reserved else "1-repair"
+    branch = branch or (f"1-auto-impl-direct-{nonce}" if reserved else "1-repair")
     previous_umask = os.umask(0o022)
     try:
         root, first, base = _repository(tmp_path, origin_repository="acme/repository")
@@ -2057,7 +2064,15 @@ def _automatic_local_worker_case(
         assert _git(binding.cwd, "symbolic-ref", "--short", "HEAD") == branch
         assert created.value["fresh_branch_created"] is True
         reservation = created.value.get("direct_scope_reservation")
-        assert reservation == ({"branch": branch, "base_sha": original} if reserved else None)
+        assert reservation == (
+            {
+                "branch": branch,
+                "base_sha": original,
+                "created_by_this_attempt": True,
+            }
+            if reserved
+            else None
+        )
         bound = replace(
             create,
             kwargs={**create.kwargs, "cwd": binding.cwd, "branch": branch},
@@ -2176,6 +2191,7 @@ def test_reserved_initial_start_carries_the_actual_creation_reservation(
         assert case.reservation == {
             "branch": "1-auto-impl-direct-" + "e" * 32,
             "base_sha": case.original,
+            "created_by_this_attempt": True,
         }
         assert case.job.kwargs["branch"] == case.reservation["branch"]
         assert case.job.kwargs["publish_rebased_head"] is False
@@ -3179,7 +3195,11 @@ def _discover_local_restart_from_enter(stage: Any, item: Any, ctx: Any, pool: An
         assert isinstance(result, JobRequest), result
         assert isinstance(result.job, git_jobs.GitJob), result
         assert result.job.op in {"discover_first_publication", "discover_pending_rebase"}
-        completed = pool._run_git(result.job)
+        # The coordinator stamps an admitted operation deadline on every Git
+        # job; this direct worker call must supply the same boundary.
+        completed = pool._run_git(
+            replace(result.job, deadline_s=time.monotonic() + result.job.timeout_s)
+        )
         assert completed.ok, completed
         item.state = result.on_done_state
         stage.on_job_done(item, completed, ctx)
@@ -3199,8 +3219,11 @@ def test_local_rebase_completion_follows_the_initial_start_owner(
     from hephaestus.automation.pipeline import worker_pool
     from hephaestus.io.utils import write_secure
 
+    fresh_branch = "1-auto-impl" if outcome == "fresh_restart" else None
     fixture = (
-        _automatic_local_worker_case(tmp_path, monkeypatch, conflict=operation == "continued")
+        _automatic_local_worker_case(
+            tmp_path, monkeypatch, conflict=operation == "continued", branch=fresh_branch
+        )
         if reason == "implementation_start"
         else _abort_worker_case(
             tmp_path,
@@ -3210,6 +3233,7 @@ def test_local_rebase_completion_follows_the_initial_start_owner(
             conflict=operation == "continued",
             structural=True,
             pr_number=None,
+            branch=fresh_branch or "1-repair",
         )
     )
     with fixture as case:
