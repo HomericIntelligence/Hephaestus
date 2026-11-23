@@ -113,10 +113,12 @@ class SourceWorkspaceError(RuntimeError):
         message: str,
         *,
         recovery: SourceWorkspaceRecovery | None = None,
+        legacy_migration: bool = False,
     ) -> None:
         """Initialize the error and its optional operator recovery record."""
         super().__init__(message)
         self.recovery = recovery
+        self.legacy_migration = legacy_migration
 
 
 class FleetAttemptFence:
@@ -248,9 +250,10 @@ class SourceWorkspaceCreationError(SourceWorkspaceError):
         recovery: SourceWorkspaceRecovery | None = None,
         creation_failure: SourceWorkspaceCreationFailure = SourceWorkspaceCreationFailure.UNKNOWN,
         requested_reservation_created: bool = False,
+        legacy_migration: bool = False,
     ) -> None:
         """Keep request details for a later lane-locked recovery attempt."""
-        super().__init__(message, recovery=recovery)
+        super().__init__(message, recovery=recovery, legacy_migration=legacy_migration)
         self.requested_branch = requested_branch
         self.requested_base_sha = requested_base_sha
         self.requested_reservation_created = requested_reservation_created
@@ -1481,6 +1484,7 @@ class SourceWorkspaceManager:
                     path=expected_path,
                     receipt_path=receipt_path,
                 ),
+                legacy_migration=True,
             ) from exc
         self._reject_foreign_owner(old, item_number, lane)
         if old is None:
@@ -1512,12 +1516,16 @@ class SourceWorkspaceManager:
                 )
             return False
         if old.path.resolve() != expected_path:
-            old = self._reconcile_legacy_receipt_path(
-                old,
-                item_number=item_number,
-                expected_path=expected_path,
-                receipt_path=receipt_path,
-            )
+            try:
+                old = self._reconcile_legacy_receipt_path(
+                    old,
+                    item_number=item_number,
+                    expected_path=expected_path,
+                    receipt_path=receipt_path,
+                )
+            except SourceWorkspaceError as exc:
+                exc.legacy_migration = True
+                raise
         if (old.detached and old.branch is not None) or (not old.detached and not old.branch):
             raise SourceWorkspaceError(
                 "implementation writer predecessor receipt is unproven",
