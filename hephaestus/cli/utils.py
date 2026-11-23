@@ -393,6 +393,16 @@ def _at_least_one_float(value: str) -> float:
     return parsed
 
 
+def _absolute_path(value: str) -> str:
+    """Parse an absolute filesystem path."""
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        raise argparse.ArgumentTypeError(
+            text("expected an absolute path, got %(value0)r", value0=value)
+        )
+    return str(path)
+
+
 def add_github_throttle_args(parser: argparse.ArgumentParser) -> None:
     """Add GitHub global-throttle configuration flags to a CLI parser."""
     group = parser.add_argument_group(text("GitHub throttle options"))
@@ -402,7 +412,7 @@ def add_github_throttle_args(parser: argparse.ArgumentParser) -> None:
         default=None,
         metavar="FLOAT",
         help=text(
-            "Global gh token-bucket refill rate in calls/sec "
+            "Global gh token-bucket refill rate for this machine in calls/sec "
             "(default: half the 5,000/hour account quota, about 0.69). "
             "Pass 0 to disable the global throttle."
         ),
@@ -413,6 +423,17 @@ def add_github_throttle_args(parser: argparse.ArgumentParser) -> None:
         default=30.0,
         metavar="FLOAT",
         help=text("Global gh token-bucket burst size (default: 30.0)."),
+    )
+    group.add_argument(
+        "--gh-throttle-dir",
+        type=_absolute_path,
+        default=None,
+        metavar="PATH",
+        help=text(
+            "Node-local directory for the cross-process gh throttle state. "
+            "The default uses the operating-system runtime directory. "
+            "Do not use a shared filesystem."
+        ),
     )
 
 
@@ -477,6 +498,7 @@ def configure_github_throttle_from_args(args: argparse.Namespace) -> None:
         # below the account budget instead of permitting more than it allows.
         rate=DEFAULT_GLOBAL_RATE if args.gh_global_rate is None else float(args.gh_global_rate),
         burst=float(args.gh_global_burst),
+        directory=args.gh_throttle_dir,
     )
 
 

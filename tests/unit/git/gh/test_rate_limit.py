@@ -23,8 +23,10 @@ from hephaestus.git.gh.rate_limit import (
     GRAPHQL_RATE_LIMIT_RE,
     RATE_LIMIT_RE,
     SECONDARY_RATE_LIMIT_RE,
+    OperationDeadlineExpired,
     _countdown_loop,
     _global_throttle_state_path,
+    _node_local_runtime_candidates,
     _rate_limit_probe_cache,
     _throttle_remaining,
     configure_gh_global_throttle,
@@ -42,8 +44,15 @@ from hephaestus.git.gh.rate_limit import (
 
 
 @pytest.fixture(autouse=True)
-def _reset_global_throttle_config() -> None:
-    configure_gh_global_throttle(rate=10.0, burst=30.0)
+def _reset_global_throttle_config(tmp_path_factory: pytest.TempPathFactory):
+    """Give every test a private throttle root instead of the host runtime root."""
+    configure_gh_global_throttle(
+        rate=10.0,
+        burst=30.0,
+        directory=tmp_path_factory.mktemp("gh-throttle"),
+    )
+    yield
+    configure_gh_global_throttle(rate=10.0, burst=30.0, directory=None)
 
 
 class TestRateLimitRegex:
@@ -565,9 +574,7 @@ class TestGlobalThrottle:
         fcntl_module: types.ModuleType | None = None,
     ) -> tuple[list[float], Path]:
         """Seed persisted state, run the throttle, and capture the repaired file."""
-        monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
-        monkeypatch.setenv("TMPDIR", str(tmp_path))
-        configure_gh_global_throttle(rate=rate, burst=burst)
+        configure_gh_global_throttle(rate=rate, burst=burst, directory=tmp_path)
         state_path = _global_throttle_state_path()
         state_path.parent.mkdir(parents=True, exist_ok=True)
         state_path.write_text(state_text, encoding="utf-8")
@@ -595,9 +602,8 @@ class TestGlobalThrottle:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, rate: float
     ) -> None:
         """An enabled throttle cannot report success without its lock primitive."""
-        monkeypatch.setenv("TMPDIR", str(tmp_path))
         monkeypatch.setitem(sys.modules, "fcntl", None)
-        configure_gh_global_throttle(rate=rate, burst=10)
+        configure_gh_global_throttle(rate=rate, burst=10, directory=tmp_path)
         state_path = _global_throttle_state_path()
 
         if rate == 0:
@@ -609,9 +615,7 @@ class TestGlobalThrottle:
         assert not state_path.exists()
 
     def test_no_op_when_rate_zero(self, monkeypatch, tmp_path) -> None:
-        monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
-        monkeypatch.setenv("TMPDIR", str(tmp_path))
-        configure_gh_global_throttle(rate=0, burst=10)
+        configure_gh_global_throttle(rate=0, burst=10, directory=tmp_path)
         state_path = _global_throttle_state_path()
 
         with (
@@ -628,9 +632,7 @@ class TestGlobalThrottle:
         assert not state_path.exists()
 
     def test_first_call_succeeds_immediately_with_full_burst(self, monkeypatch, tmp_path) -> None:
-        monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
-        monkeypatch.setenv("TMPDIR", str(tmp_path))
-        configure_gh_global_throttle(rate=1000, burst=10)
+        configure_gh_global_throttle(rate=1000, burst=10, directory=tmp_path)
         state_path = _global_throttle_state_path()
         now = 1_000.0
 
@@ -814,6 +816,7 @@ class TestGlobalThrottle:
         """Recovery must keep the exclusive lock and secure file modes in place."""
         fake_fcntl: Any = types.ModuleType("fcntl")
         fake_fcntl.LOCK_EX = 1
+        fake_fcntl.LOCK_NB = 4
         fake_fcntl.LOCK_UN = 2
         fake_fcntl.flock = MagicMock()
 
@@ -827,41 +830,71 @@ class TestGlobalThrottle:
 
         assert sleep_calls == [pytest.approx(0.1)]
         assert fake_fcntl.flock.call_args_list == [
-            call(ANY, fake_fcntl.LOCK_EX),
+            call(ANY, fake_fcntl.LOCK_EX | fake_fcntl.LOCK_NB),
             call(ANY, fake_fcntl.LOCK_UN),
-            call(ANY, fake_fcntl.LOCK_EX),
+            call(ANY, fake_fcntl.LOCK_EX | fake_fcntl.LOCK_NB),
             call(ANY, fake_fcntl.LOCK_UN),
         ]
         assert oct(state_path.parent.stat().st_mode & 0o777) == "0o700"
         assert oct(state_path.stat().st_mode & 0o777) == "0o600"
 
-    def test_state_path_ignores_xdg_runtime_dir(self, monkeypatch, tmp_path) -> None:
-        xdg = tmp_path / "xdg"
-        xdg.mkdir(mode=0o700)
-        monkeypatch.setenv("XDG_RUNTIME_DIR", str(xdg))
-        monkeypatch.setenv("TMPDIR", str(tmp_path / "tmp"))
-        uid = getattr(os, "getuid", lambda: "user")()
-        assert _global_throttle_state_path() == (
-            tmp_path / "tmp" / f"hephaestus-{uid}" / "gh-rate" / "hephaestus_gh_rate.json"
+    def test_lock_wait_stops_at_deadline(self, monkeypatch, tmp_path) -> None:
+        """A contended nonblocking lock must stop at the operation deadline."""
+        fake_fcntl: Any = types.ModuleType("fcntl")
+        fake_fcntl.LOCK_EX = 1
+        fake_fcntl.LOCK_NB = 4
+        fake_fcntl.LOCK_UN = 2
+        fake_fcntl.flock = MagicMock(side_effect=BlockingIOError)
+        monkeypatch.setitem(sys.modules, "fcntl", fake_fcntl)
+        configure_gh_global_throttle(rate=10, burst=30, directory=tmp_path)
+        now = [100.0]
+        monkeypatch.setattr("hephaestus.git.gh.rate_limit.time.monotonic", lambda: now[0])
+
+        def sleep(seconds: float) -> None:
+            now[0] += seconds
+
+        monkeypatch.setattr("hephaestus.git.gh.rate_limit.time.sleep", sleep)
+
+        with pytest.raises(OperationDeadlineExpired):
+            gh_global_throttle_acquire(deadline_s=100.01)
+
+        assert fake_fcntl.flock.call_args_list
+        assert all(
+            call_args.args[1] == fake_fcntl.LOCK_EX | fake_fcntl.LOCK_NB
+            for call_args in fake_fcntl.flock.call_args_list
         )
 
-    def test_state_path_falls_back_to_tmpdir_subdirectory(self, monkeypatch, tmp_path) -> None:
-        monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "missing-xdg"))
-        monkeypatch.setenv("TMPDIR", str(tmp_path))
-        uid = getattr(os, "getuid", lambda: "user")()
-        assert _global_throttle_state_path() == (
-            tmp_path / f"hephaestus-{uid}" / "gh-rate" / "hephaestus_gh_rate.json"
+    def test_concurrent_processes_do_not_lose_token_updates(self, tmp_path) -> None:
+        """Independent processes must compose into one atomic token budget."""
+        configure_gh_global_throttle(rate=1e-6, burst=200.0, directory=tmp_path)
+        state_path = _global_throttle_state_path()
+        script = (
+            "import sys\n"
+            "from hephaestus.git.gh.rate_limit import (\n"
+            "    configure_gh_global_throttle,\n"
+            "    gh_global_throttle_acquire,\n"
+            ")\n"
+            "configure_gh_global_throttle(\n"
+            "    rate=1e-6, burst=200.0, directory=sys.argv[1]\n"
+            ")\n"
+            "for _ in range(25):\n"
+            "    gh_global_throttle_acquire()\n"
         )
+        processes = [
+            subprocess.Popen(
+                [sys.executable, "-c", script, str(tmp_path)],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            for _ in range(4)
+        ]
+        for process in processes:
+            stdout, stderr = process.communicate(timeout=120)
+            assert process.returncode == 0, (stdout, stderr)
 
-    def test_state_path_ignores_non_tmpdir_temp_envs(self, monkeypatch, tmp_path) -> None:
-        monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
-        monkeypatch.delenv("TMPDIR", raising=False)
-        monkeypatch.setenv("TEMP", str(tmp_path / "temp"))
-        monkeypatch.setenv("TMP", str(tmp_path / "tmp"))
-        uid = getattr(os, "getuid", lambda: "user")()
-        assert _global_throttle_state_path() == (
-            Path("/tmp") / f"hephaestus-{uid}" / "gh-rate" / "hephaestus_gh_rate.json"
-        )
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        assert state["tokens"] == pytest.approx(100.0, abs=0.01)
 
     def test_config_rejects_invalid_values(self) -> None:
         with pytest.raises(ValueError, match="rate"):
@@ -898,8 +931,7 @@ class TestGlobalThrottle:
         import unittest.mock
 
         monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
-        monkeypatch.setenv("TMPDIR", str(tmp_path))
-        configure_gh_global_throttle(rate=10, burst=2)
+        configure_gh_global_throttle(rate=10, burst=2, directory=tmp_path)
 
         sleep_calls: list[float] = []
 
@@ -933,6 +965,140 @@ class TestGlobalThrottle:
             f"throttle sleep was {sleep_calls[0]:.4f}s; expected >= 0.09s "
             f"(1 token at 10/sec costs 0.1s)"
         )
+
+
+class TestGlobalThrottleStateRoot:
+    """Tests for node-local GitHub throttle state-root selection."""
+
+    def test_configured_directory_wins(self, monkeypatch, tmp_path) -> None:
+        """An explicit directory replaces operating-system root selection."""
+        configured = tmp_path / "configured"
+        configured.mkdir()
+        unused = tmp_path / "candidate"
+        unused.mkdir()
+        monkeypatch.setattr(
+            "hephaestus.git.gh.rate_limit._node_local_runtime_candidates",
+            lambda: [unused],
+        )
+        configure_gh_global_throttle(rate=10, burst=30, directory=configured)
+        uid = getattr(os, "getuid", lambda: "user")()
+
+        assert _global_throttle_state_path() == (
+            configured / f"hephaestus-{uid}" / "gh-rate" / "hephaestus_gh_rate.json"
+        )
+        assert not (unused / f"hephaestus-{uid}").exists()
+
+    def test_configured_directory_expands_home(self, monkeypatch, tmp_path) -> None:
+        """A home-relative override becomes an absolute runtime root."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        configure_gh_global_throttle(rate=10, burst=30, directory="~/throttle")
+        uid = getattr(os, "getuid", lambda: "user")()
+
+        assert _global_throttle_state_path() == (
+            tmp_path / "throttle" / f"hephaestus-{uid}" / "gh-rate" / "hephaestus_gh_rate.json"
+        )
+
+    def test_first_usable_candidate_wins(self, monkeypatch, tmp_path) -> None:
+        """An unusable candidate is skipped for the next usable root."""
+        unusable = tmp_path / "not-a-directory"
+        unusable.write_text("occupied", encoding="utf-8")
+        usable = tmp_path / "runtime"
+        usable.mkdir()
+        monkeypatch.setattr(
+            "hephaestus.git.gh.rate_limit._node_local_runtime_candidates",
+            lambda: [unusable, usable],
+        )
+        configure_gh_global_throttle(rate=10, burst=30, directory=None)
+        uid = getattr(os, "getuid", lambda: "user")()
+
+        assert _global_throttle_state_path() == (
+            usable / f"hephaestus-{uid}" / "gh-rate" / "hephaestus_gh_rate.json"
+        )
+
+    def test_no_usable_candidate_names_the_override(self, monkeypatch, tmp_path) -> None:
+        """An empty candidate set fails closed with the recovery flag."""
+        unusable = tmp_path / "not-a-directory"
+        unusable.write_text("occupied", encoding="utf-8")
+        monkeypatch.setattr(
+            "hephaestus.git.gh.rate_limit._node_local_runtime_candidates",
+            lambda: [unusable],
+        )
+        configure_gh_global_throttle(rate=10, burst=30, directory=None)
+
+        with pytest.raises(RuntimeError, match="--gh-throttle-dir"):
+            _global_throttle_state_path()
+
+    def test_unusable_configured_directory_names_the_override(self, tmp_path) -> None:
+        """An unusable explicit root reports its cause and the recovery flag."""
+        unusable = tmp_path / "not-a-directory"
+        unusable.write_text("occupied", encoding="utf-8")
+        configure_gh_global_throttle(rate=10, burst=30, directory=unusable)
+
+        with pytest.raises(RuntimeError, match="--gh-throttle-dir"):
+            _global_throttle_state_path()
+
+    def test_configured_directory_must_be_absolute(self) -> None:
+        """A relative override is a configuration error."""
+        with pytest.raises(ValueError, match="absolute"):
+            configure_gh_global_throttle(rate=10, burst=30, directory="relative/path")
+
+    def test_shared_tmpdir_is_never_selected(self, monkeypatch, tmp_path) -> None:
+        """A shared TMPDIR gains neither the state root nor a state file."""
+        node_root = tmp_path / "node-runtime"
+        node_root.mkdir()
+        shared = tmp_path / "shared-tmp"
+        shared.mkdir()
+        monkeypatch.setattr("sys.platform", "linux")
+        monkeypatch.setenv("XDG_RUNTIME_DIR", str(node_root))
+        monkeypatch.setenv("TMPDIR", str(shared))
+        configure_gh_global_throttle(rate=1000, burst=10, directory=None)
+        uid = getattr(os, "getuid", lambda: "user")()
+
+        with patch("hephaestus.git.gh.rate_limit.time.monotonic", return_value=1_000.0):
+            gh_global_throttle_acquire()
+
+        assert _global_throttle_state_path() == (
+            node_root / f"hephaestus-{uid}" / "gh-rate" / "hephaestus_gh_rate.json"
+        )
+        assert list(shared.iterdir()) == []
+
+    def test_xdg_runtime_dir_is_the_first_linux_candidate(self, monkeypatch, tmp_path) -> None:
+        """An absolute XDG runtime directory has precedence on Linux."""
+        monkeypatch.setattr("sys.platform", "linux")
+        monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+        uid = str(getattr(os, "getuid", lambda: "user")())
+
+        assert _node_local_runtime_candidates()[:3] == [
+            tmp_path,
+            Path("/run/user") / uid,
+            Path("/dev/shm"),
+        ]
+
+    def test_relative_xdg_runtime_dir_is_ignored(self, monkeypatch) -> None:
+        """A relative XDG value cannot select a runtime root."""
+        monkeypatch.setattr("sys.platform", "linux")
+        monkeypatch.setenv("XDG_RUNTIME_DIR", "relative")
+
+        assert Path("relative") not in _node_local_runtime_candidates()
+
+    def test_macos_uses_the_confstr_directory(self, monkeypatch, tmp_path) -> None:
+        """The macOS runtime root uses the per-user confstr directory."""
+        monkeypatch.setattr("sys.platform", "darwin")
+        monkeypatch.setattr("os.confstr", lambda _name: str(tmp_path))
+
+        assert _node_local_runtime_candidates() == [tmp_path]
+
+    @pytest.mark.parametrize("error", [ValueError("unknown"), OSError("unavailable")])
+    def test_macos_confstr_failure_yields_no_candidate(self, monkeypatch, error) -> None:
+        """An unavailable macOS runtime directory fails closed."""
+
+        def fail(_name: str) -> str:
+            raise error
+
+        monkeypatch.setattr("sys.platform", "darwin")
+        monkeypatch.setattr("os.confstr", fail)
+
+        assert _node_local_runtime_candidates() == []
 
 
 class TestCountdownThrottle:

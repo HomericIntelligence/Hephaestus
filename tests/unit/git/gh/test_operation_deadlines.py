@@ -67,7 +67,7 @@ def test_throttle_lock_observes_cancellation(
 
     shutdown = threading.Event()
     calls = 0
-    monkeypatch.setattr(rate_limit, "_global_throttle_state_path", lambda: tmp_path / "state")
+    rate_limit.configure_gh_global_throttle(rate=10.0, burst=30.0, directory=tmp_path)
 
     def flock(_fd: int, flags: int) -> None:
         nonlocal calls

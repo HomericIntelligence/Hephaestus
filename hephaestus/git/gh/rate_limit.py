@@ -295,8 +295,12 @@ def gh_rate_limit_reset_epoch(resource: str = "graphql", *, allow_probe: bool = 
 # The per-thread throttle in github_api.py only paces a single Python
 # process. When run_automation_loop.sh fans out 3 repos × 3 planner
 # workers, we get up to 9 independent processes hammering ``gh`` at
-# their own per-thread cap. The bucket below is shared via a flock'd
-# state file so all callers compose into a single global rate budget.
+# their own per-thread cap. The bucket below is shared through a state
+# file under an operating-system runtime directory. The scope is one
+# machine. A nonblocking ``flock`` poll loop serializes processes on that
+# machine. The state root never comes from an agent-wide temporary
+# directory, so temporary-file sharing cannot put the lock on a shared
+# filesystem.
 # ---------------------------------------------------------------------------
 
 # GitHub meters 5,000 GraphQL points and 5,000 REST requests per hour for an
@@ -314,25 +318,38 @@ _DEFAULT_BURST = 30.0  # max tokens stored
 #: Public alias for CLI argument defaults.
 DEFAULT_GLOBAL_RATE = _DEFAULT_GLOBAL_RATE
 
+#: Scope of the global throttle budget. The state root is node-local, so the
+#: budget applies to one machine and does not coordinate separate hosts.
+GLOBAL_THROTTLE_SCOPE = "machine"
+
 _global_throttle_rate = _DEFAULT_GLOBAL_RATE
 _global_throttle_burst = _DEFAULT_BURST
+_global_throttle_directory: Path | None = None
 
 
-def configure_gh_global_throttle(rate: float, burst: float) -> None:
+def configure_gh_global_throttle(
+    rate: float,
+    burst: float,
+    *,
+    directory: str | os.PathLike[str] | None = None,
+) -> None:
     """Configure the process-local global ``gh`` throttle parameters.
 
     CLI entrypoints call this before making GitHub requests. The state file is
-    still shared across processes; the rate/burst values are deliberately
-    process-local so operators configure them explicitly via CLI flags instead
-    of ambient environment variables.
+    still shared across processes on this machine; the rate/burst values are
+    deliberately process-local so operators configure them explicitly via CLI
+    flags instead of ambient environment variables.
 
     Args:
         rate: Tokens per second. ``0`` disables the throttle.
         burst: Maximum stored tokens. Must be at least ``1.0``.
+        directory: Optional absolute parent directory for the state file. The
+            function appends a per-user component and ``gh-rate``. ``None``
+            uses the operating-system runtime root.
 
     Raises:
-        ValueError: If either value is non-finite, if rate is negative, or if
-            burst is less than ``1.0``.
+        ValueError: If either value is non-finite, if rate is negative, if
+            burst is less than ``1.0``, or if directory is relative.
 
     """
     if not math.isfinite(rate) or rate < 0:
@@ -340,9 +357,17 @@ def configure_gh_global_throttle(rate: float, burst: float) -> None:
     if not math.isfinite(burst) or burst < 1.0:
         raise ValueError(f"burst must be a finite number >= 1.0, got {burst!r}")
 
-    global _global_throttle_rate, _global_throttle_burst
+    resolved_directory: Path | None = None
+    if directory is not None:
+        candidate = Path(directory).expanduser()
+        if not candidate.is_absolute():
+            raise ValueError(f"directory must be an absolute path, got {directory!r}")
+        resolved_directory = candidate
+
+    global _global_throttle_rate, _global_throttle_burst, _global_throttle_directory
     _global_throttle_rate = float(rate)
     _global_throttle_burst = float(burst)
+    _global_throttle_directory = resolved_directory
 
 
 def _current_uid_fragment() -> str:
@@ -358,15 +383,79 @@ def _owned_by_current_user(path: Path) -> bool:
         return False
 
 
-def _runtime_base_dir() -> Path:
-    """Return the preferred secure root for user-specific runtime artifacts.
+def _darwin_user_temp_dir() -> Path | None:
+    """Return the macOS per-user temporary directory, or ``None``."""
+    try:
+        value = os.confstr("CS_DARWIN_USER_TEMP_DIR")
+    except (ValueError, OSError) as exc:
+        logger.debug("CS_DARWIN_USER_TEMP_DIR is unavailable: %s", exc)
+        return None
+    return Path(value) if value else None
 
-    All transient state lives under ``TMPDIR`` so callers have one root to
-    control. A per-user component avoids sharing the same lock/state directory
-    across users when ``TMPDIR`` falls back to ``/tmp``.
+
+def _node_local_runtime_candidates() -> list[Path]:
+    """Return node-local runtime roots in preference order.
+
+    The candidates come from operating-system runtime locations. This function
+    does not read an agent-wide temporary-directory environment variable.
+    Thus, temporary-file sharing cannot put the throttle state on a shared
+    filesystem.
     """
-    tmpdir = os.environ.get("TMPDIR") or "/tmp"  # nosec B108: explicit fallback root
-    return Path(tmpdir) / f"hephaestus-{_current_uid_fragment()}"
+    if sys.platform == "darwin":
+        candidate = _darwin_user_temp_dir()
+        return [] if candidate is None else [candidate]
+
+    candidates: list[Path] = []
+    xdg_runtime_dir = os.environ.get("XDG_RUNTIME_DIR")
+    if xdg_runtime_dir:
+        xdg_path = Path(xdg_runtime_dir)
+        if xdg_path.is_absolute():
+            candidates.append(xdg_path)
+    candidates.append(Path("/run/user") / _current_uid_fragment())
+    candidates.append(Path("/dev/shm"))  # nosec B108: node-local tmpfs runtime root
+    return candidates
+
+
+def _probe_private_runtime_root(root: Path) -> tuple[Path | None, str | None]:
+    """Create the private per-user root below *root*, or report why it fails."""
+    base = root / f"hephaestus-{_current_uid_fragment()}"
+    try:
+        _ensure_private_dir(base)
+    except (OSError, RuntimeError) as exc:
+        return None, str(exc)
+    return base, None
+
+
+def _runtime_base_dir() -> Path:
+    """Return a node-local private root for the GitHub throttle state.
+
+    An explicit configured directory has precedence. Otherwise, the function
+    probes the operating-system runtime candidates in order. The budget scope
+    is one machine. This function never uses an agent-wide temporary directory.
+    """
+    configured = _global_throttle_directory
+    if configured is not None:
+        base, reason = _probe_private_runtime_root(configured)
+        if base is None:
+            raise RuntimeError(
+                f"Cannot use the configured GitHub throttle directory {configured}: "
+                f"{reason}. Pass --gh-throttle-dir with a writable node-local directory."
+            )
+        logger.debug("GitHub throttle scope=%s root=%s", GLOBAL_THROTTLE_SCOPE, base)
+        return base
+
+    failures: list[str] = []
+    for candidate in _node_local_runtime_candidates():
+        base, reason = _probe_private_runtime_root(candidate)
+        if base is not None:
+            logger.debug("GitHub throttle scope=%s root=%s", GLOBAL_THROTTLE_SCOPE, base)
+            return base
+        failures.append(f"{candidate}: {reason}")
+    detail = "; ".join(failures) if failures else "no candidate is available"
+    raise RuntimeError(
+        "No node-local runtime directory is available for the GitHub throttle "
+        f"({detail}). Pass --gh-throttle-dir with a writable node-local directory."
+    )
 
 
 def _ensure_private_dir(path: Path) -> None:
@@ -467,13 +556,17 @@ def gh_global_throttle_acquire(
 ) -> None:
     """Block until one token from the global ``gh`` rate budget is available.
 
-    The bucket is shared across all processes on this machine via a small
-    JSON state file guarded by ``fcntl.flock``. Refill rate defaults to half
-    the 5,000/hour account quota (about ``0.69`` tokens/sec) with a burst of
-    ``30``; CLI entrypoints can override both through
-    :func:`configure_gh_global_throttle`. Setting the rate to ``0`` disables
-    the throttle entirely (useful for tests and for callers that already hold
-    a known budget).
+    The bucket is shared across all processes in one operating-system instance
+    via a small JSON state file under a node-local runtime directory. The file
+    is guarded by a nonblocking ``fcntl.flock`` poll loop, so the lock never
+    waits inside the storage client. The budget scope is one machine. The
+    state root never comes from an agent-wide temporary directory; an operator
+    can select a different node-local root with ``--gh-throttle-dir``. Refill
+    rate defaults to half the 5,000/hour account quota (about ``0.69``
+    tokens/sec) with a burst of ``30``; CLI entrypoints can override both
+    through :func:`configure_gh_global_throttle`. Setting the rate to ``0``
+    disables the throttle entirely (useful for tests and for callers that
+    already hold a known budget).
 
     An enabled throttle requires ``fcntl``. If that primitive is unavailable,
     its import error propagates before token acquisition.
@@ -497,16 +590,17 @@ def gh_global_throttle_acquire(
     while True:
         _throttle_remaining(deadline_s, shutdown)
         with _open_secure_state_file(state_path) as fh:
-            if deadline_s is None and shutdown is None:
-                fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
-            else:
-                while True:
-                    _throttle_remaining(deadline_s, shutdown)
-                    try:
-                        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                        break
-                    except BlockingIOError:
-                        _throttle_pause(0.05, deadline_s, shutdown)
+            # Poll a nonblocking lock. A blocking flock on a shared filesystem
+            # can wait without a bound inside the storage client. The lock is
+            # on this inode; do not publish the state with os.replace, or two
+            # processes can lock different inodes.
+            while True:
+                _throttle_remaining(deadline_s, shutdown)
+                try:
+                    fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    _throttle_pause(0.05, deadline_s, shutdown)
             try:
                 _throttle_remaining(deadline_s, shutdown)
                 fh.seek(0)
@@ -528,6 +622,7 @@ def gh_global_throttle_acquire(
                 fh.seek(0)
                 fh.truncate()
                 json.dump({"tokens": float(tokens), "updated": float(now)}, fh, allow_nan=False)
+                fh.flush()
             finally:
                 fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
 
