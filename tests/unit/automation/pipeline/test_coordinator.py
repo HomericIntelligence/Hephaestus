@@ -1774,6 +1774,7 @@ class TestImplementationAdmission:
         assert item.payload[DIRECT_SCOPE_RESERVATION_KEY] == {
             "branch": branch,
             "base_sha": base_revision,
+            "created_by_this_attempt": False,
         }
         discovery_handle, _discovery_result = coordinator.completion_q.get_nowait()
         _complete_rebase_discovery(coordinator, discovery_handle, item)

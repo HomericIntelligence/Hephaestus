@@ -268,20 +268,23 @@ def _configure_file_handler(
 ) -> None:
     """Configure one file destination while the setup lock is held."""
     abs_log_file = os.path.abspath(log_file)
-    has_file = False
     # Dedup must see the queue-listener-managed file handlers, not the root logger
     # (the FileHandlers no longer sit on the root logger after the #3626 rework).
     managed = _file_log_listener.handlers if _file_log_listener is not None else ()
     for handler in managed:
         if isinstance(handler, logging.FileHandler) and handler.baseFilename == abs_log_file:
-            has_file = True
             if handler in _setup_file_handlers:
                 handler.setFormatter(formatter)
-    if not has_file:
-        file_handler = logging.FileHandler(log_file)
-        file_handler.setFormatter(formatter)
-        _configure_queued_file_handler(logger, file_handler)
-        _setup_file_handlers.add(file_handler)
+            return
+    # An external file handler already owns this destination. Keep it and do
+    # not create a duplicate owned handler or an unnecessary queue bridge.
+    for handler in logger.handlers:
+        if isinstance(handler, logging.FileHandler) and handler.baseFilename == abs_log_file:
+            return
+    file_handler = logging.FileHandler(log_file)
+    file_handler.setFormatter(formatter)
+    _configure_queued_file_handler(logger, file_handler)
+    _setup_file_handlers.add(file_handler)
 
 
 def setup_logging(

@@ -33,8 +33,9 @@ from hephaestus.automation.review_journal import (
     render_current_plan,
     render_pending_review,
 )
+from hephaestus.automation.review_types import ReviewVerdict
 from hephaestus.automation.source_worktree import SourceWorkspaceReceipt
-from hephaestus.automation.state_labels import STATE_NEEDS_PLAN, STATE_PLAN_GO
+from hephaestus.automation.state_labels import STATE_PLAN_GO
 from tests.unit.automation.pipeline.conftest import (
     FakeWorkerPool,
     claim_test_item,
@@ -48,23 +49,45 @@ assert ROUTES[StageName.IMPLEMENTATION].next == StageName.PR_REVIEW
 assert ROUTES[StageName.MERGE_WAIT].fail_routes["merge_conflicting"] == StageName.IMPLEMENTATION
 
 
+def test_current_restart_plan_go_advances_without_review(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """A current canonical plan-go restart fast-forwards without another review."""
+    github = FakeStageGitHub(labels=[STATE_PLAN_GO])
+    plan = "## Exact file scope and ownership\n- `tests/unit/one.py`"
+    github.comments[1] = [
+        render_current_plan(plan, revision=1),
+        render_pending_review(revision=1),
+    ]
+    ctx = make_ctx(github=github, config_overrides={"agent": "codex", "no_advise": False})
+    item = make_work_item(issue=1, stage=StageName.PLAN_REVIEW, state="ENTER")
+
+    outcome = PlanReviewStage().on_enter(item, ctx)
+
+    assert outcome == StageOutcome(Disposition.ADVANCE, "plan already approved")
+    assert item.payload["plan_text"] == plan
+    assert item.payload["plan_revision"] == 1
+    assert github.labels[1] == {STATE_PLAN_GO}
+    assert github.mutation_log == []
+
+
 @pytest.mark.parametrize(
     ("replacement_plan", "replacement_revision"),
     [
         ("## Files to Modify\n- `tests/unit/two.py`", 1),
         ("## Exact file scope and ownership\n- `tests/unit/one.py`", 2),
-        (None, None),
     ],
+    ids=["content-change", "new-revision"],
 )
-def test_changed_restart_plan_cannot_reuse_stale_plan_go(
+def test_changed_recheck_plan_cannot_reuse_stale_plan_go(
     make_ctx: Any,
     make_work_item: Any,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
-    replacement_plan: str | None,
-    replacement_revision: int | None,
+    replacement_plan: str,
+    replacement_revision: int,
 ) -> None:
-    """Plan drift returns to planning without authority to advance."""
+    """A recheck GO cannot bind to a plan that changed during its review round."""
     github = FakeStageGitHub(labels=[STATE_PLAN_GO])
     original_plan = "## Exact file scope and ownership\n- `tests/unit/one.py`"
     github.comments[1] = [
@@ -72,46 +95,54 @@ def test_changed_restart_plan_cannot_reuse_stale_plan_go(
         render_pending_review(revision=1),
     ]
     original_comments = github.issue_comments(1)
-    replacement_comments = (
-        [
-            IssueComment(
-                body=body,
-                author_login="hephaestus[bot]",
-                viewer_did_author=True,
-            )
-            for body in (
-                render_current_plan(replacement_plan, revision=replacement_revision),
-                render_pending_review(revision=replacement_revision),
-            )
-        ]
-        if replacement_plan is not None and replacement_revision is not None
-        else []
-    )
+    replacement_comments = [
+        IssueComment(
+            body=body,
+            author_login="hephaestus[bot]",
+            viewer_did_author=True,
+        )
+        for body in (
+            render_current_plan(replacement_plan, revision=replacement_revision),
+            render_pending_review(revision=replacement_revision),
+        )
+    ]
     reads = iter([original_comments, replacement_comments])
-
-    def sequenced_comments(_issue_number: int) -> list[IssueComment]:
-        return next(reads, replacement_comments)
-
-    monkeypatch.setattr(github, "issue_comments", sequenced_comments)
+    monkeypatch.setattr(
+        github,
+        "issue_comments",
+        lambda _issue_number: next(reads, replacement_comments),
+    )
     ctx = make_ctx(github=github, config_overrides={"agent": "codex", "no_advise": False})
     item = make_work_item(issue=1, stage=StageName.PLAN_REVIEW, state="ENTER")
+    item.payload["stale_plan_recheck"] = {"plan_sha256": "a" * 64, "age_days": 9}
     original_attempts = dict(item.attempts)
 
     stage = PlanReviewStage()
     assert stage.on_enter(item, ctx) is None
-    assert item.state == "EVAL"
-    assert github.mutation_log == []
     assert item.payload["plan_text"] == original_plan
     assert item.payload["plan_revision"] == 1
-    review_outcome = stage.step(item, ctx)
+    assert github.mutation_log == []
+    first_turn = stage.step(item, ctx)
+    assert isinstance(first_turn, Continue)
+    assert first_turn.next_state == "REVIEW_WAIT"
+    item.state = first_turn.next_state
+    review_request = stage.step(item, ctx)
+    assert isinstance(review_request, JobRequest)
+    assert review_request.on_done_state == "EVAL"
+    stage.on_job_done(
+        item,
+        JobResult(ok=True, value=ReviewVerdict(None, "GO", "Ready\n\nstate:plan-go")),
+        ctx,
+    )
+    item.state = "EVAL"
 
-    reason = "plan_changed" if replacement_plan is not None else "plan_missing"
-    assert review_outcome == StageOutcome(Disposition.FAIL_BACK, reason)
-    assert ROUTES[StageName.PLAN_REVIEW].fail_routes["*"] is StageName.PLANNING
-    assert github.labels[1] == {STATE_NEEDS_PLAN}
-    assert [entry[0] for entry in github.mutation_log] == ["edit_labels"]
+    outcome = stage.step(item, ctx)
+
+    assert outcome == StageOutcome(Disposition.FAIL_BACK, "plan_changed")
     assert item.attempts == original_attempts
     assert item.payload.get("review_round", 0) == 0
+    assert github.labels[1] == {STATE_PLAN_GO}
+    assert github.mutation_log == []
 
     coordinator = Coordinator(
         PipelineConfig(
@@ -125,10 +156,10 @@ def test_changed_restart_plan_cannot_reuse_stale_plan_go(
         install_signals=False,
     )
     coordinator._push_item(item, StageName.PLAN_REVIEW, enter=False)
-    coordinator._route(claim_test_item(coordinator, item), review_outcome)
+    coordinator._route(claim_test_item(coordinator, item), outcome)
 
     assert item.stage is StageName.PLANNING
-    assert item.payload.get("update_plan_required", False) is (replacement_plan is not None)
+    assert item.payload.get("update_plan_required") is True
     assert PlanningStage().on_enter(item, ctx) is None
     assert item.stage is StageName.PLANNING
     assert STATE_PLAN_GO not in github.labels[1]

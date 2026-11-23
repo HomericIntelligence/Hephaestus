@@ -12,13 +12,44 @@ from unittest.mock import Mock
 import pytest
 
 from hephaestus.automation import pipeline_cli as loop_runner
+from hephaestus.logging import utils as logging_utils
 from hephaestus.logging.formatters import JsonFormatter
 from hephaestus.logging.utils import setup_logging
+
+
+def _drain_file_logging(*, keep_listener: bool = False) -> None:
+    """Drain the process-wide queue listener before a test reads its file.
+
+    Production callers never wait for a file write. The test must stop the
+    listener, because its public ``stop`` joins the queue after every queued
+    record. ``keep_listener`` restarts the same handlers for a mid-test format
+    change.
+    """
+    listener = logging_utils._file_log_listener
+    if listener is None:
+        return
+    logging_utils._file_log_listener = None
+    handlers = tuple(listener.handlers)
+    listener.stop()
+    if keep_listener:
+        logging_utils._file_log_listener = logging.handlers.QueueListener(
+            logging_utils._file_log_queue, *handlers, respect_handler_level=True
+        )
+        logging_utils._file_log_listener.start()
+        return
+    for handler in handlers:
+        if (
+            isinstance(handler, logging.FileHandler)
+            and handler in logging_utils._setup_file_handlers
+        ):
+            logging_utils._setup_file_handlers.discard(handler)
+            handler.close()
 
 
 @pytest.fixture(autouse=True)
 def restore_logging() -> Iterator[None]:
     """Restore logger state after each test."""
+    _drain_file_logging()
     root = logging.getLogger()
     state = (root.handlers[:], root.level, root.filters[:], root.disabled)
     levels = {
@@ -30,6 +61,7 @@ def restore_logging() -> Iterator[None]:
     try:
         yield
     finally:
+        _drain_file_logging()
         for handler in root.handlers:
             handler.close()
         root.handlers, root.level, root.filters, root.disabled = state
@@ -67,6 +99,7 @@ def run_main(monkeypatch: pytest.MonkeyPatch, path: Path, *options: str) -> None
     monkeypatch.setattr(loop_runner, "resolve_agent", stop)
     with pytest.raises(StopAfterLoggingError):
         loop_runner.main(["--log-file", str(path), *options])
+    _drain_file_logging()
 
 
 def test_main_creates_requested_log_file_and_writes_loop_log(
@@ -152,10 +185,17 @@ def test_file_only_preserves_other_files_and_reuses_destination(tmp_path: Path) 
     logging.getLogger().addHandler(other)
     path = str(tmp_path / "loop.log")
     setup_logging(primary_stream=None, log_file=path)
-    owned = logging.getLogger().handlers[1]
+    listener = logging_utils._file_log_listener
+    assert listener is not None
+    owned = listener.handlers[0]
+    root = logging.getLogger()
+    queue_handler = root.handlers[-1]
     setup_logging(primary_stream=None, log_file=path, json_format=True)
-    assert logging.getLogger().handlers == [other, owned]
+    assert logging_utils._file_log_listener is not None
+    assert logging_utils._file_log_listener.handlers == (owned,)
+    assert root.handlers == [other, queue_handler]
     logging.warning("record")
+    _drain_file_logging()
     assert "record" in (tmp_path / "other.log").read_text()
     assert json.loads(Path(path).read_text())["message"] == "record"
 
@@ -165,13 +205,20 @@ def test_owned_file_can_change_from_json_to_text(tmp_path: Path) -> None:
     root = logging.getLogger()
     path = tmp_path / "loop.log"
     setup_logging(primary_stream=None, log_file=str(path), json_format=True)
-    owned = root.handlers[0]
+    listener = logging_utils._file_log_listener
+    assert listener is not None
+    owned = listener.handlers[0]
+    queue_handler = root.handlers[0]
     logging.warning("first")
+    _drain_file_logging(keep_listener=True)
 
     setup_logging(primary_stream=None, log_file=str(path), format_string="TEXT %(message)s")
+    assert logging_utils._file_log_listener is not None
+    assert logging_utils._file_log_listener.handlers == (owned,)
     logging.warning("second")
+    _drain_file_logging()
 
-    assert root.handlers == [owned]
+    assert root.handlers == [queue_handler]
     lines = path.read_text().splitlines()
     assert len(lines) == 2
     assert json.loads(lines[0])["message"] == "first"
@@ -182,17 +229,22 @@ def test_owned_file_can_change_from_json_to_text(tmp_path: Path) -> None:
 def test_owned_file_formatter_updates_after_external_matching_handler(
     tmp_path: Path, json_format: bool
 ) -> None:
-    """Update the owned handler when an external handler precedes it."""
+    """Update the owned handler when an external handler shares the path."""
     root = logging.getLogger()
     path = tmp_path / "shared.log"
     setup_logging(primary_stream=None, log_file=str(path), json_format=not json_format)
-    owned = root.handlers[0]
+    listener = logging_utils._file_log_listener
+    assert listener is not None
+    owned = listener.handlers[0]
+    queue_handler = root.handlers[0]
     external = logging.FileHandler(path)
     formatter = logging.Formatter("EXTERNAL %(message)s")
     external.setFormatter(formatter)
-    root.removeHandler(owned)
+    # Keep the synchronous external write ahead of the queued owned write so
+    # the two records have a deterministic file order.
+    root.removeHandler(queue_handler)
     root.addHandler(external)
-    root.addHandler(owned)
+    root.addHandler(queue_handler)
 
     setup_logging(
         primary_stream=None,
@@ -200,9 +252,12 @@ def test_owned_file_formatter_updates_after_external_matching_handler(
         json_format=json_format,
         format_string="TEXT %(message)s",
     )
+    assert logging_utils._file_log_listener is not None
+    assert logging_utils._file_log_listener.handlers == (owned,)
     logging.warning("record")
+    _drain_file_logging()
 
-    assert root.handlers == [external, owned]
+    assert root.handlers == [external, queue_handler]
     assert external.formatter is formatter
     lines = path.read_text().splitlines()
     assert len(lines) == 2
@@ -223,16 +278,19 @@ def test_external_file_formatter_survives_setup_and_path_reuse(
     path = tmp_path / "external.log"
     if replace_owned:
         setup_logging(primary_stream=None, log_file=str(path))
-        owned = root.handlers[0]
-        root.removeHandler(owned)
-        owned.close()
+        _drain_file_logging()
+        queue_handler = root.handlers[0]
+        root.removeHandler(queue_handler)
+        queue_handler.close()
     external = logging.FileHandler(path)
     formatter = JsonFormatter() if external_json else logging.Formatter("EXTERNAL %(message)s")
     external.setFormatter(formatter)
     root.addHandler(external)
 
     setup_logging(primary_stream=None, log_file=str(path), json_format=not external_json)
+    assert logging_utils._file_log_listener is None
     logging.warning("record")
+    _drain_file_logging()
 
     assert root.handlers == [external]
     assert external.formatter is formatter
