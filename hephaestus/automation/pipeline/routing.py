@@ -106,8 +106,8 @@ ROUTES: dict[StageName, Route] = {
         fail_routes={
             "plan_not_go": StageName.PLAN_REVIEW,
             # An accepted plan older than the stale age needs one recheck
-            # round in plan_review before implementation continues. The plan
-            # itself stays valid; the recheck names tweaks, never redoes.
+            # round in plan_review before implementation continues. A GO
+            # keeps the plan; a NO-GO re-plans it against the current tree.
             "stale_plan_recheck": StageName.PLAN_REVIEW,
             "already_implementation_go_pr": StageName.MERGE_WAIT,
             "review_retained_after_rebase": StageName.MERGE_WAIT,

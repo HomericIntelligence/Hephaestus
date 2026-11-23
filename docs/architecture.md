@@ -293,7 +293,12 @@ A defensive step watchdog ([`_STEP_WATCHDOG_S = 60.0`](../hephaestus/automation/
 warns when any `stage.step()` call exceeds ~60 s. 15 s proved too tight in
 practice: routine repo-stage steps (clone + label reads over the network)
 breached it on nearly every multi-repo run, burying real stalls in noise
-(#2648).
+(#2648). The watchdog also keeps a per-item net-stall budget
+([`_WATCHDOG_STALL_BUDGET_S = 1800.0`](../hephaestus/automation/pipeline/coordinator_types.py)).
+The budget accumulates only step time that yields no progress, and timer
+parks subtract their delay. When the net budget expires, the item is poisoned
+through the normal failure path instead of spinning through park and step
+forever.
 
 ### Library → product layer boundary
 

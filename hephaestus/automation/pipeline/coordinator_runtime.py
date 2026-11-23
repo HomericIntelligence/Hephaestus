@@ -716,6 +716,12 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
         wake = self._monotonic() + max(0.0, delay_s)
         heapq.heappush(self.timers, (wake, self._seq, item))
         self._seq += 1
+        parked = item.payload.get(ct._WATCHDOG_STALL_NET_KEY)
+        if parked is not None:
+            # A deliberate park is patient waiting, not spinning. Slow-poll
+            # steps that wait out a long timer must not accumulate toward
+            # the stall budget.
+            item.payload[ct._WATCHDOG_STALL_NET_KEY] = max(0.0, parked - max(0.0, delay_s))
         item.add_history_event(item.stage, item.state, note=f"timer-parked {delay_s:.1f}s")
         self._record_event("timer_park", item.stage.value, self._item_key(item), delay_s)
 
@@ -1031,17 +1037,44 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
     def _step_with_watchdog(
         self, stage: stages_mod.Stage, item: ct.WorkItem, ctx: stages_mod.StageContext
     ) -> ct.StageStepResult:
-        """Run one stage.step, warning when it breaches the <~60s contract."""
+        """Run one stage.step, warning when it breaches the <~60s contract.
+
+        A stalled step is also charged to the item's net-stall budget. A
+        stalled step that yields progress (a JobRequest or a forward
+        disposition) clears the budget; a timer park subtracts its delay.
+        When the net total exceeds ``_WATCHDOG_STALL_BUDGET_S`` the item is
+        poisoned: repeated slow steps without progress — park→step spinning —
+        must fail the item instead of looping forever.
+        """
         t0 = self._monotonic()
         result = stage.step(item, ctx)
         elapsed = self._monotonic() - t0
-        if elapsed > self._step_watchdog_s:
-            logger.warning(
-                "stage.step stalled: %s %s took %.1fs (contract: <%.0fs)",
-                item.stage.value,
-                self._item_key(item),
-                elapsed,
-                self._step_watchdog_s,
+        if elapsed <= self._step_watchdog_s:
+            net = item.payload.get(ct._WATCHDOG_STALL_NET_KEY)
+            if net is not None:
+                # A step inside the contract repays accumulated stall.
+                item.payload[ct._WATCHDOG_STALL_NET_KEY] = max(0.0, net - elapsed)
+            return result
+        logger.warning(
+            "stage.step stalled: %s %s took %.1fs (contract: <%.0fs)",
+            item.stage.value,
+            self._item_key(item),
+            elapsed,
+            self._step_watchdog_s,
+        )
+        if isinstance(result, ct.JobRequest) or (
+            isinstance(result, ct.StageOutcome) and result.disposition is not Disposition.RETRY
+        ):
+            # Progress or a routed outcome: the spin signature is absent.
+            item.payload.pop(ct._WATCHDOG_STALL_NET_KEY, None)
+            return result
+        net = float(item.payload.get(ct._WATCHDOG_STALL_NET_KEY) or 0.0) + elapsed
+        item.payload[ct._WATCHDOG_STALL_NET_KEY] = net
+        if net >= self._watchdog_stall_budget_s:
+            raise RuntimeError(
+                f"watchdog: {item.stage.value} {self._item_key(item)} exceeded "
+                f"{self._watchdog_stall_budget_s:.0f}s of net stalled steps "
+                f"({net:.0f}s accumulated) without submitting a job or advancing"
             )
         return result
 

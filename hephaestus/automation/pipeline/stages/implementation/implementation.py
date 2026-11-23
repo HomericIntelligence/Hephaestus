@@ -493,10 +493,10 @@ def _stale_plan_recheck_outcome(
 ) -> StageOutcome | None:
     """Route one recheck round for an accepted plan older than the stale age.
 
-    The plan itself stays valid and is never redone. The recheck round in
-    plan_review reviews the accepted plan against the current tree: its GO
-    records the durable one-recheck-per-plan-identity receipt and names the
-    tweaks; its NO-GO blocks the item for human intervention.
+    The recheck round in plan_review reviews the accepted plan against the
+    current tree: its GO records the durable one-recheck-per-plan-identity
+    receipt and names the tweaks; its NO-GO re-plans the accepted plan
+    against the current tree.
 
     Every read failure stays fail-open: a journal hiccup must not stop a
     running component, and a fresh plan carries no staleness gate at all.
@@ -522,8 +522,8 @@ def _stale_plan_recheck_outcome(
         return None
     logger.warning(
         "implementation:%d: accepted plan is %d days old (stale after %d); "
-        "routing to plan_review for one stale-plan recheck — the plan stays "
-        "valid and is never redone",
+        "routing to plan_review for one stale-plan recheck — the plan is "
+        "amended against the current tree if it no longer applies",
         item.issue,
         int(age_days),
         int(STALE_PLAN_RECHECK_AGE_DAYS),
@@ -4430,8 +4430,8 @@ class ImplementationStage(Stage):
             return StageOutcome(Disposition.FAIL_BACK, "plan_not_go")
 
         # One stale-plan recheck round before implementation consumes an
-        # accepted plan that may have drifted from the current tree. The
-        # plan stays valid; the recheck names tweaks or blocks for a human.
+        # accepted plan that may have drifted from the current tree. A GO
+        # keeps the accepted plan; a NO-GO re-plans against the current tree.
         if (
             not item.payload.get("manual_rebase_required")
             and is_plan_go(gate_labels)

@@ -304,6 +304,33 @@ def test_recovery_parser_accepts_exactly_fenced_json() -> None:
     assert result.requirements == "Keep the flag default."
 
 
+_RECOVERY_PAYLOAD = (
+    '{"disposition":"REQUIREMENTS","requirements":"Keep the flag default.",'
+    '"reason":"The flag is documented as stable.","evidence":"The public API binds it."}'
+)
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        pytest.param(f"```JSON\n{_RECOVERY_PAYLOAD}\n```", id="uppercase-fence"),
+        pytest.param(
+            f"```json\n{_RECOVERY_PAYLOAD}\n```\nRecovery complete.",
+            id="fence-with-trailing-prose",
+        ),
+        pytest.param(f"Here is the proposal:\n{_RECOVERY_PAYLOAD}", id="prose-preamble"),
+        pytest.param(f"{_RECOVERY_PAYLOAD}\nRecovery complete.", id="object-with-trailing-data"),
+        pytest.param(f"[{_RECOVERY_PAYLOAD}]", id="array-containing-object"),
+    ],
+)
+def test_recovery_parser_accepts_a_wrapped_object(raw: str) -> None:
+    """A prose-wrapped object is accepted without weakening the schema check."""
+    result = parse_recovered_requirements(raw)
+
+    assert result.disposition is RecoveryDisposition.REQUIREMENTS
+    assert result.requirements == "Keep the flag default."
+
+
 @pytest.mark.parametrize(
     "raw",
     [

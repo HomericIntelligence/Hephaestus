@@ -15,10 +15,12 @@ from typing import Any
 import pytest
 
 from hephaestus.agents.workspace import SourceLane
+from hephaestus.automation.pipeline import coordinator_types as ct
 from hephaestus.automation.pipeline.coordinator import Coordinator
 from hephaestus.automation.pipeline.coordinator_types import PipelineConfig
 from hephaestus.automation.pipeline.routing import Disposition, StageName, StageOutcome
 from hephaestus.automation.pipeline.stage_base import Stage
+from hephaestus.automation.pipeline.stages import JobRequest
 from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
 from hephaestus.automation.source_worktree import SourceWorkspaceManager
 from hephaestus.utils.file_lock import file_lock
@@ -286,6 +288,177 @@ class TestStepWatchdog:
             coordinator._run_item(claim_test_item(coordinator, _item(13)))
 
         assert not any("stalled" in record.message for record in caplog.records)
+
+    def test_repeated_slow_retries_without_progress_poison_the_item(
+        self, clocked: tuple[Coordinator, FakeClock]
+    ) -> None:
+        """The park→step spin signature exceeds the stall budget and fails."""
+        coordinator, clock = clocked
+        coordinator._watchdog_stall_budget_s = 200.0
+
+        class SpinStage(Stage):
+            def on_enter(self, item: WorkItem, ctx: Any) -> Any:
+                return None
+
+            def step(self, item: WorkItem, ctx: Any) -> Any:
+                clock.now += 61.0
+                item.payload["retry_delay_s"] = 1.0
+                return StageOutcome(Disposition.RETRY, "spin")
+
+            def on_job_done(self, item: WorkItem, result: Any, ctx: Any) -> None:
+                pass
+
+        stage = SpinStage()
+        item = _item(20)
+        ctx = coordinator._ctx_for(item)
+
+        with pytest.raises(RuntimeError, match="watchdog"):
+            for _ in range(10):
+                coordinator._step_with_watchdog(stage, item, ctx)
+
+        assert item.payload.get(ct._WATCHDOG_STALL_NET_KEY, 0.0) >= 200.0
+
+    def test_park_step_spin_fails_item_through_the_poison_path(
+        self, clocked: tuple[Coordinator, FakeClock]
+    ) -> None:
+        """The poison handler routes the tripped item to finished(fail)."""
+        coordinator, clock = clocked
+        coordinator._watchdog_stall_budget_s = 150.0
+
+        class SpinStage(Stage):
+            def on_enter(self, item: WorkItem, ctx: Any) -> Any:
+                return None
+
+            def step(self, item: WorkItem, ctx: Any) -> Any:
+                clock.now += 61.0
+                item.payload["retry_delay_s"] = 1.0
+                return StageOutcome(Disposition.RETRY, "spin")
+
+            def on_job_done(self, item: WorkItem, result: Any, ctx: Any) -> None:
+                pass
+
+        coordinator.stages[StageName.PR_REVIEW] = SpinStage()
+        item = _item(21)
+        coordinator._run_item(claim_test_item(coordinator, item))
+
+        # Each cycle: park 1s, wake, re-claim, re-step. The item spins until
+        # the watchdog budget trips and the poison handler finishes it.
+        for _ in range(10):
+            if item.result is not None:
+                break
+            clock.now += 2.0
+            coordinator._wake_timers()
+            requeued = coordinator._claim_item(StageName.PR_REVIEW)
+            if requeued is not None:
+                coordinator._run_item(requeued)
+
+        assert item.result is not None
+        assert not item.result.passed
+        assert "watchdog" in item.result.reason
+
+    def test_patient_park_offsets_slow_poll_steps(
+        self, clocked: tuple[Coordinator, FakeClock]
+    ) -> None:
+        """A slow poll parked for a long wait never accumulates stall debt."""
+        coordinator, clock = clocked
+        coordinator._watchdog_stall_budget_s = 200.0
+
+        class PollStage(Stage):
+            def on_enter(self, item: WorkItem, ctx: Any) -> Any:
+                return None
+
+            def step(self, item: WorkItem, ctx: Any) -> Any:
+                clock.now += 61.0
+                item.payload["retry_delay_s"] = 120.0
+                return StageOutcome(Disposition.RETRY, "poll")
+
+            def on_job_done(self, item: WorkItem, result: Any, ctx: Any) -> None:
+                pass
+
+        stage = PollStage()
+        claimed = claim_test_item(coordinator, _item(22))
+        ctx = coordinator._ctx_for(claimed)
+
+        for _ in range(10):
+            coordinator._step_with_watchdog(stage, claimed, ctx)
+            coordinator._timer_park(claimed, 120.0)
+            coordinator.timers.clear()
+            clock.now += 120.0
+
+        assert claimed.result is None
+        assert claimed.payload.get(ct._WATCHDOG_STALL_NET_KEY, 0.0) <= 0.0
+
+    def test_job_request_clears_accumulated_stall(
+        self, clocked: tuple[Coordinator, FakeClock]
+    ) -> None:
+        """A stalled step that finally submits a job repays the stall debt."""
+        coordinator, clock = clocked
+        coordinator._watchdog_stall_budget_s = 200.0
+
+        class SlowThenJobStage(Stage):
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def on_enter(self, item: WorkItem, ctx: Any) -> Any:
+                return None
+
+            def step(self, item: WorkItem, ctx: Any) -> Any:
+                self.calls += 1
+                clock.now += 61.0
+                if self.calls >= 3:
+                    return JobRequest(job=object(), on_done_state="WAIT")
+                item.payload["retry_delay_s"] = 1.0
+                return StageOutcome(Disposition.RETRY, "spin")
+
+            def on_job_done(self, item: WorkItem, result: Any, ctx: Any) -> None:
+                pass
+
+        stage = SlowThenJobStage()
+        item = _item(23)
+        ctx = coordinator._ctx_for(item)
+
+        coordinator._step_with_watchdog(stage, item, ctx)
+        coordinator._step_with_watchdog(stage, item, ctx)
+        assert item.payload.get(ct._WATCHDOG_STALL_NET_KEY, 0.0) > 0.0
+
+        coordinator._step_with_watchdog(stage, item, ctx)
+        assert ct._WATCHDOG_STALL_NET_KEY not in item.payload
+
+    def test_fast_step_repays_accumulated_stall(
+        self, clocked: tuple[Coordinator, FakeClock]
+    ) -> None:
+        """A step inside the contract subtracts its elapsed from the debt."""
+        coordinator, clock = clocked
+        coordinator._watchdog_stall_budget_s = 200.0
+
+        class SlowThenFastStage(Stage):
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def on_enter(self, item: WorkItem, ctx: Any) -> Any:
+                return None
+
+            def step(self, item: WorkItem, ctx: Any) -> Any:
+                self.calls += 1
+                if self.calls == 1:
+                    clock.now += 61.0
+                else:
+                    clock.now += 30.0
+                item.payload["retry_delay_s"] = 1.0
+                return StageOutcome(Disposition.RETRY, "cycle")
+
+            def on_job_done(self, item: WorkItem, result: Any, ctx: Any) -> None:
+                pass
+
+        stage = SlowThenFastStage()
+        item = _item(24)
+        ctx = coordinator._ctx_for(item)
+
+        coordinator._step_with_watchdog(stage, item, ctx)
+        assert item.payload.get(ct._WATCHDOG_STALL_NET_KEY, 0.0) > 0.0
+
+        coordinator._step_with_watchdog(stage, item, ctx)
+        assert item.payload.get(ct._WATCHDOG_STALL_NET_KEY, 0.0) == 31.0
 
     def test_bounded_source_preparation_retries_before_watchdog_and_submission(
         self,
