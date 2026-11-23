@@ -118,8 +118,7 @@ Hephaestus/
 │   ├── unit/                   # Unit tests (mirror hephaestus/ subpackages; SANCTIONED_EXTRA_TEST_DIRS names the extra directories that have no source counterpart)
 │   ├── integration/            # Integration tests
 │   ├── performance/            # Load and regression benchmarks
-│   ├── fixtures/               # Versioned test fixtures
-│   └── shell/                  # Shell installer and justfile tests (bats)
+│   └── fixtures/               # Versioned test fixtures
 ├── docs/                       # Documentation
 └── .claude/                    # Claude Code configurations
 ```
@@ -165,8 +164,7 @@ imports. It does not remove the layer from measurement.
 The omit list holds exactly two entries: the test tree and the package
 `__init__.py` files. Keep both generic exclusions. Do not add another entry
 without a documented boundary and an explicit change to this invariant.
-`tests/unit/validation/test_omit_allowlist.py` enforces exact membership, so a
-whole `hephaestus/automation/*.py` module must stay measured.
+A whole `hephaestus/automation/*.py` module must stay measured.
 
 `coverage.toml` holds the aggregate threshold and the per-module floors. The
 retained floors are `validation/schema.py`, `automation/models.py`,
@@ -192,11 +190,9 @@ the same source review as a library change.
   each finding path, body, and evidence field, the aggregate record bytes, the
   review body, the demoted-findings section, the summary, the raw feedback, the
   warning list, and the reported-finding text.
-- **The sign-off gates stay fail closed.** The plan-review `GO` verdict and the
-  implementation-review `GO` plus the `state:implementation-go` label proof
-  still require the explicit reviewer verdict. A missing or malformed verdict
-  invalidates the audit before any label write. Informational validation never
-  relaxes this rule.
+- **Sign-off follows GitHub.** The `state:implementation-go` label and the
+  review threads on GitHub are the record. A reviewer verdict is free-form text.
+  A missing grade or severity never blocks a label.
 
 Change the omit list, a module floor, or `fail_under` only in a commit that
 also updates this section.
