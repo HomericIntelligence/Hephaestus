@@ -1039,35 +1039,38 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
     ) -> ct.StageStepResult:
         """Run one stage.step, warning when it breaches the <~60s contract.
 
-        A stalled step is also charged to the item's net-stall budget. A
-        stalled step that yields progress (a JobRequest or a forward
-        disposition) clears the budget; a timer park subtracts its delay.
+        Every no-progress step (Continue or RETRY) is charged to the item's
+        net-stall budget, including steps inside the contract. A step that
+        yields progress clears the budget; a timer park subtracts its delay.
         When the net total exceeds ``_WATCHDOG_STALL_BUDGET_S`` the item is
-        poisoned: repeated slow steps without progress — park→step spinning —
-        must fail the item instead of looping forever.
+        poisoned: a fast or slow no-progress loop must fail the item instead
+        of looping forever.
         """
         t0 = self._monotonic()
         result = stage.step(item, ctx)
         elapsed = self._monotonic() - t0
-        if elapsed <= self._step_watchdog_s:
-            net = item.payload.get(ct._WATCHDOG_STALL_NET_KEY)
-            if net is not None:
-                # A step inside the contract repays accumulated stall.
-                item.payload[ct._WATCHDOG_STALL_NET_KEY] = max(0.0, net - elapsed)
-            return result
-        logger.warning(
-            "stage.step stalled: %s %s took %.1fs (contract: <%.0fs)",
-            item.stage.value,
-            self._item_key(item),
-            elapsed,
-            self._step_watchdog_s,
-        )
         if isinstance(result, ct.JobRequest) or (
             isinstance(result, ct.StageOutcome) and result.disposition is not Disposition.RETRY
         ):
             # Progress or a routed outcome: the spin signature is absent.
             item.payload.pop(ct._WATCHDOG_STALL_NET_KEY, None)
+            if elapsed > self._step_watchdog_s:
+                logger.warning(
+                    "stage.step stalled: %s %s took %.1fs (contract: <%.0fs)",
+                    item.stage.value,
+                    self._item_key(item),
+                    elapsed,
+                    self._step_watchdog_s,
+                )
             return result
+        if elapsed > self._step_watchdog_s:
+            logger.warning(
+                "stage.step stalled: %s %s took %.1fs (contract: <%.0fs)",
+                item.stage.value,
+                self._item_key(item),
+                elapsed,
+                self._step_watchdog_s,
+            )
         net = float(item.payload.get(ct._WATCHDOG_STALL_NET_KEY) or 0.0) + elapsed
         item.payload[ct._WATCHDOG_STALL_NET_KEY] = net
         if net >= self._watchdog_stall_budget_s:

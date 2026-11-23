@@ -124,13 +124,12 @@ if TYPE_CHECKING:
 #: in noise (#2648).
 _STEP_WATCHDOG_S = 60.0
 
-#: Per-item net-stall budget (seconds) enforced by the step watchdog. A step
-#: that breaches the <~60s contract while yielding no progress (a Continue or
-#: RETRY result — never a JobRequest or a forward disposition) accumulates its
-#: elapsed time here. Deliberate timer parks subtract their delay, so a slow
-#: poll followed by a long patient wait never trips the budget. When the net
-#: total exceeds this value the item is poisoned instead of spinning
-#: park→step forever.
+#: Per-item net-stall budget (seconds) enforced by the step watchdog. Every
+#: no-progress step result (a Continue or RETRY — never a JobRequest or a
+#: forward disposition) adds its elapsed time here, including steps inside the
+#: <~60s contract. Deliberate timer parks subtract their delay, so a slow poll
+#: followed by a long patient wait never trips the budget. When the net total
+#: exceeds this value the item is poisoned instead of spinning forever.
 _WATCHDOG_STALL_BUDGET_S = 1800.0
 
 #: WorkItem payload key holding the item's accumulated net stall seconds.

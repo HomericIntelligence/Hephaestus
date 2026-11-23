@@ -424,14 +424,43 @@ class TestStepWatchdog:
         coordinator._step_with_watchdog(stage, item, ctx)
         assert ct._WATCHDOG_STALL_NET_KEY not in item.payload
 
-    def test_fast_step_repays_accumulated_stall(
+    def test_fast_no_progress_steps_accumulate_and_poison(
         self, clocked: tuple[Coordinator, FakeClock]
     ) -> None:
-        """A step inside the contract subtracts its elapsed from the debt."""
+        """A fast no-progress loop is charged to the same bounded budget."""
         coordinator, clock = clocked
         coordinator._watchdog_stall_budget_s = 200.0
 
-        class SlowThenFastStage(Stage):
+        class FastSpinStage(Stage):
+            def on_enter(self, item: WorkItem, ctx: Any) -> Any:
+                return None
+
+            def step(self, item: WorkItem, ctx: Any) -> Any:
+                clock.now += 10.0
+                item.payload["retry_delay_s"] = 1.0
+                return StageOutcome(Disposition.RETRY, "fast spin")
+
+            def on_job_done(self, item: WorkItem, result: Any, ctx: Any) -> None:
+                pass
+
+        stage = FastSpinStage()
+        item = _item(24)
+        ctx = coordinator._ctx_for(item)
+
+        with pytest.raises(RuntimeError, match="watchdog"):
+            for _ in range(30):
+                coordinator._step_with_watchdog(stage, item, ctx)
+
+        assert item.payload.get(ct._WATCHDOG_STALL_NET_KEY, 0.0) >= 200.0
+
+    def test_fast_progress_step_clears_accumulated_stall(
+        self, clocked: tuple[Coordinator, FakeClock]
+    ) -> None:
+        """A fast step that submits a job clears the accumulated stall."""
+        coordinator, clock = clocked
+        coordinator._watchdog_stall_budget_s = 200.0
+
+        class SlowThenFastJobStage(Stage):
             def __init__(self) -> None:
                 self.calls = 0
 
@@ -442,23 +471,23 @@ class TestStepWatchdog:
                 self.calls += 1
                 if self.calls == 1:
                     clock.now += 61.0
-                else:
-                    clock.now += 30.0
-                item.payload["retry_delay_s"] = 1.0
-                return StageOutcome(Disposition.RETRY, "cycle")
+                    item.payload["retry_delay_s"] = 1.0
+                    return StageOutcome(Disposition.RETRY, "spin")
+                clock.now += 5.0
+                return JobRequest(job=object(), on_done_state="WAIT")
 
             def on_job_done(self, item: WorkItem, result: Any, ctx: Any) -> None:
                 pass
 
-        stage = SlowThenFastStage()
-        item = _item(24)
+        stage = SlowThenFastJobStage()
+        item = _item(25)
         ctx = coordinator._ctx_for(item)
 
         coordinator._step_with_watchdog(stage, item, ctx)
         assert item.payload.get(ct._WATCHDOG_STALL_NET_KEY, 0.0) > 0.0
 
         coordinator._step_with_watchdog(stage, item, ctx)
-        assert item.payload.get(ct._WATCHDOG_STALL_NET_KEY, 0.0) == 31.0
+        assert ct._WATCHDOG_STALL_NET_KEY not in item.payload
 
     def test_bounded_source_preparation_retries_before_watchdog_and_submission(
         self,
