@@ -4317,8 +4317,8 @@ class ImplementationStage(Stage):
             return StageOutcome(Disposition.FAIL_BACK, "plan_not_go")
 
         # One stale-plan recheck round before implementation consumes an
-        # accepted plan that may have drifted from the current tree. The
-        # plan stays valid; the recheck names tweaks or blocks for a human.
+        # accepted plan that may have drifted from the current tree. A GO
+        # keeps the accepted plan; a NO-GO re-plans against the current tree.
         if (
             not item.payload.get("manual_rebase_required")
             and is_plan_go(gate_labels)

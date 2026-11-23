@@ -1247,10 +1247,9 @@ class PlanReviewStage(Stage):
                 item.payload["plan_revision"] = snapshot.revision
                 item.payload[_REVIEWED_PLAN_COMMENT_BODY] = snapshot.current_plan_body
                 if item.payload.get("stale_plan_recheck"):
-                    # An armed stale-plan recheck runs one review round: the
-                    # plan stays valid, the reviewer names tweaks, and a
-                    # NO-GO re-plans the accepted plan against the current
-                    # tree instead of blocking for a human.
+                    # An armed stale-plan recheck runs one review round: a GO
+                    # keeps the accepted plan, a NO-GO re-plans against the
+                    # current tree instead of blocking for a human.
                     logger.info(
                         "plan_review:%d: stale-plan recheck armed; running the "
                         "recheck round against the current tree",
