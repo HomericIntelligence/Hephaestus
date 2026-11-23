@@ -237,6 +237,8 @@ def run(
     except subprocess.TimeoutExpired as error:
         if log_errors:
             if is_git_command:
+                # The formatter redacts secrets from every field.
+                # codeql[py/clear-text-logging-sensitive-data]
                 logger.error(
                     "Subprocess timed out; %s",
                     _redact_git_diagnostics(_format_git_failure_context(cmd, cwd, error)),
@@ -247,6 +249,8 @@ def run(
     except subprocess.CalledProcessError as error:
         if log_errors:
             if is_git_command:
+                # The formatter redacts secrets from every field.
+                # codeql[py/clear-text-logging-sensitive-data]
                 logger.error(
                     "Subprocess failed with exit code %s; %s",
                     error.returncode,
