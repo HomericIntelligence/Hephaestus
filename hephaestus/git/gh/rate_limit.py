@@ -329,6 +329,16 @@ GLOBAL_THROTTLE_SCOPE = "machine"
 _global_throttle_rate = _DEFAULT_GLOBAL_RATE
 _global_throttle_burst = _DEFAULT_BURST
 _global_throttle_directory: Path | None = None
+_logged_runtime_base: Path | None = None
+
+
+def _log_runtime_base_once(base: Path) -> None:
+    """Report the resolved throttle root once per process and distinct root."""
+    global _logged_runtime_base
+    if base == _logged_runtime_base:
+        return
+    _logged_runtime_base = base
+    logger.debug("GitHub throttle scope=%s root=%s", GLOBAL_THROTTLE_SCOPE, base)
 
 
 def configure_gh_global_throttle(
@@ -445,14 +455,14 @@ def _runtime_base_dir() -> Path:
                 f"Cannot use the configured GitHub throttle directory {configured}: "
                 f"{reason}. Pass --gh-throttle-dir with a writable node-local directory."
             )
-        logger.debug("GitHub throttle scope=%s root=%s", GLOBAL_THROTTLE_SCOPE, base)
+        _log_runtime_base_once(base)
         return base
 
     failures: list[str] = []
     for candidate in _node_local_runtime_candidates():
         base, reason = _probe_private_runtime_root(candidate)
         if base is not None:
-            logger.debug("GitHub throttle scope=%s root=%s", GLOBAL_THROTTLE_SCOPE, base)
+            _log_runtime_base_once(base)
             return base
         failures.append(f"{candidate}: {reason}")
     detail = "; ".join(failures) if failures else "no candidate is available"
