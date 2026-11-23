@@ -11,10 +11,12 @@ from typing import Any
 
 import pytest
 
-from hephaestus.agents.execution_policy import SessionLifecycle
+from hephaestus.agents.execution_policy import AgentRole, SessionLifecycle
 from hephaestus.agents.model_selection import AgentModelSelection
+from hephaestus.agents.pi_session import create_pi_binding
 from hephaestus.agents.workspace import SourceLane
 from hephaestus.automation.learning_journal import LearningJournalStore
+from hephaestus.automation.pipeline.diagnostics import bounded_pipeline_diagnostic
 from hephaestus.automation.pipeline.jobs import AgentJob, JobResult
 from hephaestus.automation.pipeline.plan_journal import (
     NOGO_MARKER_PREFIX,
@@ -788,6 +790,93 @@ class TestPlanReviewStageStep:
         assert request.job.execution_request is not None
         assert request.job.execution_request.lifecycle is SessionLifecycle.START_NEW
 
+    @pytest.mark.parametrize(
+        ("selected_provider", "selected_model"),
+        [("codex", "old-model"), ("pi", "new-model")],
+        ids=["provider-change", "model-change"],
+    )
+    def test_reviewer_selection_change_reconstructs_fresh_cycle(
+        self,
+        selected_provider: str,
+        selected_model: str,
+        make_ctx: Any,
+        make_work_item: Any,
+        tmp_path: Path,
+    ) -> None:
+        """A selection change starts fresh without charging a reviewer failure."""
+        github = FakeStageGitHub(labels=[STATE_NEEDS_PLAN])
+        plan = "Plan v2 with rollback"
+        critique = "Current critique: keep the rollback steps."
+        github.comments[3680] = [
+            render_current_plan(plan, revision=2),
+            render_current_review(f"{critique}\n\nstate:plan-no-go", revision=2),
+        ]
+        store = PlanReviewSessionStore(lambda: tmp_path)
+        old_ctx = make_ctx(
+            github=github,
+            plan_review_sessions=store,
+            config_overrides={"agent": "pi", "reviewer_model": "old-model"},
+        )
+        stage = PlanReviewStage()
+        old_item = make_work_item(issue=3680, state="ENTER")
+        assert stage.on_enter(old_item, old_ctx) is None
+        old_cycle_id = old_item.payload["plan_review_cycle_id"]
+        old_binding = create_pi_binding(
+            session_id="old-reviewer-session",
+            cwd=Path(old_ctx.paths.worktree),
+            role=AgentRole.PLAN_REVIEWER,
+            model="old-model",
+            state_reference="old-private-state",
+        )
+        store.bind_session(old_cycle_id, old_binding.session_id, old_binding)
+
+        ctx = make_ctx(
+            github=github,
+            plan_review_sessions=store,
+            config_overrides={
+                "agent": selected_provider,
+                "reviewer_model": selected_model,
+            },
+        )
+        item = make_work_item(issue=3680, state="ENTER")
+        outcome = stage.on_enter(item, ctx)
+
+        assert outcome is None
+        assert "review_error_retries" not in item.payload
+        assert "review_session_error" not in item.payload
+        new_cycle_id = item.payload["plan_review_cycle_id"]
+        assert new_cycle_id != old_cycle_id
+        assert store.load(old_cycle_id).state == "reset"
+        new_cycle = store.load(new_cycle_id)
+        assert new_cycle.provider == selected_provider
+        assert new_cycle.session_id is None
+        assert new_cycle.session_binding is None
+        assert new_cycle.plan_revision == 2
+        assert new_cycle.plan_fingerprint == plan_fingerprint(plan)
+        assert item.payload["plan_review_session_id"] is None
+        assert item.payload["plan_revision"] == 2
+        assert item.payload["plan_text"] == plan
+        assert critique in item.payload["prior_review"]
+
+        item.state = "REVIEW_WAIT"
+        request = stage.step(item, ctx)
+
+        assert isinstance(request, JobRequest)
+        assert isinstance(request.job, AgentJob)
+        assert request.job.agent == selected_provider
+        assert request.job.model == selected_model
+        assert request.job.session_key != f"plan-reviewer-cycle-{old_cycle_id}"
+        assert request.job.resume_session_id is None
+        assert request.job.resume_binding is None
+        assert request.job.execution_request is not None
+        assert request.job.execution_request.lifecycle is SessionLifecycle.START_NEW
+        assert request.job.prompt_kwargs["plan_text"] == plan
+        assert request.job.prompt_kwargs["plan_revision"] == 2
+        assert request.job.prompt_kwargs["prior_review"] == item.payload["prior_review"]
+        prompt = request.job.prompt_builder(**request.job.prompt_kwargs)
+        assert plan in prompt
+        assert critique in prompt
+
     def test_corrupt_review_transcript_restarts_a_revalidated_review_cycle(
         self, make_ctx: Any, make_work_item: Any, tmp_path: Path
     ) -> None:
@@ -1380,7 +1469,7 @@ class TestPlanReviewStageStep:
     def test_eval_error_logs_the_provider_cause_and_retry_action(
         self, make_ctx: Any, make_work_item: Any, caplog: pytest.LogCaptureFixture
     ) -> None:
-        """A reviewer retry names the recorded provider failure."""
+        """A reviewer retry names the invalid output and recorded provider failure."""
         stage = PlanReviewStage()
         github = FakeStageGitHub()
         ctx = make_ctx(github=github)
@@ -1394,7 +1483,8 @@ class TestPlanReviewStageStep:
         assert isinstance(result, StageOutcome)
         assert result.disposition == Disposition.RETRY
         assert any(
-            "reviewer error: provider stream disconnected; retry 1/2" in message
+            "invalid review verdict: review text (ERROR): provider stream disconnected; retry 1/2"
+            in message
             for message in caplog.messages
         )
 
@@ -2696,14 +2786,17 @@ def test_provider_failure_uses_fallback_then_default_then_holds(
 
 
 def test_missing_verdict_requests_one_clarification_in_the_same_review(
-    make_ctx: Any, make_work_item: Any, tmp_path: Path
+    make_ctx: Any,
+    make_work_item: Any,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """A review without a decision gets one follow-up, not a retry charge."""
+    """One clarification keeps its flow and the final failure keeps a safe tail."""
     github = FakeStageGitHub(labels=[STATE_NEEDS_PLAN])
-    github.comments[2766] = [render_current_plan("Plan v1")]
+    _seed_canonical_plan(github, 3680, "Plan v1")
     store = PlanReviewSessionStore(lambda: tmp_path)
     ctx = make_ctx(github=github, plan_review_sessions=store)
-    item = make_work_item(issue=2766, state="ENTER")
+    item = make_work_item(issue=3680, state="ENTER")
     stage = PlanReviewStage()
     assert stage.on_enter(item, ctx) is None
     item.state = "REVIEW_WAIT"
@@ -2718,10 +2811,11 @@ def test_missing_verdict_requests_one_clarification_in_the_same_review(
     )
     item.state = "EVAL"
 
-    outcome = stage.step(item, ctx)
+    with caplog.at_level("WARNING", logger=plan_review.__name__):
+        outcome = stage.step(item, ctx)
 
-    assert isinstance(outcome, StageOutcome)
-    assert outcome.disposition is Disposition.RETRY
+    assert outcome == StageOutcome(Disposition.RETRY, "review verdict clarification requested")
+    assert sum("invalid review verdict" in message for message in caplog.messages) == 1
     assert item.state == "REVIEW_WAIT"
     assert "review_error_retries" not in item.payload
     followup = stage.step(item, ctx)
@@ -2733,19 +2827,93 @@ def test_missing_verdict_requests_one_clarification_in_the_same_review(
     assert "state:plan-go" in prompt
     assert "state:plan-no-go" in prompt
 
+    caplog.clear()
+    secret = "ghp_abcdefghijklmnopqrstuvwxyz0123456789"  # noqa: S105 - test sentinel
+    raw = ("x" * 600) + f" token={secret} final-reviewer-tail"
     stage.on_job_done(
         item,
-        JobResult(
-            ok=True, value=ReviewVerdict(grade=None, verdict="ERROR", raw="Still no decision.")
-        ),
+        JobResult(ok=True, value=ReviewVerdict(grade=None, verdict="ERROR", raw=raw)),
         ctx,
     )
     item.state = "EVAL"
-    exhausted_followup = stage.step(item, ctx)
+    with caplog.at_level("WARNING", logger=plan_review.__name__):
+        exhausted_followup = stage.step(item, ctx)
+
+    expected_tail = bounded_pipeline_diagnostic(raw, limit=500)
     assert isinstance(exhausted_followup, StageOutcome)
     assert exhausted_followup.disposition is Disposition.RETRY
+    assert "invalid review verdict" in exhausted_followup.note
+    assert expected_tail in exhausted_followup.note
+    assert expected_tail in caplog.text
+    assert sum(expected_tail in message for message in caplog.messages) == 1
+    assert secret not in exhausted_followup.note
+    assert secret not in caplog.text
     assert item.payload["review_error_retries"] == 1
+    assert item.payload["review_round"] == 0
+    assert item.attempts["plan_review_iter"] == 0
+    assert github.mutation_log == []
     assert "review_verdict_followup_pending" not in item.payload
+
+
+@pytest.mark.parametrize("verdict_kind", ["ERROR", "BLOCKED", "AMBIGUOUS"])
+def test_invalid_verdict_diagnostic_reaches_terminal_reason_for_every_type(
+    verdict_kind: str,
+    make_ctx: Any,
+    make_work_item: Any,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Every invalid verdict type retains a bounded redacted terminal diagnostic."""
+    github = FakeStageGitHub(labels=[STATE_NEEDS_PLAN])
+    ctx = make_ctx(github=github)
+    item = _review_item(make_work_item, github, issue=3680, state="EVAL")
+    secret = "ghp_abcdefghijklmnopqrstuvwxyz0123456789"  # noqa: S105 - test sentinel
+    raw = ("y" * 600) + f" token={secret} invalid-{verdict_kind}-tail"
+    item.payload["review_verdict"] = ReviewVerdict(grade=None, verdict=verdict_kind, raw=raw)
+    item.payload["review_verdict_followup_attempted"] = True
+    item.payload["review_error_retries"] = REVIEW_ERROR_RETRY_CAP
+
+    with caplog.at_level("WARNING", logger=plan_review.__name__):
+        outcome = PlanReviewStage().step(item, ctx)
+
+    expected_tail = bounded_pipeline_diagnostic(raw, limit=500)
+    assert isinstance(outcome, StageOutcome)
+    assert outcome.disposition is Disposition.FINISH_FAIL
+    assert "invalid review verdict" in outcome.note
+    assert expected_tail in outcome.note
+    assert expected_tail in caplog.text
+    assert sum(expected_tail in message for message in caplog.messages) == 1
+    assert secret not in outcome.note
+    assert secret not in caplog.text
+    assert len(expected_tail) <= 500
+    assert item.payload["review_error_retries"] == REVIEW_ERROR_RETRY_CAP + 1
+    assert item.attempts["plan_review_iter"] == 0
+    assert github.mutation_log == []
+
+
+def test_blank_invalid_verdict_has_safe_terminal_diagnostic(
+    make_ctx: Any,
+    make_work_item: Any,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Blank reviewer output has an explicit safe diagnostic."""
+    github = FakeStageGitHub(labels=[STATE_NEEDS_PLAN])
+    ctx = make_ctx(github=github)
+    item = _review_item(make_work_item, github, issue=3680, state="EVAL")
+    item.payload["review_verdict"] = ReviewVerdict(grade=None, verdict="ERROR", raw=" \n\t")
+    item.payload["review_verdict_followup_attempted"] = True
+    item.payload["review_error_retries"] = REVIEW_ERROR_RETRY_CAP
+
+    with caplog.at_level("WARNING", logger=plan_review.__name__):
+        outcome = PlanReviewStage().step(item, ctx)
+
+    assert isinstance(outcome, StageOutcome)
+    assert outcome.disposition is Disposition.FINISH_FAIL
+    diagnostic = "invalid review verdict: empty reviewer output"
+    assert diagnostic in outcome.note
+    assert diagnostic in caplog.text
+    assert sum(diagnostic in message for message in caplog.messages) == 1
+    assert item.attempts["plan_review_iter"] == 0
+    assert github.mutation_log == []
 
 
 def test_resumed_enter_item_keeps_the_provider_cause(

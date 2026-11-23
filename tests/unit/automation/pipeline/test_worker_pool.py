@@ -5291,6 +5291,74 @@ class TestAgentErrorHandling:
         assert result.error.startswith("agent_error: codex_nested_sandbox_unsupported")
         assert "outside the enclosing API sandbox" in result.error
 
+    def test_codex_sse_idle_timeout_opens_provider_breaker(self, pool: WorkerPool) -> None:
+        """A bare structured Codex SSE timeout counts at the real provider breaker."""
+        job = _agent_job(agent="codex")
+        breaker = get_circuit_breaker(
+            "agent:codex",
+            failure_threshold=2,
+            ignore=_ignore_local_agent_failure,
+        )
+        failure = AgentExecutionError(
+            "codex_tool_or_provider_failure: Reconnecting... 1/5 "
+            "(stream disconnected before completion: idle timeout waiting for SSE)"
+        )
+
+        with (
+            patch(f"{_WP}.resolve_agent", return_value="codex"),
+            patch(f"{_WP}.run_agent_session", side_effect=failure) as invoke,
+        ):
+            results = [pool._run_agent(job) for _ in range(3)]
+
+        assert all(not result.ok for result in results)
+        assert all(
+            result.error is not None
+            and result.error.startswith("agent_error: provider_transport_timeout:")
+            for result in results[:2]
+        )
+        assert results[-1].error == "circuit_open"
+        assert invoke.call_count == 2
+        assert breaker.snapshot()["state"] == "open"
+        assert breaker.snapshot()["failure_count"] == 2
+
+    @pytest.mark.parametrize(
+        "detail",
+        [
+            "codex_tool_or_provider_failure: command_execution status=failed",
+            "codex_nested_sandbox_unsupported: run outside the enclosing API sandbox",
+            "codex_unsupported_reasoning_effort: unsupported reasoning effort",
+        ],
+        ids=["tool", "sandbox", "configuration"],
+    )
+    def test_deterministic_codex_failures_do_not_open_provider_breaker(
+        self,
+        pool: WorkerPool,
+        detail: str,
+    ) -> None:
+        """Local Codex failures neither count nor reset provider availability."""
+        job = _agent_job(agent="codex")
+        breaker = get_circuit_breaker(
+            "agent:codex",
+            failure_threshold=2,
+            ignore=_ignore_local_agent_failure,
+        )
+        healthy = AgentRunResult("healthy", "", "codex-session")
+
+        with (
+            patch(f"{_WP}.resolve_agent", return_value="codex"),
+            patch(
+                f"{_WP}.run_agent_session",
+                side_effect=[*(AgentExecutionError(detail) for _ in range(3)), healthy],
+            ) as invoke,
+        ):
+            results = [pool._run_agent(job) for _ in range(4)]
+
+        assert all(not result.ok and result.error != "circuit_open" for result in results[:3])
+        assert results[-1].ok
+        assert invoke.call_count == 4
+        assert breaker.snapshot()["state"] == "closed"
+        assert breaker.snapshot()["failure_count"] == 0
+
     def test_pr_review_prompt_limit_stops_before_provider_call(self, pool: WorkerPool) -> None:
         """A deterministic prompt limit error cannot reach the provider."""
 
