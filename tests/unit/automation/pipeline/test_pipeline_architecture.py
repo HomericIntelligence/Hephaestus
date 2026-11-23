@@ -464,8 +464,9 @@ def test_auto_merge_mutations_have_one_production_call_site_each() -> None:
 
     The approval label is the whole merge contract, so the enablement must stay
     inside one audited call site rather than being spread across stages. A lost
-    approval must be disarmed from the closed merge-wait job or the merge
-    mutation module, so the ban covers both live mutation names.
+    approval, or a BEHIND pull request, must be disarmed from the closed
+    merge-wait job or the merge mutation module, so the ban covers both live
+    mutation names.
 
     The scan pins the call sites, not their offsets: the assertions use a
     relative file path and a count only. A line above a call site can move
@@ -483,8 +484,11 @@ def test_auto_merge_mutations_have_one_production_call_site_each() -> None:
                     disabled.append(str(path.relative_to(_AUTOMATION)))
 
     assert enabled == ["pipeline_github_jobs.py"], f"unexpected auto-merge enable sites: {enabled}"
-    assert len(disabled) == 2, f"unexpected auto-merge disarm sites: {disabled}"
-    assert sorted(disabled) == ["pipeline_github_jobs.py", "pipeline_github_mutations.py"]
+    assert sorted(disabled) == [
+        "pipeline_github_jobs.py",
+        "pipeline_github_jobs.py",
+        "pipeline_github_mutations.py",
+    ], f"unexpected auto-merge disarm sites: {disabled}"
 
 
 def _sleep_violations(tree: ast.AST, filename: str, *, allow_time_import: bool) -> list[str]:

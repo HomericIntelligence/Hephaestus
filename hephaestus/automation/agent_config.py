@@ -209,7 +209,7 @@ def pr_reviewer_claude_timeout() -> int:
 
 
 def learn_claude_timeout() -> int:
-    """Timeout for ``/learn`` agent calls (default 1200s)."""
+    """Timeout for ``/learn`` agent calls (default 1800s)."""
     return AGENT_LEARN_TIMEOUT
 
 

@@ -720,7 +720,7 @@ def test_scoped_mark_no_go_appends_repo_selector(
             "org/repo-a",
         ],
         ["pr", "view", "7", "--json", "labels", "--repo", "org/repo-a"],
-        ["pr", "merge", "7", "--disable-auto"],
+        ["pr", "merge", "7", "--repo", "org/repo-a", "--disable-auto"],
     ]
 
 

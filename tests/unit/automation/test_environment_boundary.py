@@ -152,7 +152,7 @@ def test_loop_parser_exposes_typed_environment_replacements_with_exact_defaults(
     """Every removed tuning variable has a typed loop option with the same default."""
     args = loop_runner.build_parser().parse_args([])
     assert (args.planner_timeout, args.reviewer_timeout, args.implementer_timeout) == (
-        1200,
+        1800,
         3600,
         1800,
     )

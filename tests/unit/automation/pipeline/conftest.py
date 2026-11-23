@@ -13,12 +13,14 @@ import os
 import queue
 import threading
 from collections import deque
+from collections.abc import Generator
 from pathlib import Path
 from typing import Any, TypedDict
 
 import pytest
 
 from hephaestus.automation.operation_deadlines import operation_deadline_after
+from hephaestus.automation.pipeline import admission
 from hephaestus.automation.pipeline.athena_skill_jobs import AthenaSkillJob, AthenaSkillResult
 from hephaestus.automation.pipeline.github_jobs import GitHubJob, GitHubJobRunner
 from hephaestus.automation.pipeline.jobs import (
@@ -37,6 +39,14 @@ from hephaestus.automation.pipeline.worker_protocol import (
     MainWorker,
     WorkerFactory,
 )
+
+
+@pytest.fixture(autouse=True)
+def _reset_dependency_facts_cache() -> Generator[None]:
+    """Prevent a cached dependency batch from leaking across pipeline tests."""
+    admission._dependency_facts_cache.clear()
+    yield
+    admission._dependency_facts_cache.clear()
 
 
 class FakeSigningProvider:

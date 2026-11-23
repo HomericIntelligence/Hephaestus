@@ -36,13 +36,14 @@ from hephaestus.automation.pipeline.jobs import (
     GitJob,
     JobResult,
 )
-from hephaestus.automation.pipeline.routing import Disposition
+from hephaestus.automation.pipeline.routing import Disposition, StageName
 from hephaestus.automation.pipeline.stages import (
     Continue,
     JobRequest,
     StageOutcome,
 )
 from hephaestus.automation.pipeline.stages.durable_request import PENDING_GITHUB_REQUEST
+from hephaestus.automation.pipeline.stages.finished import FinishedStage
 from hephaestus.automation.pipeline.stages.implementation import (
     BRANCH_WORKTREE_OWNER_PENDING_DELAY_S,
     GIT_ERROR_RETRY_CAP,
@@ -52,6 +53,7 @@ from hephaestus.automation.pipeline.stages.implementation import (
     build_implementation_prompt,
     build_test_fix_prompt,
 )
+from hephaestus.automation.pipeline.work_item import ItemResult
 from hephaestus.automation.pipeline.worker_pool import (
     WorkerPool,
     _codex_implementation_grants,
@@ -3757,6 +3759,7 @@ class TestWorktreeAndAdvise:
         assert outcome == Continue(next_state="WORKTREE_WAIT")
         assert item.attempts["implement"] == 0
         assert "git_error_retries" not in item.payload
+        assert "_direct_scope_reservation" not in item.payload
         assert "continuing from the managed lane" in caplog.text
         item.state = outcome.next_state
         retry = stage.step(item, ctx)
@@ -3764,6 +3767,56 @@ class TestWorktreeAndAdvise:
         assert isinstance(retry.job, GitJob)
         assert "base_sha" not in retry.job.kwargs
         assert retry.job.kwargs["refresh_base"] is False
+
+    def test_checkout_pin_mismatch_before_start_finishes_without_releasing_a_branch(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """An unstarted lane stops and leaves no reservation for Finished to release."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, state="WORKTREE_WAIT")
+        item.branch = "1-auto-impl"
+        item.payload["_direct_scope_base_sha"] = "a" * 40
+        detail = f"expected checkout pin {'a' * 40}, observed checkout HEAD {'b' * 40}"
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=False,
+                error="direct_scope_stale_state:checkout_pin_mismatch",
+                value={
+                    "direct_scope_stale_state": {
+                        "predicate": "checkout_pin_mismatch",
+                        "branch": item.branch,
+                        "detail": detail,
+                    }
+                },
+            ),
+            ctx,
+        )
+        item.state = "DIRTY_DECISION_WAIT"
+
+        outcome = stage.step(item, ctx)
+
+        assert outcome == StageOutcome(
+            Disposition.FINISH_FAIL,
+            "direct_scope_stale_state: checkout_pin_mismatch",
+        )
+        assert item.attempts["implement"] == 0
+        assert "git_error_retries" not in item.payload
+        assert "_direct_scope_reservation" not in item.payload
+
+        item.state = "CLEANUP"
+        item.result = ItemResult(
+            passed=False,
+            reason="direct_scope_stale_state: checkout_pin_mismatch",
+            final_stage=StageName.IMPLEMENTATION,
+        )
+        cleanup = FinishedStage([], [], []).step(item, ctx)
+        assert not (
+            isinstance(cleanup, JobRequest)
+            and isinstance(cleanup.job, GitJob)
+            and cleanup.job.op == "release_branch_reservation"
+        )
 
     def test_worktree_rollback_failure_preserves_direct_reservation_receipt(
         self, make_ctx: Any, make_work_item: Any
