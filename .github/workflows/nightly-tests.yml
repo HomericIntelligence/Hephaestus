@@ -50,15 +50,43 @@ jobs:
         uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3  # v4.0.0
         with:
           just-version: "1.36.0"
-      - name: Run full unit coverage
+      - name: Erase stale coverage data
+        run: uv run coverage erase
+      - name: Run full unit coverage (pipeline shard)
         # Nightly is the only lane that still runs the nightly-marked
-        # high-cost tests, so it must keep them. Run in parallel; the suite
-        # takes roughly 33 minutes serially.
+        # high-cost tests, so it must keep them. Run in three invocations so
+        # process memory resets before the runner can kill the job.
+        # --cov-append carries coverage across shards. Each shard disables the
+        # per-run fail-under; the aggregate coverage report enforces the
+        # documented floor and hephaestus-check-coverage enforces the per-module
+        # floors. If a shard still stops, split the largest shard with the same
+        # root-path-plus-ignore rule. Do not add continue-on-error or another
+        # suppression.
         run: >
-          uv run pytest tests/unit --override-ini="addopts=" -v --strict-markers
+          uv run pytest tests/unit/automation/pipeline
+          --override-ini="addopts=" -v --strict-markers
           -m "not performance and not contract"
           -n 2
-          --cov=hephaestus --cov-report=term-missing --cov-report=xml
+          --cov=hephaestus --cov-append --cov-fail-under=0 --cov-report=
+      - name: Run full unit coverage (automation shard)
+        run: >
+          uv run pytest tests/unit/automation
+          --ignore=tests/unit/automation/pipeline
+          --override-ini="addopts=" -v --strict-markers
+          -m "not performance and not contract"
+          -n 2
+          --cov=hephaestus --cov-append --cov-fail-under=0 --cov-report=
+      - name: Run full unit coverage (remaining units)
+        run: >
+          uv run pytest tests/unit
+          --ignore=tests/unit/automation
+          --override-ini="addopts=" -v --strict-markers
+          -m "not performance and not contract"
+          -n 2
+          --cov=hephaestus --cov-append --cov-fail-under=0
+          --cov-report=xml
+      - name: Check aggregate coverage
+        run: uv run coverage report --fail-under=85 --show-missing
       - name: Check per-module coverage floors
         run: uv run hephaestus-check-coverage --coverage-file coverage.xml --config coverage.toml
       - name: Persist coverage report

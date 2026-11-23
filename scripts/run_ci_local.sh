@@ -574,9 +574,18 @@ run_lint() {
 
 run_unit() {
     log_step "Unit tests + structure/coverage checks"
+    # Run in three invocations so process memory resets. --cov-append carries
+    # coverage across shards; the aggregate report enforces the documented floor
+    # and hephaestus-check-coverage enforces the per-module floors.
     run_in_container bash -c '\
-        uv run pytest tests/unit --override-ini="addopts=" -v --strict-markers -m "not performance and not contract" \
-            --cov=hephaestus --cov-report=xml --cov-report=term-missing && \
+        uv run coverage erase && rm -f coverage.xml && \
+        uv run pytest tests/unit/automation/pipeline --override-ini="addopts=" -v --strict-markers -m "not performance and not contract" \
+            -n 2 --cov=hephaestus --cov-append --cov-fail-under=0 --cov-report= && \
+        uv run pytest tests/unit/automation --ignore=tests/unit/automation/pipeline --override-ini="addopts=" -v --strict-markers -m "not performance and not contract" \
+            -n 2 --cov=hephaestus --cov-append --cov-fail-under=0 --cov-report= && \
+        uv run pytest tests/unit --ignore=tests/unit/automation --override-ini="addopts=" -v --strict-markers -m "not performance and not contract" \
+            -n 2 --cov=hephaestus --cov-append --cov-fail-under=0 --cov-report=xml && \
+        uv run coverage report --fail-under=85 --show-missing && \
         uv run hephaestus-check-test-structure && \
         uv run hephaestus-check-coverage --coverage-file coverage.xml --config coverage.toml'
 }
