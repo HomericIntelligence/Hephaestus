@@ -3214,6 +3214,8 @@ class TestFinalizedPlanAdmission:
 
         assert outcome == StageOutcome(Disposition.FAIL_BACK, "plan_changed")
         assert github.mutation_log == []
+
+
 class TestStalePlanRecheck:
     """A stale-plan recheck NO-GO re-plans instead of blocking for a human."""
 
