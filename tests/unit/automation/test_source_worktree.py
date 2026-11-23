@@ -1468,7 +1468,10 @@ def test_direct_worker_serializes_unproven_recovery_for_unreadable_receipt(
     outcome = stage.step(item, context)
 
     assert isinstance(outcome, StageOutcome)
-    assert outcome.disposition is Disposition.RETRY
+    assert outcome.disposition is Disposition.FINISH_FAIL
+    assert outcome.note is not None
+    assert outcome.note.startswith("source_workspace_ownership:unproven_predecessor:")
+    assert item.payload["source_workspace_recovery"]["kind"] == "unproven_predecessor"
     assert "source_workspace_preserve" not in item.payload
     assert "source_workspace_terminal" not in item.payload
     assert predecessor.cwd.exists()
@@ -1929,6 +1932,450 @@ def test_direct_writer_transition_rejects_a_receipt_for_a_moved_checkout(
     assert captured.value.recovery.kind is SourceWorkspaceRecoveryKind.RECEIPT_PATH_MISSING
     assert receipt_path.exists()
     assert not manager.path_for(9, SourceLane.IMPLEMENTATION).exists()
+
+
+def test_clean_legacy_receipt_migrates_to_the_current_intake_base(tmp_path: Path) -> None:
+    """A clean receipt follows the intake base and keeps its writer recoverable."""
+    repo, first, second = _repository(tmp_path)
+    remote = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True)
+    _git(repo, "remote", "add", "origin", str(remote))
+    _git(repo, "push", "--set-upstream", "origin", "main")
+    _git(repo, "push", "origin", "main:writer-branch")
+    legacy = SourceWorkspaceManager(
+        repo,
+        repository="example/project",
+        base_dir=tmp_path / "legacy" / "build" / ".worktrees",
+    )
+    predecessor = legacy.prepare(
+        9,
+        SourceLane.IMPLEMENTATION,
+        first,
+        branch="old-writer-branch",
+    )
+    current = SourceWorkspaceManager(
+        repo,
+        repository="example/project",
+        base_dir=tmp_path / "intake" / "build" / ".worktrees",
+    )
+    expected = current.path_for(9, SourceLane.IMPLEMENTATION)
+    writers = WorktreeManager(
+        repo_root=repo,
+        base_dir=current.base_dir,
+        remote_git_env={},
+        remote_git_config=("-c", "credential.helper="),
+    )
+
+    with current.implementation_writer_handoff(9) as handoff:
+        assert current.authorize_direct_implementation_writer_transition(
+            9,
+            branch="writer-branch",
+            base_sha=second,
+            handoff=handoff,
+        )
+        writer = writers.create_worktree(
+            9,
+            "writer-branch",
+            base_sha=second,
+            remote_branch_reserved=True,
+            source_lane=SourceLane.IMPLEMENTATION.value,
+            implementation_writer_handoff=handoff,
+        )
+        binding = current.claim_implementation_writer(
+            9,
+            branch="writer-branch",
+            path=writer,
+            authority=writers.implementation_writer_authority(writer),
+            handoff=handoff,
+        )
+
+    assert writer == expected
+    assert predecessor.cwd != expected
+    assert not predecessor.cwd.exists()
+    assert binding.cwd == expected
+    assert _git(writer, "branch", "--show-current") == "writer-branch"
+    record_path = next(current.state_dir.glob("9-impl-legacy-reconciliation-*.json"))
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    assert record["phase"] == "completed"
+    assert record["predecessor_path"] == str(predecessor.cwd)
+    assert record["successor_path"] == str(expected)
+    assert record["predecessor_revision"] == first
+    assert record["successor_generation"] == predecessor.generation + 1
+    assert len(record["record_digest"]) == 64
+
+
+def test_dirty_legacy_receipt_stays_at_its_path_with_evidence(tmp_path: Path) -> None:
+    """Uncommitted legacy work blocks migration and stays untouched."""
+    repo, first, second = _repository(tmp_path)
+    legacy = SourceWorkspaceManager(
+        repo,
+        repository="example/project",
+        base_dir=tmp_path / "legacy" / "build" / ".worktrees",
+    )
+    predecessor = legacy.prepare(
+        9,
+        SourceLane.IMPLEMENTATION,
+        first,
+        branch="old-writer-branch",
+    )
+    pending = predecessor.cwd / "pending-change"
+    pending.write_text("preserve\n", encoding="utf-8")
+    current = SourceWorkspaceManager(
+        repo,
+        repository="example/project",
+        base_dir=tmp_path / "intake" / "build" / ".worktrees",
+    )
+
+    with current.implementation_writer_handoff(9) as handoff:
+        with pytest.raises(SourceWorkspaceError) as captured:
+            current.authorize_direct_implementation_writer_transition(
+                9,
+                branch="writer-branch",
+                base_sha=second,
+                handoff=handoff,
+            )
+
+    recovery = captured.value.recovery
+    assert recovery is not None
+    assert recovery.kind is SourceWorkspaceRecoveryKind.DIRTY_WORKTREE
+    assert recovery.path == predecessor.cwd.resolve()
+    assert pending.read_text(encoding="utf-8") == "preserve\n"
+    assert not current.path_for(9, SourceLane.IMPLEMENTATION).exists()
+    retained = current._read_receipt(9, SourceLane.IMPLEMENTATION)
+    assert retained is not None
+    assert retained.path == predecessor.cwd
+
+
+def test_ambiguous_legacy_receipt_preserves_both_checkouts(tmp_path: Path) -> None:
+    """A legacy receipt cannot choose between two registered checkouts."""
+    repo, first, second = _repository(tmp_path)
+    legacy = SourceWorkspaceManager(
+        repo,
+        repository="example/project",
+        base_dir=tmp_path / "legacy" / "build" / ".worktrees",
+    )
+    predecessor = legacy.prepare(
+        9,
+        SourceLane.IMPLEMENTATION,
+        first,
+        branch="old-writer-branch",
+    )
+    current = SourceWorkspaceManager(
+        repo,
+        repository="example/project",
+        base_dir=tmp_path / "intake" / "build" / ".worktrees",
+    )
+    expected = current.path_for(9, SourceLane.IMPLEMENTATION)
+    _git(repo, "worktree", "add", "--detach", str(expected), first)
+
+    with current.implementation_writer_handoff(9) as handoff:
+        with pytest.raises(SourceWorkspaceError) as captured:
+            current.authorize_direct_implementation_writer_transition(
+                9,
+                branch="writer-branch",
+                base_sha=second,
+                handoff=handoff,
+            )
+
+    recovery = captured.value.recovery
+    assert recovery is not None
+    assert recovery.kind is SourceWorkspaceRecoveryKind.UNPROVEN_PREDECESSOR
+    assert str(predecessor.cwd) in recovery.manual_action
+    assert str(expected) in recovery.manual_action
+    assert predecessor.cwd.exists()
+    assert expected.exists()
+
+
+def test_foreign_legacy_receipt_is_not_migrated(tmp_path: Path) -> None:
+    """A receipt owned by another repository keeps its path and evidence."""
+    repo, first, second = _repository(tmp_path)
+    legacy = SourceWorkspaceManager(
+        repo,
+        repository="other/project",
+        base_dir=tmp_path / "legacy" / "build" / ".worktrees",
+    )
+    predecessor = legacy.prepare(
+        9,
+        SourceLane.IMPLEMENTATION,
+        first,
+        branch="old-writer-branch",
+    )
+    current = SourceWorkspaceManager(
+        repo,
+        repository="example/project",
+        base_dir=tmp_path / "intake" / "build" / ".worktrees",
+    )
+
+    with current.implementation_writer_handoff(9) as handoff:
+        with pytest.raises(SourceWorkspaceError) as captured:
+            current.authorize_direct_implementation_writer_transition(
+                9,
+                branch="writer-branch",
+                base_sha=second,
+                handoff=handoff,
+            )
+
+    recovery = captured.value.recovery
+    assert recovery is not None
+    assert recovery.kind is SourceWorkspaceRecoveryKind.FOREIGN_OWNER
+    assert predecessor.cwd.exists()
+    assert not current.path_for(9, SourceLane.IMPLEMENTATION).exists()
+    retained = legacy._read_receipt(9, SourceLane.IMPLEMENTATION)
+    assert retained is not None
+    assert retained.path == predecessor.cwd
+
+
+def test_interrupted_legacy_migration_finishes_from_its_record(tmp_path: Path) -> None:
+    """A moved legacy checkout resumes from its durable prepared record."""
+    repo, first, second = _repository(tmp_path)
+    legacy = SourceWorkspaceManager(
+        repo,
+        repository="example/project",
+        base_dir=tmp_path / "legacy" / "build" / ".worktrees",
+    )
+    predecessor = legacy.prepare(
+        9,
+        SourceLane.IMPLEMENTATION,
+        first,
+        branch="old-writer-branch",
+    )
+    current = SourceWorkspaceManager(
+        repo,
+        repository="example/project",
+        base_dir=tmp_path / "intake" / "build" / ".worktrees",
+    )
+    expected = current.path_for(9, SourceLane.IMPLEMENTATION)
+    receipt = current._read_receipt(9, SourceLane.IMPLEMENTATION)
+    assert receipt is not None
+    record = source_worktree._LegacyReceiptReconciliation.create(
+        repository=current.repository,
+        repository_identity=current.repository_identity,
+        ownership_key=current.ownership_key(9, SourceLane.IMPLEMENTATION),
+        item_number=9,
+        predecessor=receipt,
+        successor_path=expected,
+        phase="prepared",
+    )
+    current._write_legacy_reconciliation(record)
+    _git(repo, "worktree", "move", str(predecessor.cwd), str(expected))
+
+    with current.implementation_writer_handoff(9) as handoff:
+        assert current.authorize_direct_implementation_writer_transition(
+            9,
+            branch="writer-branch",
+            base_sha=second,
+            handoff=handoff,
+        )
+
+    migrated = current._read_receipt(9, SourceLane.IMPLEMENTATION)
+    assert migrated is not None
+    assert migrated.path == expected
+    assert migrated.generation == predecessor.generation + 1
+    record_path = current._legacy_reconciliation_path(9, predecessor.cwd)
+    completed = json.loads(record_path.read_text(encoding="utf-8"))
+    assert completed["phase"] == "completed"
+
+
+def test_prepared_legacy_migration_stops_for_a_late_obligation(tmp_path: Path) -> None:
+    """A late obligation blocks a prepared migration before any checkout moves."""
+    repo, first, second = _repository(tmp_path)
+    legacy = SourceWorkspaceManager(
+        repo,
+        repository="example/project",
+        base_dir=tmp_path / "legacy" / "build" / ".worktrees",
+    )
+    predecessor = legacy.prepare(
+        9,
+        SourceLane.IMPLEMENTATION,
+        first,
+        branch="old-writer-branch",
+    )
+    current = SourceWorkspaceManager(
+        repo,
+        repository="example/project",
+        base_dir=tmp_path / "intake" / "build" / ".worktrees",
+    )
+    expected = current.path_for(9, SourceLane.IMPLEMENTATION)
+    receipt = current._read_receipt(9, SourceLane.IMPLEMENTATION)
+    assert receipt is not None
+    record = source_worktree._LegacyReceiptReconciliation.create(
+        repository=current.repository,
+        repository_identity=current.repository_identity,
+        ownership_key=current.ownership_key(9, SourceLane.IMPLEMENTATION),
+        item_number=9,
+        predecessor=receipt,
+        successor_path=expected,
+        phase="prepared",
+    )
+    current._write_legacy_reconciliation(record)
+    legacy.add_obligation(9, SourceLane.IMPLEMENTATION, "late-obligation")
+
+    with current.implementation_writer_handoff(9) as handoff:
+        with pytest.raises(SourceWorkspaceError) as captured:
+            current.authorize_direct_implementation_writer_transition(
+                9,
+                branch="writer-branch",
+                base_sha=second,
+                handoff=handoff,
+            )
+
+    recovery = captured.value.recovery
+    assert recovery is not None
+    assert recovery.kind is SourceWorkspaceRecoveryKind.DURABLE_OBLIGATIONS
+    assert predecessor.cwd.exists()
+    assert not expected.exists()
+    retained = current._read_receipt(9, SourceLane.IMPLEMENTATION)
+    assert retained is not None
+    assert retained.path == predecessor.cwd
+    record_path = current._legacy_reconciliation_path(9, predecessor.cwd)
+    prepared = json.loads(record_path.read_text(encoding="utf-8"))
+    assert prepared["phase"] == "prepared"
+
+
+def test_corrupt_legacy_migration_record_keeps_recovery_evidence(tmp_path: Path) -> None:
+    """A corrupt migration record reports the real recovery cause, not a bare error."""
+    repo, first, second = _repository(tmp_path)
+    legacy = SourceWorkspaceManager(
+        repo,
+        repository="example/project",
+        base_dir=tmp_path / "legacy" / "build" / ".worktrees",
+    )
+    predecessor = legacy.prepare(
+        9,
+        SourceLane.IMPLEMENTATION,
+        first,
+        branch="old-writer-branch",
+    )
+    current = SourceWorkspaceManager(
+        repo,
+        repository="example/project",
+        base_dir=tmp_path / "intake" / "build" / ".worktrees",
+    )
+    current._legacy_reconciliation_path(9, predecessor.cwd).write_text(
+        "not-json\n", encoding="utf-8"
+    )
+
+    with current.implementation_writer_handoff(9) as handoff:
+        with pytest.raises(SourceWorkspaceError) as captured:
+            current.authorize_direct_implementation_writer_transition(
+                9,
+                branch="writer-branch",
+                base_sha=second,
+                handoff=handoff,
+            )
+
+    recovery = captured.value.recovery
+    assert captured.value.legacy_migration is True
+    assert recovery is not None
+    assert recovery.kind is SourceWorkspaceRecoveryKind.UNPROVEN_PREDECESSOR
+    assert predecessor.cwd.exists()
+
+
+def test_prepared_legacy_migration_without_either_checkout_blocks(tmp_path: Path) -> None:
+    """A prepared migration with neither checkout present preserves its evidence."""
+    repo, first, second = _repository(tmp_path)
+    legacy = SourceWorkspaceManager(
+        repo,
+        repository="example/project",
+        base_dir=tmp_path / "legacy" / "build" / ".worktrees",
+    )
+    predecessor = legacy.prepare(
+        9,
+        SourceLane.IMPLEMENTATION,
+        first,
+        branch="old-writer-branch",
+    )
+    current = SourceWorkspaceManager(
+        repo,
+        repository="example/project",
+        base_dir=tmp_path / "intake" / "build" / ".worktrees",
+    )
+    expected = current.path_for(9, SourceLane.IMPLEMENTATION)
+    receipt = current._read_receipt(9, SourceLane.IMPLEMENTATION)
+    assert receipt is not None
+    record = source_worktree._LegacyReceiptReconciliation.create(
+        repository=current.repository,
+        repository_identity=current.repository_identity,
+        ownership_key=current.ownership_key(9, SourceLane.IMPLEMENTATION),
+        item_number=9,
+        predecessor=receipt,
+        successor_path=expected,
+        phase="prepared",
+    )
+    current._write_legacy_reconciliation(record)
+    shutil.rmtree(predecessor.cwd)
+
+    with current.implementation_writer_handoff(9) as handoff:
+        with pytest.raises(SourceWorkspaceError) as captured:
+            current.authorize_direct_implementation_writer_transition(
+                9,
+                branch="writer-branch",
+                base_sha=second,
+                handoff=handoff,
+            )
+
+    recovery = captured.value.recovery
+    assert recovery is not None
+    assert recovery.kind is SourceWorkspaceRecoveryKind.UNPROVEN_PREDECESSOR
+    assert not expected.exists()
+    retained = current._read_receipt(9, SourceLane.IMPLEMENTATION)
+    assert retained is not None
+    assert retained.path == predecessor.cwd
+    record_path = current._legacy_reconciliation_path(9, predecessor.cwd)
+    prepared = json.loads(record_path.read_text(encoding="utf-8"))
+    assert prepared["phase"] == "prepared"
+
+
+def test_stale_completed_legacy_migration_does_not_reuse_its_checkout(tmp_path: Path) -> None:
+    """A completed record for a new receipt generation cannot be applied again."""
+    repo, first, second = _repository(tmp_path)
+    legacy = SourceWorkspaceManager(
+        repo,
+        repository="example/project",
+        base_dir=tmp_path / "legacy" / "build" / ".worktrees",
+    )
+    predecessor = legacy.prepare(
+        9,
+        SourceLane.IMPLEMENTATION,
+        first,
+        branch="old-writer-branch",
+    )
+    current = SourceWorkspaceManager(
+        repo,
+        repository="example/project",
+        base_dir=tmp_path / "intake" / "build" / ".worktrees",
+    )
+    expected = current.path_for(9, SourceLane.IMPLEMENTATION)
+    receipt = current._read_receipt(9, SourceLane.IMPLEMENTATION)
+    assert receipt is not None
+    record = source_worktree._LegacyReceiptReconciliation.create(
+        repository=current.repository,
+        repository_identity=current.repository_identity,
+        ownership_key=current.ownership_key(9, SourceLane.IMPLEMENTATION),
+        item_number=9,
+        predecessor=receipt,
+        successor_path=expected,
+        phase="completed",
+    )
+    current._write_legacy_reconciliation(record)
+
+    with current.implementation_writer_handoff(9) as handoff:
+        with pytest.raises(SourceWorkspaceError) as captured:
+            current.authorize_direct_implementation_writer_transition(
+                9,
+                branch="writer-branch",
+                base_sha=second,
+                handoff=handoff,
+            )
+
+    recovery = captured.value.recovery
+    assert recovery is not None
+    assert recovery.kind is SourceWorkspaceRecoveryKind.UNPROVEN_PREDECESSOR
+    assert predecessor.cwd.exists()
+    assert not expected.exists()
+    retained = current._read_receipt(9, SourceLane.IMPLEMENTATION)
+    assert retained is not None
+    assert retained.path == predecessor.cwd
 
 
 def test_implementation_writer_handoff_cannot_be_forged_outside_manager(

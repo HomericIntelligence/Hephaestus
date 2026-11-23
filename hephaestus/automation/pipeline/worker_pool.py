@@ -9522,6 +9522,13 @@ class WorkerPool:
                 "source_workspace_creation_failure": creation_failure.value,
                 "path": str(exc.path) if exc.path is not None else "",
             }
+            recovery = exc.recovery
+            if exc.legacy_migration and isinstance(recovery, SourceWorkspaceRecovery):
+                value["failure_kind"] = "source_workspace_ownership"
+                value["source_workspace_recovery"] = recovery.to_dict()
+            elif exc.legacy_migration and isinstance(recovery, dict):
+                value["failure_kind"] = "source_workspace_ownership"
+                value["source_workspace_recovery"] = recovery
             if exc.requested_branch is not None and exc.requested_base_sha is not None:
                 value["direct_scope_reservation"] = {
                     "branch": exc.requested_branch,
@@ -9675,6 +9682,9 @@ class WorkerPool:
                     requested_branch=branch_name,
                     requested_base_sha=base_sha,
                     recovery=exc.recovery if isinstance(exc, SourceWorkspaceError) else None,
+                    legacy_migration=(
+                        exc.legacy_migration if isinstance(exc, SourceWorkspaceError) else False
+                    ),
                     creation_failure=SourceWorkspaceCreationFailure.WRITER_TRANSITION,
                     requested_reservation_created=reservation_created,
                 )
