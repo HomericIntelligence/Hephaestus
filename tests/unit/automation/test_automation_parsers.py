@@ -27,6 +27,11 @@ THROTTLE_RATE_HELP = (
     "Pass 0 to disable the global throttle."
 )
 THROTTLE_BURST_HELP = "Global gh token-bucket burst size (default: 30.0)."
+THROTTLE_DIR_HELP = (
+    "Node-local directory for the cross-process gh throttle state. "
+    "The default uses the operating-system runtime directory. "
+    "Do not use a shared filesystem."
+)
 VERSION_HELP = "show program's version number and exit"
 
 
@@ -146,7 +151,7 @@ def _no_ui_spec() -> ActionSpec:
     )
 
 
-def _github_throttle_specs() -> tuple[ActionSpec, ActionSpec]:
+def _github_throttle_specs() -> tuple[ActionSpec, ...]:
     """Return the GitHub global-throttle action specs."""
     return (
         _action_spec(
@@ -162,6 +167,13 @@ def _github_throttle_specs() -> tuple[ActionSpec, ActionSpec]:
             "_StoreAction",
             30.0,
             help_text=THROTTLE_BURST_HELP,
+        ),
+        _action_spec(
+            ("--gh-throttle-dir",),
+            "gh_throttle_dir",
+            "_StoreAction",
+            None,
+            help_text=THROTTLE_DIR_HELP,
         ),
     )
 
