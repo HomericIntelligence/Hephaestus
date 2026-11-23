@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 
 from hephaestus.automation.dependency_parser import DependencyFact
+from hephaestus.automation.pipeline import admission
 from hephaestus.automation.pipeline.coordinator import Coordinator
 from hephaestus.automation.pipeline.coordinator_types import PipelineConfig
 from hephaestus.automation.pipeline.jobs import AgentJob
@@ -115,6 +116,7 @@ def test_external_dependency_completion_wakes_same_item_and_dispatches(
     _deadline, sequence, parked = coordinator.timers[0]
     coordinator.timers[0] = (0.0, sequence, parked)
     coordinator._wake_timers()
+    admission._dependency_facts_cache.clear()
     queued = coordinator._claim_item(StageName.IMPLEMENTATION)
     assert queued is item
     coordinator._run_item(claim_test_item(coordinator, item))
