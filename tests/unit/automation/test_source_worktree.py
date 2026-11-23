@@ -2232,6 +2232,45 @@ def test_prepared_legacy_migration_stops_for_a_late_obligation(tmp_path: Path) -
     assert prepared["phase"] == "prepared"
 
 
+def test_corrupt_legacy_migration_record_keeps_recovery_evidence(tmp_path: Path) -> None:
+    """A corrupt migration record reports the real recovery cause, not a bare error."""
+    repo, first, second = _repository(tmp_path)
+    legacy = SourceWorkspaceManager(
+        repo,
+        repository="example/project",
+        base_dir=tmp_path / "legacy" / "build" / ".worktrees",
+    )
+    predecessor = legacy.prepare(
+        9,
+        SourceLane.IMPLEMENTATION,
+        first,
+        branch="old-writer-branch",
+    )
+    current = SourceWorkspaceManager(
+        repo,
+        repository="example/project",
+        base_dir=tmp_path / "intake" / "build" / ".worktrees",
+    )
+    current._legacy_reconciliation_path(9, predecessor.cwd).write_text(
+        "not-json\n", encoding="utf-8"
+    )
+
+    with current.implementation_writer_handoff(9) as handoff:
+        with pytest.raises(SourceWorkspaceError) as captured:
+            current.authorize_direct_implementation_writer_transition(
+                9,
+                branch="writer-branch",
+                base_sha=second,
+                handoff=handoff,
+            )
+
+    recovery = captured.value.recovery
+    assert captured.value.legacy_migration is True
+    assert recovery is not None
+    assert recovery.kind is SourceWorkspaceRecoveryKind.UNPROVEN_PREDECESSOR
+    assert predecessor.cwd.exists()
+
+
 def test_prepared_legacy_migration_without_either_checkout_blocks(tmp_path: Path) -> None:
     """A prepared migration with neither checkout present preserves its evidence."""
     repo, first, second = _repository(tmp_path)

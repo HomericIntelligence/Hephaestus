@@ -1525,6 +1525,13 @@ class SourceWorkspaceManager:
                 )
             except SourceWorkspaceError as exc:
                 exc.legacy_migration = True
+                if exc.recovery is None:
+                    exc.recovery = self._legacy_ambiguous_recovery(
+                        item_number=item_number,
+                        receipt=old,
+                        expected_path=expected_path,
+                        receipt_path=receipt_path,
+                    )
                 raise
         if (old.detached and old.branch is not None) or (not old.detached and not old.branch):
             raise SourceWorkspaceError(
