@@ -58,13 +58,13 @@ issue removed this shared-filesystem lock path.
 
 ## Consequences
 
-- The throttle is correct for one machine. A multi-machine fleet can send up
-  to one budget per machine. An operator must divide `--gh-global-rate` across
-  the machines.
+- The throttle is correct for one operating-system user on one machine. A
+  multi-machine fleet can send up to one budget per user per machine. An
+  operator must divide `--gh-global-rate` across the machines and users.
 - The old state file below `TMPDIR` stays on disk and is ignored. The first
   call on the new root starts with a full bucket. While old and new processes
-  run together, the account can use up to two machine budgets. The refill and
-  burst contract does not change.
+  run together, one operating-system user can use up to two machine budgets.
+  The refill and burst contract does not change.
 - A container with a private `/dev/shm` has a per-container budget. A host
   that needs one budget must bind-mount a node-local directory and pass it
   with `--gh-throttle-dir`.
