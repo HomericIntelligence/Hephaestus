@@ -3753,7 +3753,9 @@ class ImplementationStage(Stage):
                 ):
                     item.payload[DIRECT_SCOPE_RESERVATION_KEY] = dict(reservation)
                 return
-            if (result.error or "").startswith("source_workspace_ownership_unavailable:"):
+            if (result.error or "").startswith(
+                "source_workspace_ownership_unavailable:"
+            ) or result_value.get("failure_kind") == "source_workspace_ownership":
                 item.payload["source_workspace_ownership_unavailable"] = True
                 item.payload["source_workspace_ownership_error"] = redact_diagnostic_text(
                     result.error or "source workspace ownership unavailable"

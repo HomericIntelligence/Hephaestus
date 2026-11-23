@@ -3264,6 +3264,40 @@ class SourceWorkspaceManager:
                 ),
             )
 
+    def _require_legacy_migration_eligible(
+        self,
+        receipt: SourceWorkspaceReceipt,
+        *,
+        item_number: int,
+        receipt_path: Path,
+    ) -> None:
+        """Refuse migration when the receipt carries work that must follow it."""
+        if receipt.obligations:
+            raise SourceWorkspaceError(
+                "implementation writer predecessor has durable obligations",
+                recovery=self._recovery(
+                    SourceWorkspaceRecoveryKind.DURABLE_OBLIGATIONS,
+                    item_number=item_number,
+                    path=receipt.path,
+                    receipt_path=receipt_path,
+                    manual_action=(
+                        "Complete or explicitly clear the durable obligations for "
+                        f"{receipt.path} through the owning pipeline. Then rerun "
+                        f"issue #{item_number}."
+                    ),
+                ),
+            )
+        if receipt.schema_version != 1 or receipt.dirty_claim is not None:
+            raise SourceWorkspaceError(
+                "source workspace legacy receipt is ambiguous",
+                recovery=self._legacy_ambiguous_recovery(
+                    item_number=item_number,
+                    receipt=receipt,
+                    expected_path=self._implementation_path(item_number),
+                    receipt_path=receipt_path,
+                ),
+            )
+
     def _reconcile_legacy_receipt_path(
         self,
         receipt: SourceWorkspaceReceipt,
@@ -3293,6 +3327,11 @@ class SourceWorkspaceManager:
                             receipt_path=receipt_path,
                         ),
                     )
+                self._require_legacy_migration_eligible(
+                    receipt,
+                    item_number=item_number,
+                    receipt_path=receipt_path,
+                )
                 if receipt.path.exists() or receipt.path.is_symlink():
                     if expected_path.exists() or expected_path.is_symlink():
                         raise SourceWorkspaceError(
@@ -3353,31 +3392,11 @@ class SourceWorkspaceManager:
                             receipt_path=receipt_path,
                         ),
                     )
-                if receipt.obligations:
-                    raise SourceWorkspaceError(
-                        "implementation writer predecessor has durable obligations",
-                        recovery=self._recovery(
-                            SourceWorkspaceRecoveryKind.DURABLE_OBLIGATIONS,
-                            item_number=item_number,
-                            path=expected_path,
-                            receipt_path=receipt_path,
-                            manual_action=(
-                                "Complete or explicitly clear the durable obligations for "
-                                f"{receipt.path} through the owning pipeline. Then rerun "
-                                f"issue #{item_number}."
-                            ),
-                        ),
-                    )
-                if receipt.schema_version != 1 or receipt.dirty_claim is not None:
-                    raise SourceWorkspaceError(
-                        "source workspace legacy receipt is ambiguous",
-                        recovery=self._legacy_ambiguous_recovery(
-                            item_number=item_number,
-                            receipt=receipt,
-                            expected_path=expected_path,
-                            receipt_path=receipt_path,
-                        ),
-                    )
+                self._require_legacy_migration_eligible(
+                    receipt,
+                    item_number=item_number,
+                    receipt_path=receipt_path,
+                )
                 self._validate_legacy_checkout(
                     path=receipt.path,
                     receipt=receipt,

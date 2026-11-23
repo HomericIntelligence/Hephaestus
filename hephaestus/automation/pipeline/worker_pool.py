@@ -9522,6 +9522,13 @@ class WorkerPool:
                 "source_workspace_creation_failure": creation_failure.value,
                 "path": str(exc.path) if exc.path is not None else "",
             }
+            recovery = exc.recovery
+            if isinstance(recovery, SourceWorkspaceRecovery):
+                value["failure_kind"] = "source_workspace_ownership"
+                value["source_workspace_recovery"] = recovery.to_dict()
+            elif isinstance(recovery, dict):
+                value["failure_kind"] = "source_workspace_ownership"
+                value["source_workspace_recovery"] = recovery
             if exc.requested_branch is not None and exc.requested_base_sha is not None:
                 value["direct_scope_reservation"] = {
                     "branch": exc.requested_branch,
