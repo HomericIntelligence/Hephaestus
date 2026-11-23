@@ -25,28 +25,81 @@ pytestmark = [
 ]
 
 _FIXTURE_ENV = "HEPHAESTUS_CODEX_SIGSTORE_FIXTURE_ROOT"
-_ARCHIVE_NAME = "codex-aarch64-unknown-linux-musl.zst"
-_ELF_NAME = "codex-aarch64-unknown-linux-musl"
-_BUNDLE_NAME = "codex-aarch64-unknown-linux-musl.sigstore"
-_ARCHIVE_SHA256 = "7a148fb7e7ed8a4bfa3ac4ffe014336070398eff780893582afab9195c6652f7"
-_ELF_SHA256 = "4d76e542c222ea8c75861d8c4ade60a1a332a63255ce1c60bdaebf7c2a2869e6"
-_BUNDLE_SHA256 = "847b47e73068f86635c23ab5501647a93fab9ad0c450d6661a88481dfcd6d759"
-_REKOR_LOG_ID = "c0d23d6ad406973f9559f3ba2d1ca01f84147d8ffc5b8445c224f98b9591801d"
+_MANIFEST_PATH = (
+    Path(__file__).resolve().parents[1] / "fixtures" / "sigstore" / "codex-sigstore-fixture.json"
+)
+
+
+def _load_manifest() -> dict[str, Any]:
+    """Load the reviewed manifest that fixes the release identity."""
+    try:
+        document = json.loads(_MANIFEST_PATH.read_bytes())
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError("the Codex Sigstore fixture manifest is unavailable") from exc
+    if not isinstance(document, dict) or document.get("schema_version") != 2:
+        raise RuntimeError("the Codex Sigstore fixture manifest is invalid")
+    return document
+
+
+_MANIFEST = _load_manifest()
+_RELEASE = _MANIFEST["release"]
+_TAG = _RELEASE["tag"]
+_TARGET = _RELEASE["target"]
+_REPOSITORY = _RELEASE["repository"]
+_REKOR = _MANIFEST["rekor"]
+_REKOR_LOG_ID = _REKOR["log_id"]
+_REKOR_LOG_INDEX = _REKOR["log_index"]
+_REKOR_INTEGRATION_TIME = _REKOR["integration_time"]
+
+
+def _asset(suffix: str) -> dict[str, Any]:
+    """Return the single release asset record with one name suffix."""
+    matches = [record for record in _MANIFEST["assets"] if record["name"].endswith(suffix)]
+    if len(matches) != 1:
+        raise RuntimeError(f"the fixture manifest must name one {suffix} asset")
+    return matches[0]
+
+
+def _retained(suffix: str) -> dict[str, Any]:
+    """Return the single retained evidence record with one name suffix."""
+    matches = [record for record in _MANIFEST["retained"] if record["name"].endswith(suffix)]
+    if len(matches) != 1:
+        raise RuntimeError(f"the fixture manifest must name one {suffix} object")
+    return matches[0]
+
+
+_ARCHIVE = _asset(".zst")
+_BUNDLE = _asset(".sigstore")
+_ELF = _MANIFEST["extracted_elf"]
+_ARCHIVE_NAME = _ARCHIVE["name"]
+_ELF_NAME = _ELF["name"]
+_BUNDLE_NAME = _BUNDLE["name"]
+_ARCHIVE_SHA256 = _ARCHIVE["sha256"]
+_ELF_SHA256 = _ELF["sha256"]
+_BUNDLE_SHA256 = _BUNDLE["sha256"]
 
 _ARTIFACT_FIELDS = {
     "codex_archive_path": _ARCHIVE_NAME,
     "extracted_elf_path": _ELF_NAME,
     "sigstore_bundle_path": _BUNDLE_NAME,
-    "trusted_root_path": "codex-production-trusted-root.json",
-    "rekor_public_key_path": "codex-rekor.pub",
-    "rekor_checkpoint_path": "codex-rekor.checkpoint",
-    "rekor_inclusion_proof_path": "codex-rekor.proof",
+    "trusted_root_path": _retained("trusted-root.json")["name"],
+    "rekor_public_key_path": _retained("rekor.pub")["name"],
+    "rekor_checkpoint_path": _retained("rekor.checkpoint")["name"],
+    "rekor_inclusion_proof_path": _retained("rekor.proof")["name"],
 }
 
 _CONTAINER_FIXTURE_ALIASES = (
-    Path("/codex-sigstore/rust-v0.153.4"),
-    Path("/workspace/build/test-fixtures/codex-sigstore/rust-v0.153.4"),
+    Path(f"/codex-sigstore/{_TAG}"),
+    Path(f"/workspace/build/test-fixtures/codex-sigstore/{_TAG}"),
 )
+
+
+def _next_release_tag(tag: str) -> str:
+    """Return a different release tag of the same shape."""
+    prefix, _, patch = tag.rpartition(".")
+    if not prefix or not patch.isdigit():
+        raise RuntimeError(f"the fixture release tag is invalid: {tag}")
+    return f"{prefix}.{int(patch) + 1}"
 
 
 def _sha256(path: Path) -> str:
@@ -74,6 +127,8 @@ def _fixture_root() -> Path:
         raise RuntimeError(f"{_FIXTURE_ENV} is not provisioned") from exc
     if resolved != path:
         raise RuntimeError(f"{_FIXTURE_ENV} must not use a symbolic link")
+    if resolved.name != _TAG:
+        raise RuntimeError(f"{_FIXTURE_ENV} must select the manifest release tag")
     for name in _ARTIFACT_FIELDS.values():
         artifact = resolved / name
         try:
@@ -156,19 +211,18 @@ def _deployment_lock(tmp_path: Path) -> tuple[Path, str, dict[str, Any]]:
         "sigstore_bundle_sha256": _BUNDLE_SHA256,
         "extracted_elf_path": str(fixture / _ELF_NAME),
         "extracted_elf_sha256": _ELF_SHA256,
-        "codex_release_tag": "rust-v0.153.4",
+        "codex_release_tag": _TAG,
         "codex_archive_asset": _ARCHIVE_NAME,
         "codex_sigstore_asset": _BUNDLE_NAME,
-        "codex_target": "aarch64-unknown-linux-musl",
+        "codex_target": _TARGET,
         "fulcio_certificate_issuer": "O=sigstore.dev, CN=sigstore-intermediate",
         "workflow_certificate_identity": (
-            "https://github.com/openai/codex/.github/workflows/"
-            "rust-release.yml@refs/tags/rust-v0.153.4"
+            f"https://github.com/{_REPOSITORY}/.github/workflows/rust-release.yml@refs/tags/{_TAG}"
         ),
         "oidc_issuer": "https://token.actions.githubusercontent.com",
         "rekor_log_id": _REKOR_LOG_ID,
-        "rekor_log_index": 2_717_156_140,
-        "rekor_integration_time": 1_788_562_514,
+        "rekor_log_index": _REKOR_LOG_INDEX,
+        "rekor_integration_time": _REKOR_INTEGRATION_TIME,
     }
     for field, name in _ARTIFACT_FIELDS.items():
         payload[field] = str(fixture / name)
@@ -303,7 +357,7 @@ def test_real_codex_lock_mismatch_fails_before_adapter_import(
     elif mismatch == "selection":
         selection = "other"
     else:
-        payload["codex_release_tag"] = "rust-v0.153.5"
+        payload["codex_release_tag"] = _next_release_tag(_TAG)
         lock.write_bytes(_canonical(payload))
         digest = _sha256(lock)
     imported: list[tuple[str, str]] = []
