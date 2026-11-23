@@ -7,8 +7,9 @@ contract). Since ``hephaestus-plan-issues`` was re-pointed at the pipeline
 only issue-planning implementation:
 
 - States: ENTER -> ADVISE_WAIT -> PLAN_WAIT -> VERIFY.
-- Budget: ``plan`` = 2 (max plan attempts per issue); exhaustion ->
-  finished(fail).
+- Budget: ``plan`` = 2 (max plan discovery and verification attempts per issue);
+  exhaustion -> finished(fail). Planner execution failures use the separate
+  ``planner_agent_error_retries`` counter and permit two retries.
 - Owned label: ``state:needs-plan`` (idempotent, on entry) [durable].
 - Plan comment: the PIPELINE posts it (doc section 2: "plan comment =
   durable artifact"). VERIFY upserts ``item.payload["plan_text"]`` via
@@ -111,6 +112,7 @@ from hephaestus.automation.state_labels import (
 )
 from hephaestus.prompts import PromptCatalog
 
+from ...diagnostics import bounded_pipeline_diagnostic
 from ...plan_journal import (
     PlanRevisionOwnershipError,
     publish_plan_revision,
@@ -144,6 +146,8 @@ from ...stage_base import (
 )
 
 logger = logging.getLogger(__name__)
+
+PLAN_AGENT_ERROR_RETRY_CAP = 2
 
 
 def _closed_issue_snapshot_outcome(
@@ -1449,8 +1453,74 @@ def _publish_candidate_plan_or_retry(
         )
 
 
+def _planner_agent_failure_outcome(item: WorkItem) -> StageOutcome | None:
+    """Consume one planner execution failure without using discovery retries."""
+    if not item.payload.pop("planner_agent_error_pending", False):
+        return None
+    retries = int(item.payload.get("planner_agent_error_retries", 0)) + 1
+    item.payload["planner_agent_error_retries"] = retries
+    cause = str(item.payload.get("planner_agent_error") or "unknown planner agent failure")
+    reason = f"planner agent execution failed: {cause}"
+    if retries > PLAN_AGENT_ERROR_RETRY_CAP:
+        logger.error(
+            "planning:%s: %s; exhausted after %d retries",
+            item.issue,
+            reason,
+            PLAN_AGENT_ERROR_RETRY_CAP,
+        )
+        return StageOutcome(
+            Disposition.FINISH_FAIL,
+            f"{reason}; exhausted after {PLAN_AGENT_ERROR_RETRY_CAP} retries",
+        )
+    logger.warning(
+        "planning:%s: %s; retry %d/%d",
+        item.issue,
+        reason,
+        retries,
+        PLAN_AGENT_ERROR_RETRY_CAP,
+    )
+    item.state = "PLAN_WAIT"
+    return StageOutcome(
+        Disposition.RETRY, f"{reason}; retry {retries}/{PLAN_AGENT_ERROR_RETRY_CAP}"
+    )
+
+
+def _record_planning_job_failure(item: WorkItem, result: JobResult) -> None:
+    """Record a safe planner cause and log other job failures in place."""
+    diagnostic = agent_failure_diagnostic(result.stderr_tail)
+    if item.state == "PLAN_WAIT":
+        detail = result.error or "planner agent execution failed"
+        if diagnostic:
+            detail = f"{detail}; diagnostic: {diagnostic}"
+        cause = bounded_pipeline_diagnostic(detail, limit=500)
+        item.payload["planner_agent_error"] = cause
+        item.payload["planner_agent_error_pending"] = True
+        logger.warning("planning:%s: job failed: %s", item.issue, cause)
+        return
+    if diagnostic:
+        logger.warning(
+            "planning:%s: job failed: %s; diagnostic: %s",
+            item.issue,
+            result.error,
+            diagnostic,
+        )
+        return
+    logger.warning("planning:%s: job failed: %s", item.issue, result.error)
+
+
+def _clear_planner_agent_failure_state(item: WorkItem) -> None:
+    """Clear planner execution failure state after a successful planner job."""
+    if item.state != "PLAN_WAIT":
+        return
+    item.payload.pop("planner_agent_error_pending", None)
+    item.payload.pop("planner_agent_error", None)
+    item.payload.pop("planner_agent_error_retries", None)
+
+
 def _verify_plan(item: WorkItem, ctx: StageContext) -> StageOutcome:
     """Publish or recover the candidate, then confirm the current plan and labels."""
+    if failure_outcome := _planner_agent_failure_outcome(item):
+        return failure_outcome
     assert item.issue is not None  # noqa: S101 - stage validates the issue
     followup_outcome = _resume_published_plan_or_retry(item, ctx)
     if followup_outcome:
@@ -1462,22 +1532,19 @@ def _verify_plan(item: WorkItem, ctx: StageContext) -> StageOutcome:
 
     initial_plan_found = lookup.status is PlanDiscoveryStatus.FOUND
     plan_text = item.payload.get("plan_text")
-    awaiting_revision_candidate = bool(item.payload.get("requires_plan_revision")) and (
-        plan_text is None
-    )
+    requires_revision = bool(item.payload.get("requires_plan_revision"))
+    awaiting_revision_candidate = requires_revision and plan_text is None
     posted_plan = False
-    if plan_text is not None:
-        requires_revision = bool(item.payload.get("requires_plan_revision"))
-        if requires_revision or lookup.status is PlanDiscoveryStatus.ABSENT:
-            logger.info("planning:%d: publishing plan revision", item.issue)
-            publication_outcome = _publish_candidate_plan_or_retry(
-                item,
-                ctx,
-                requires_revision=requires_revision,
-            )
-            if publication_outcome is not None:
-                return publication_outcome
-            posted_plan = True
+    if plan_text is not None and (requires_revision or lookup.status is PlanDiscoveryStatus.ABSENT):
+        logger.info("planning:%d: publishing plan revision", item.issue)
+        publication_outcome = _publish_candidate_plan_or_retry(
+            item,
+            ctx,
+            requires_revision=requires_revision,
+        )
+        if publication_outcome is not None:
+            return publication_outcome
+        posted_plan = True
 
     # The initial lookup only decides whether publication is necessary.  Do
     # not authorize the handoff from that stale snapshot: another actor can
@@ -1911,17 +1978,10 @@ class PlanningStage(Stage):
             return
 
         if not result.ok:
-            diagnostic = agent_failure_diagnostic(result.stderr_tail)
-            if diagnostic:
-                logger.warning(
-                    "planning:%s: job failed: %s; diagnostic: %s",
-                    item.issue,
-                    result.error,
-                    diagnostic,
-                )
-            else:
-                logger.warning("planning:%s: job failed: %s", item.issue, result.error)
+            _record_planning_job_failure(item, result)
             return
+
+        _clear_planner_agent_failure_state(item)
 
         if result.value is not None:
             if item.state == "ADVISE_WAIT":

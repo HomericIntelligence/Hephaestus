@@ -994,6 +994,11 @@ Architectural contract:
   failed bounded attempt leaves the item at its current planning state. It
   writes no source-workspace receipt, and a later attempt can verify and reuse
   a clean partial checkout without weakening ownership or revision checks.
+- Planner execution failures use `planner_agent_error_retries`, separately
+  from the `plan` discovery and verification budget. Two retries are allowed;
+  the third failure stops with the last bounded redacted cause. A successful
+  planner job clears this failure state. Missing-plan discovery keeps the
+  existing `plan` budget.
 - File-overlap admission and publication scope use the shared current-plan
   reader. A finalized issue body must have a valid seal and an authenticated
   editor. A second issue read must confirm the
@@ -1091,9 +1096,13 @@ Architectural contract:
   changed plan returns to planning, including when a Codex implementation GO is
   pending. If this review wrote a proposed label, the stage restores exclusive
   `state:needs-plan` with readback.
-- Invalid output and reviewer-session replacement share a bounded error
+- Invalid output and genuine reviewer-session loss share a bounded error
   sequence. Two consecutive retries are allowed; the third failure stops the
-  item. Session replacement preserves logical review rounds.
+  item. Invalid output keeps a bounded redacted tail in its log and terminal
+  reason. Session replacement preserves logical review rounds. A configured
+  reviewer provider or model change instead reconstructs a fresh cycle from
+  the durable plan and direct critique without an error retry or the old
+  session identity.
 
 #### Plan decomposition triggers (issue #2982)
 

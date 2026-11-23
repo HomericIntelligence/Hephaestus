@@ -1,4 +1,9 @@
-"""Fail-closed classification for OpenCode 2 ``provider.transport`` failures.
+"""Fail-closed classification for explicit provider transport failures.
+
+OpenCode 2 uses ``provider.transport``. Codex uses
+``codex_tool_or_provider_failure`` only when the detail also names an SSE idle
+timeout. Other Codex tool, sandbox, configuration, and local failures stay
+outside this classification.
 
 Production evidence (2026-11-12/13 runs, LLM360/comet): gateway congestion
 exhausts the Bun header wait, opencode aborts, and emits
@@ -31,19 +36,25 @@ _HEADER_TIMEOUT_HINTS = (
     "waiting for response",
 )
 _GENERIC_TIMEOUT_HINTS = ("timed out", "timeout")
+_CODEX_FAILURE_PREFIX = "codex_tool_or_provider_failure"
+_CODEX_SSE_IDLE_TIMEOUT = "idle timeout waiting for sse"
 
 
 def classify_provider_transport(text: object) -> str | None:
-    """Return the provider.transport class for supported OpenCode 2 error text.
+    """Return the transport class for a bounded, case-insensitive error window.
 
-    Recognises ``opencode2_fatal_error_event: provider.transport: ...`` and
-    bare ``provider.transport`` payloads; case-insensitive; bounded to a
-    window around the marker.  Returns ``None`` when no provider.transport
-    failure is named.
+    OpenCode requires ``provider.transport``. Codex requires its structured
+    failure prefix and explicit SSE idle-timeout evidence. Other errors return
+    ``None``.
     """
     if not isinstance(text, str):
         return None
     lowered = text.lower()
+    codex_start = lowered.find(_CODEX_FAILURE_PREFIX)
+    if codex_start != -1:
+        codex_snippet = lowered[codex_start : codex_start + PROVIDER_TRANSPORT_MAX_DETAIL]
+        if _CODEX_SSE_IDLE_TIMEOUT in codex_snippet:
+            return PROVIDER_TRANSPORT_TIMEOUT
     start = lowered.find(PROVIDER_TRANSPORT_PREFIX)
     if start == -1:
         return None
@@ -56,7 +67,7 @@ def classify_provider_transport(text: object) -> str | None:
 
 
 def is_provider_transport_error(text: object) -> bool:
-    """Return True when *text* names a provider.transport failure."""
+    """Return True when *text* names a supported provider transport failure."""
     return classify_provider_transport(text) is not None
 
 

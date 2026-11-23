@@ -12,6 +12,10 @@ HEADER_TIMEOUT_EVENT = (
     "opencode2_fatal_error_event: provider.transport: "
     "Timed out waiting for response headers after 300.0s"
 )
+CODEX_SSE_IDLE_TIMEOUT = (
+    "codex_tool_or_provider_failure: Reconnecting... 1/5 "
+    "(stream disconnected before completion: idle timeout waiting for SSE)"
+)
 
 
 def test_classify_header_timeout() -> None:
@@ -22,6 +26,19 @@ def test_classify_header_timeout() -> None:
 @pytest.mark.parametrize(
     ("text", "expected"),
     [
+        (CODEX_SSE_IDLE_TIMEOUT, ptf.PROVIDER_TRANSPORT_TIMEOUT),
+        (
+            "AGENT_ERROR: CODEX_TOOL_OR_PROVIDER_FAILURE: STREAM DISCONNECTED BEFORE "
+            "COMPLETION: IDLE TIMEOUT WAITING FOR SSE",
+            ptf.PROVIDER_TRANSPORT_TIMEOUT,
+        ),
+        ("codex_tool_or_provider_failure: command_execution status=failed", None),
+        ("codex_tool_or_provider_failure: local tool timed out", None),
+        ("codex_tool_or_provider_failure: nested sandbox is unsupported", None),
+        ("codex_nested_sandbox_unsupported: run outside the enclosing API sandbox", None),
+        ("codex_unsupported_reasoning_effort: unsupported reasoning effort", None),
+        ("timeout: local read timed out", None),
+        ("validation failed: idle timeout waiting for SSE", None),
         (
             "agent_error: opencode2_fatal_error_event: "
             "provider.transport: Timed out waiting for response headers",
@@ -47,13 +64,21 @@ def test_classify_table(text: object, expected: str | None) -> None:
     assert ptf.is_provider_transport_error(text) is (expected is not None)
 
 
-def test_message_is_bounded_redacted_and_named() -> None:
+@pytest.mark.parametrize(
+    "text",
+    [
+        HEADER_TIMEOUT_EVENT + " key=sk-ABCDEFGHIJKLMNOPQRSTUVWX end",
+        CODEX_SSE_IDLE_TIMEOUT + " " + ("x" * 600) + " token=sk-ABCDEFGHIJKLMNOPQRSTUVWX tail",
+    ],
+    ids=["opencode", "codex_sse_idle_timeout"],
+)
+def test_message_is_bounded_redacted_and_named(text: str) -> None:
     """The propagated agent_error is named, redacted, and bounded."""
-    text = HEADER_TIMEOUT_EVENT + " key=sk-ABCDEFGHIJKLMNOPQRSTUVWX end"
+    secret = "sk-ABCDEFGHIJKLMNOPQRSTUVWX"  # noqa: S105 - test sentinel
     message = ptf.provider_transport_timeout_message(text)
     assert message.startswith("agent_error: provider_transport_timeout: ")
     assert ptf.PROVIDER_TRANSPORT_TIMEOUT in message
-    assert "sk-ABCDEFGHIJKLMNOPQRSTUVWX" not in message
+    assert secret not in message
     assert len(message) <= 500
 
 

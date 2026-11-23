@@ -3128,6 +3128,118 @@ class TestPlanningStageOnJobDone:
         assert "agent subprocess reported diagnostic output" in caplog.text
         assert "invalid or missing API key" not in caplog.text
 
+    def test_planner_agent_failure_retries_before_plan_discovery(
+        self,
+        make_ctx: Any,
+        make_work_item: Any,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A failed planner job keeps its safe cause outside discovery accounting."""
+        stage = PlanningStage()
+        github = FakeStageGitHub(has_plan=False)
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=3680, state="PLAN_WAIT")
+        secret = "ghp_abcdefghijklmnopqrstuvwxyz0123456789"  # noqa: S105 - test sentinel
+
+        def unexpected_discovery(_issue: int) -> PlanDiscoveryResult:
+            raise AssertionError("planner execution failure must precede plan discovery")
+
+        monkeypatch.setattr(github, "discover_plan", unexpected_discovery)
+        with caplog.at_level(logging.WARNING):
+            stage.on_job_done(
+                item,
+                JobResult(
+                    ok=False,
+                    error=f"rc=1 token={secret} " + ("x" * 600),
+                    stderr_tail="provider auth: invalid or missing API key",
+                ),
+                ctx,
+            )
+        item.state = "VERIFY"
+
+        outcome = stage.step(item, ctx)
+
+        assert isinstance(outcome, StageOutcome)
+        assert outcome.disposition is Disposition.RETRY
+        assert "planner agent execution failed" in outcome.note
+        assert "agent subprocess reported diagnostic output" in outcome.note
+        assert secret not in outcome.note
+        assert secret not in caplog.text
+        assert item.state == "PLAN_WAIT"
+        assert item.payload["planner_agent_error_retries"] == 1
+        assert item.attempts.get("plan", 0) == 0
+        assert "planner_agent_error_pending" not in item.payload
+        cause = item.payload["planner_agent_error"]
+        assert secret not in cause
+        assert len(cause) <= 500
+
+    def test_planner_agent_failure_exhausts_its_own_retry_budget(
+        self,
+        make_ctx: Any,
+        make_work_item: Any,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The third failed planner job stops with the last safe failure cause."""
+        stage = PlanningStage()
+        github = FakeStageGitHub(has_plan=False)
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=3681, state="PLAN_WAIT")
+
+        def unexpected_discovery(_issue: int) -> PlanDiscoveryResult:
+            raise AssertionError("planner execution failure must precede plan discovery")
+
+        monkeypatch.setattr(github, "discover_plan", unexpected_discovery)
+        outcomes = []
+        for attempt in range(3):
+            item.state = "PLAN_WAIT"
+            stage.on_job_done(
+                item,
+                JobResult(ok=False, error=f"planner failure {attempt}"),
+                ctx,
+            )
+            item.state = "VERIFY"
+            outcomes.append(stage.step(item, ctx))
+
+        assert [outcome.disposition for outcome in outcomes] == [
+            Disposition.RETRY,
+            Disposition.RETRY,
+            Disposition.FINISH_FAIL,
+        ]
+        assert "planner agent execution failed" in outcomes[-1].note
+        assert "planner failure 2" in outcomes[-1].note
+        assert "planner failure 0" not in outcomes[-1].note
+        assert item.payload["planner_agent_error_retries"] == 3
+        assert item.attempts.get("plan", 0) == 0
+
+    def test_planner_agent_success_clears_failure_state(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A later successful planner job restores ordinary plan verification."""
+        stage = PlanningStage()
+        github = FakeStageGitHub(labels=[STATE_NEEDS_PLAN], has_plan=False)
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=3682, state="PLAN_WAIT")
+        stage.on_job_done(item, JobResult(ok=False, error="temporary planner failure"), ctx)
+        item.state = "VERIFY"
+        retry = stage.step(item, ctx)
+        assert isinstance(retry, StageOutcome)
+        assert retry.disposition is Disposition.RETRY
+
+        item.state = "PLAN_WAIT"
+        stage.on_job_done(item, JobResult(ok=True, value="# Recovered plan"), ctx)
+
+        assert "planner_agent_error_pending" not in item.payload
+        assert "planner_agent_error" not in item.payload
+        assert "planner_agent_error_retries" not in item.payload
+
+        item.state = "VERIFY"
+        outcome = stage.step(item, ctx)
+
+        assert isinstance(outcome, StageOutcome)
+        assert outcome.disposition is Disposition.ADVANCE
+        assert item.attempts.get("plan", 0) == 0
+
 
 def test_planning_summary_retains_safe_athena_failure_class(
     make_ctx: Any, make_work_item: Any

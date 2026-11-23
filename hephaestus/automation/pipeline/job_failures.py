@@ -461,11 +461,14 @@ class _RemoteGitAuthenticationError(RuntimeError):
 
 
 def _ignore_local_agent_failure(error: BaseException) -> bool:
-    """Count only transport failures against the provider circuit."""
+    """Count provider transport failures and ignore deterministic local errors."""
     if isinstance(error, ConnectionError):
         return False
-    if isinstance(error, AgentExecutionError) and error.__cause__ is not None:
-        error = error.__cause__
+    if isinstance(error, AgentExecutionError):
+        if is_provider_transport_error(str(error)):
+            return False
+        if error.__cause__ is not None:
+            error = error.__cause__
     return not is_transient_subprocess_error(error)
 
 

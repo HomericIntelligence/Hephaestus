@@ -28,7 +28,11 @@ re-pointed at the pipeline (#1820):
   FINISH_FAILs — a reviewer-infrastructure
   failure is not fixed by replanning, so failing back to planning would
   only spend ``plan_cycles`` on more doomed reviews; labels stay untouched
-  on the whole ERROR path.
+  on the whole ERROR path. Invalid output keeps a bounded redacted diagnostic
+  through its retry or terminal reason.
+- A configured reviewer provider or model change starts a fresh cycle from the
+  durable plan and direct critique. It does not resume the old session or use a
+  reviewer error retry. Genuine session loss keeps the bounded recovery path.
 - Owned labels: ``state:plan-go`` (GO) and ``state:plan-no-go`` (NOGO)
   [durable]. GO/NOGO are
   computed by the shared pure ``state_labels.apply_plan_verdict`` and applied
@@ -804,9 +808,12 @@ def _restore_review_conversation(
             if active.provider != selected_provider or parse_model_selection(
                 previous_model
             ) != parse_model_selection(selected_model):
-                raise PlanReviewSessionLostError(
-                    "reviewer tool or model changed; reset the review session"
+                logger.info(
+                    "plan_review:%d: reviewer selection changed; reconstructing a fresh cycle",
+                    item.issue,
                 )
+                active = None
+                reset = True
         if active is not None and active.canonical_cwd != str(Path(ctx.paths.worktree).resolve()):
             raise PlanReviewSessionLostError("reviewer checkout identity changed")
         if active is not None and active.plan_fingerprint != plan_fingerprint(plan_text):
@@ -1541,8 +1548,16 @@ class PlanReviewStage(Stage):
             return None
         if not isinstance(verdict, ReviewVerdict) or verdict.verdict not in {"GO", "NOGO"}:
             item.payload.pop("accepted_plan_review", None)
+            raw_output = verdict.raw if isinstance(verdict, ReviewVerdict) else ""
+            diagnostic = bounded_pipeline_diagnostic(raw_output, limit=500).strip()
+            invalid_reason = diagnostic or "empty reviewer output"
             raw_review = str(item.payload.get("unclassified_review_text") or "").strip()
             if raw_review and not item.payload.get("review_verdict_followup_attempted"):
+                logger.warning(
+                    "plan_review:%s: invalid review verdict: %s",
+                    item.issue,
+                    invalid_reason,
+                )
                 item.payload["review_verdict_followup_attempted"] = True
                 item.payload["review_verdict_followup_pending"] = True
                 item.state = REVIEW_WAIT
@@ -1552,7 +1567,7 @@ class PlanReviewStage(Stage):
                     item.issue,
                 )
                 return StageOutcome(Disposition.RETRY, "review verdict clarification requested")
-            return _reviewer_failure(item, "reviewer returned no GO or NOGO after clarification")
+            return _reviewer_failure(item, f"invalid review verdict: {invalid_reason}")
         item.payload.pop("unclassified_review_text", None)
         item.payload.pop("review_verdict_followup_attempted", None)
         item.payload.pop("review_verdict_followup_pending", None)
