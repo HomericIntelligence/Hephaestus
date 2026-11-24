@@ -24,6 +24,8 @@ Do this:
    `subsumed` and stop.
 5. Push with
    `git -C {{ shell_quote(worktree_path) }} push --force-with-lease --force-if-includes origin {{ shell_quote(branch) }}`.
+   If the host blocks this command, stop and report the exact command. Do not
+   substitute another force form or bypass the hook.
 6. Remove the worktree you created with `git worktree remove` (no `--force`). Do
    not delete branches or worktrees you did not create.
 

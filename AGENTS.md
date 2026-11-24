@@ -982,6 +982,10 @@ For the full, non-agent-specific statement of these principles see
 
 ## Claude non-interactive permission policy
 
+Follow the [agent authority and host permissions policy](https://github.com/HomericIntelligence/Athena/blob/main/docs/policies/agent-authority.md)
+for authority, host permissions, security invariants, and stop conditions. A host
+denial is not permission to substitute another tool or a weaker mode.
+
 Claude invocations that pass `permission_mode="dontAsk"` are non-interactive
 automation calls. They do not use `--dangerously-skip-permissions`, and
 `hephaestus.automation.claude_invoke.invoke_claude_with_session` still forwards
