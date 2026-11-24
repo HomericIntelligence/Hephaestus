@@ -148,6 +148,7 @@ from ...stage_base import (
 logger = logging.getLogger(__name__)
 
 PLAN_AGENT_ERROR_RETRY_CAP = 2
+PRE_AGENT_FAILURE_RETRY_CAP = 2
 
 
 def _closed_issue_snapshot_outcome(
@@ -986,9 +987,129 @@ def _planning_job_cwd(
     return workspace.cwd if workspace is not None else _worktree_path(item, ctx)
 
 
+def _pre_agent_failure_cause(item: WorkItem, key: str) -> str:
+    """Return the bounded cause retained for a pre-agent worker failure."""
+    return str(item.payload.get(key) or "source workspace operation failed")
+
+
+def _advise_wait_failure_outcome(item: WorkItem) -> StageOutcome | None:
+    """Return the pre-agent retry or the terminal Athena advise failure."""
+    if outcome := _advise_pre_agent_failure_outcome(item):
+        return outcome
+    if item.payload.get("athena_advise_error"):
+        return StageOutcome(
+            Disposition.FINISH_FAIL,
+            athena_advise_failure_reason(item),
+        )
+    return None
+
+
+def _record_planning_wait_failure(item: WorkItem, result: JobResult) -> None:
+    """Record a failed advise or requirements-recovery wait result."""
+    if result.pre_agent_failure:
+        prefix = "athena_advise" if item.state == "ADVISE_WAIT" else "requirements_recovery"
+        item.payload[f"{prefix}_pre_agent_failure_pending"] = True
+        item.payload[f"{prefix}_pre_agent_failure_kind"] = result.pre_agent_failure
+        item.payload[f"{prefix}_pre_agent_failure_error"] = bounded_pipeline_diagnostic(
+            result.error or "source workspace operation failed",
+            limit=500,
+        )
+        logger.warning(
+            "planning:%s: %s pre-agent failure: %s",
+            item.issue,
+            prefix.replace("_", " "),
+            result.error,
+        )
+        return
+    if item.state == "ADVISE_WAIT":
+        item.payload["athena_advise_error"] = result.error or "advise failed"
+        logger.warning("planning:%s: advise failed: %s", item.issue, result.error)
+        return
+    _record_planning_job_failure(item, result)
+
+
+def _requirements_recovery_pre_agent_failure_outcome(item: WorkItem) -> StageOutcome | None:
+    """Consume a workspace failure before the requirements agent starts."""
+    if not item.payload.pop("requirements_recovery_pre_agent_failure_pending", False):
+        return None
+    cause = _pre_agent_failure_cause(item, "requirements_recovery_pre_agent_failure_error")
+    kind = item.payload.pop("requirements_recovery_pre_agent_failure_kind", None)
+    item.payload.pop("requirements_recovery_pre_agent_failure_error", None)
+    if kind == "source_workspace_ownership":
+        reason = f"requirements recovery source workspace ownership unavailable: {cause}"
+        logger.error("planning:%s: %s", item.issue, reason)
+        return StageOutcome(Disposition.FINISH_FAIL, reason)
+    retries = int(item.payload.get("requirements_recovery_pre_agent_failure_retries", 0)) + 1
+    item.payload["requirements_recovery_pre_agent_failure_retries"] = retries
+    reason = f"requirements recovery source workspace preparation failed: {cause}"
+    if retries > PRE_AGENT_FAILURE_RETRY_CAP:
+        logger.error(
+            "planning:%s: %s; exhausted after %d retries",
+            item.issue,
+            reason,
+            PRE_AGENT_FAILURE_RETRY_CAP,
+        )
+        return StageOutcome(
+            Disposition.FINISH_FAIL,
+            f"{reason}; exhausted after {PRE_AGENT_FAILURE_RETRY_CAP} retries",
+        )
+    logger.warning(
+        "planning:%s: %s; retry %d/%d",
+        item.issue,
+        reason,
+        retries,
+        PRE_AGENT_FAILURE_RETRY_CAP,
+    )
+    return StageOutcome(
+        Disposition.RETRY,
+        f"{reason}; retry {retries}/{PRE_AGENT_FAILURE_RETRY_CAP}",
+    )
+
+
+def _advise_pre_agent_failure_outcome(item: WorkItem) -> StageOutcome | None:
+    """Consume an Athena workspace failure before the terminal generic failure."""
+    if not item.payload.pop("athena_advise_pre_agent_failure_pending", False):
+        return None
+    cause = _pre_agent_failure_cause(item, "athena_advise_pre_agent_failure_error")
+    kind = item.payload.pop("athena_advise_pre_agent_failure_kind", None)
+    item.payload.pop("athena_advise_pre_agent_failure_error", None)
+    if kind == "source_workspace_ownership":
+        reason = f"athena advise source workspace ownership unavailable: {cause}"
+        logger.error("planning:%s: %s", item.issue, reason)
+        return StageOutcome(Disposition.FINISH_FAIL, reason)
+    retries = int(item.payload.get("athena_advise_pre_agent_failure_retries", 0)) + 1
+    item.payload["athena_advise_pre_agent_failure_retries"] = retries
+    reason = f"athena advise source workspace preparation failed: {cause}"
+    if retries > PRE_AGENT_FAILURE_RETRY_CAP:
+        logger.error(
+            "planning:%s: %s; exhausted after %d retries",
+            item.issue,
+            reason,
+            PRE_AGENT_FAILURE_RETRY_CAP,
+        )
+        return StageOutcome(
+            Disposition.FINISH_FAIL,
+            f"{reason}; exhausted after {PRE_AGENT_FAILURE_RETRY_CAP} retries",
+        )
+    logger.warning(
+        "planning:%s: %s; retry %d/%d",
+        item.issue,
+        reason,
+        retries,
+        PRE_AGENT_FAILURE_RETRY_CAP,
+    )
+    item.state = "ADVISE_WAIT"
+    return StageOutcome(
+        Disposition.RETRY,
+        f"{reason}; retry {retries}/{PRE_AGENT_FAILURE_RETRY_CAP}",
+    )
+
+
 def _requirements_recovery_step(item: WorkItem, ctx: StageContext) -> StepResult | None:
     """Build or apply one requirements-recovery substate action."""
     assert item.issue is not None  # noqa: S101 - PlanningStage.step validates this
+    if outcome := _requirements_recovery_pre_agent_failure_outcome(item):
+        return outcome
     if item.state == "REQUIREMENTS_RECOVERY_WAIT":
         workspace = _prepare_planning_workspace(item, ctx)
         if isinstance(workspace, StageOutcome):
@@ -1900,11 +2021,8 @@ class PlanningStage(Stage):
             return JobRequest(advise_job, on_done_state="PLAN_WAIT")
 
         if item.state == "PLAN_WAIT":
-            if item.payload.get("athena_advise_error"):
-                return StageOutcome(
-                    Disposition.FINISH_FAIL,
-                    athena_advise_failure_reason(item),
-                )
+            if advise_failure := _advise_wait_failure_outcome(item):
+                return advise_failure
             workspace = _prepare_planning_workspace(item, ctx)
             if isinstance(workspace, StageOutcome):
                 return workspace
@@ -1972,9 +2090,11 @@ class PlanningStage(Stage):
             item.payload["planning_main_refresh_complete"] = True
             return
 
-        if item.state == "ADVISE_WAIT" and not result.ok:
-            item.payload["athena_advise_error"] = result.error or "advise failed"
-            logger.warning("planning:%s: advise failed: %s", item.issue, result.error)
+        if not result.ok and (
+            item.state == "ADVISE_WAIT"
+            or item.state in {"REQUIREMENTS_RECOVERY_WAIT", "REQUIREMENTS_RECOVERY_REVIEW_WAIT"}
+        ):
+            _record_planning_wait_failure(item, result)
             return
 
         if not result.ok:
@@ -1990,13 +2110,16 @@ class PlanningStage(Stage):
                     return
                 item.payload["advise_findings"] = result.value.context
                 item.payload["athena_advise_receipt"] = result.value.receipt
+                item.payload.pop("athena_advise_pre_agent_failure_retries", None)
             elif item.state == "PLAN_WAIT":
                 item.payload["plan_text"] = result.value
             elif item.state == "REQUIREMENTS_RECOVERY_WAIT" and isinstance(
                 result.value, RecoveredRequirements
             ):
                 item.payload["recovered_requirements"] = result.value
+                item.payload.pop("requirements_recovery_pre_agent_failure_retries", None)
             elif item.state == "REQUIREMENTS_RECOVERY_REVIEW_WAIT" and isinstance(
                 result.value, RecoveryReview
             ):
                 item.payload["requirements_recovery_review"] = result.value
+                item.payload.pop("requirements_recovery_pre_agent_failure_retries", None)

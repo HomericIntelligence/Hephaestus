@@ -94,6 +94,24 @@ class JobRequestingStage(Stage):
         self.job_done_calls += 1
 
 
+class DirectSourceCancellationStage(Stage):
+    """Stage that observes shutdown while preparing its source workspace."""
+
+    def __init__(self, coordinator: Coordinator) -> None:
+        self._coordinator = coordinator
+
+    def on_enter(self, item: WorkItem, ctx: Any) -> Any:
+        return None
+
+    def on_job_done(self, item: WorkItem, result: Any, ctx: Any) -> None:
+        return None
+
+    def step(self, item: WorkItem, ctx: Any) -> Any:
+        self._coordinator.shutdown.set()
+        self._coordinator._worker_shutdown.set()
+        raise InterruptedError("source workspace operation cancelled")
+
+
 class InterruptingPool(FakeWorkerPool):
     """FakeWorkerPool that simulates SIGINT landing while the job runs.
 
@@ -227,6 +245,42 @@ class TestInterruptSemantics:
         assert item.result.reason == "resumable at planning"
         assert not item.result.passed
         assert item.stage is StageName.PLANNING  # never advanced
+
+    def test_direct_stage_cancellation_parks_resumable_not_poisoned(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Shutdown during direct stage work is an interrupt, never an item fault."""
+        seed = [SeedEntry(kind="issue", identifier=5, stage=StageName.PLANNING, reason="r")]
+        coordinator = _coordinator(tmp_path, monkeypatch, seed=seed)
+        coordinator.stages[StageName.PLANNING] = DirectSourceCancellationStage(coordinator)
+
+        exit_code = coordinator.run()
+
+        assert exit_code == 130
+        assert coordinator.ledger == []
+        item = coordinator.items[0]
+        assert item.result is not None
+        assert item.result.reason == "resumable at planning"
+        assert not item.result.reason.startswith("poisoned")
+        assert not item.result.passed
+        assert item.stage is StageName.PLANNING
+
+    def test_direct_stage_cancellation_has_consistent_summary_accounting(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Detailed rows, terminal aggregate, and run_end agree after cancellation."""
+        seed = [SeedEntry(kind="issue", identifier=6, stage=StageName.PLANNING, reason="r")]
+        coordinator = _coordinator(tmp_path, monkeypatch, seed=seed)
+        coordinator.stages[StageName.PLANNING] = DirectSourceCancellationStage(coordinator)
+
+        assert coordinator.run() == 130
+
+        summary_items = coordinator._effective_items()
+        run_end = next(entry for entry in coordinator.event_log if entry[0] == "run_end")
+        assert run_end[1]["items"] == len(summary_items)
+        assert coordinator._terminal_summary.total == len(summary_items) == 1
+        assert coordinator._terminal_summary.dispositions == {"resumable": 1}
+        assert [entry for entry in coordinator.event_log if entry[0] == "resumable"]
 
     def test_graceful_shutdown_stops_admission_and_marks_queued_resumable(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

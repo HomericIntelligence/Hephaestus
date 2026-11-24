@@ -3128,6 +3128,128 @@ class TestPlanningStageOnJobDone:
         assert "agent subprocess reported diagnostic output" in caplog.text
         assert "invalid or missing API key" not in caplog.text
 
+    @pytest.mark.parametrize(
+        "state",
+        ["REQUIREMENTS_RECOVERY_WAIT", "REQUIREMENTS_RECOVERY_REVIEW_WAIT"],
+    )
+    def test_requirements_recovery_pre_agent_failure_uses_a_separate_retry_budget(
+        self,
+        state: str,
+        make_ctx: Any,
+        make_work_item: Any,
+    ) -> None:
+        """A workspace failure before the agent is not an invalid proposal."""
+        stage = PlanningStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=3700, state=state)
+
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=False,
+                error="SourceWorkspacePreparationError: source workspace is unavailable",
+                pre_agent_failure="source_workspace_preparation",
+            ),
+            ctx,
+        )
+        outcome = stage.step(item, ctx)
+
+        assert isinstance(outcome, StageOutcome)
+        assert outcome.disposition is Disposition.RETRY
+        assert outcome.note.startswith("requirements recovery source workspace preparation failed")
+        assert item.state == state
+        assert item.attempts.get("plan", 0) == 0
+        assert item.payload["requirements_recovery_pre_agent_failure_retries"] == 1
+
+    @pytest.mark.parametrize(
+        "state",
+        ["REQUIREMENTS_RECOVERY_WAIT", "REQUIREMENTS_RECOVERY_REVIEW_WAIT"],
+    )
+    def test_requirements_recovery_ownership_failure_fails_closed(
+        self,
+        state: str,
+        make_ctx: Any,
+        make_work_item: Any,
+    ) -> None:
+        """A source ownership conflict is terminal and preserves its cause."""
+        stage = PlanningStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=3701, state=state)
+
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=False,
+                error="SourceWorkspaceError: workspace registration changed",
+                pre_agent_failure="source_workspace_ownership",
+            ),
+            ctx,
+        )
+        outcome = stage.step(item, ctx)
+
+        assert isinstance(outcome, StageOutcome)
+        assert outcome.disposition is Disposition.FINISH_FAIL
+        assert "source workspace ownership unavailable" in outcome.note
+        assert "workspace registration changed" in outcome.note
+        assert item.attempts.get("plan", 0) == 0
+
+    def test_advise_pre_agent_failure_retries_before_the_terminal_generic_failure(
+        self,
+        make_ctx: Any,
+        make_work_item: Any,
+    ) -> None:
+        """An advise workspace failure retries without consuming the plan budget."""
+        stage = PlanningStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=3702, state="ADVISE_WAIT")
+
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=False,
+                error="SourceWorkspacePreparationError: source workspace is unavailable",
+                pre_agent_failure="source_workspace_preparation",
+            ),
+            ctx,
+        )
+        item.state = "PLAN_WAIT"
+        outcome = stage.step(item, ctx)
+
+        assert isinstance(outcome, StageOutcome)
+        assert outcome.disposition is Disposition.RETRY
+        assert item.state == "ADVISE_WAIT"
+        assert "athena_advise_error" not in item.payload
+        assert item.attempts.get("plan", 0) == 0
+        assert item.payload["athena_advise_pre_agent_failure_retries"] == 1
+
+    def test_advise_ownership_failure_fails_closed(
+        self,
+        make_ctx: Any,
+        make_work_item: Any,
+    ) -> None:
+        """An Athena source ownership conflict does not degrade to a generic failure."""
+        stage = PlanningStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=3703, state="ADVISE_WAIT")
+
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=False,
+                error="SourceWorkspaceError: workspace registration changed",
+                pre_agent_failure="source_workspace_ownership",
+            ),
+            ctx,
+        )
+        item.state = "PLAN_WAIT"
+        outcome = stage.step(item, ctx)
+
+        assert isinstance(outcome, StageOutcome)
+        assert outcome.disposition is Disposition.FINISH_FAIL
+        assert "athena advise source workspace ownership unavailable" in outcome.note
+        assert "workspace registration changed" in outcome.note
+        assert item.attempts.get("plan", 0) == 0
+
     def test_planner_agent_failure_retries_before_plan_discovery(
         self,
         make_ctx: Any,

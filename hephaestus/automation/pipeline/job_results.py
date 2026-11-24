@@ -34,6 +34,9 @@ class JobResult:
     observed_skill_invocations: tuple[str, ...] = ()
     process_failure: ProcessFailureMetadata | None = None
     fleet_hold: Literal["new_admission_required", "reconciliation_required"] | None = None
+    pre_agent_failure: (
+        Literal["source_workspace_preparation", "source_workspace_ownership"] | None
+    ) = None
 
 
 @dataclass(frozen=True, eq=False)

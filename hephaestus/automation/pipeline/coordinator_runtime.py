@@ -1004,28 +1004,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
                 f"stage {item.stage.value} exceeded {ct._MAX_STEPS_PER_TICK} steps in one tick"
             )
         except Exception as exc:
-            if is_transient_subprocess_error(exc):
-                logger.warning(
-                    "transient provider failure for item %s at %s; parking resumable",
-                    self._item_key(item),
-                    item.stage.value,
-                )
-                self._park_resumable(item)
-                return
-            github_failure = _classify_github_failure(exc, now_epoch=time.time())
-            if github_failure is not None and github_failure[0] == "github_rate_limit":
-                # The account budget is spent. This is a wait, not a defect in
-                # the item, so park until the quota resets instead of failing
-                # the item permanently.
-                delay = max(0.0, float(github_failure[1]) + 5.0)
-                logger.warning(
-                    "GitHub rate limit reached for item %s at %s; parking resumable "
-                    "for %.0fs until the quota resets",
-                    self._item_key(item),
-                    item.stage.value,
-                    delay,
-                )
-                self._timer_park(item, delay)
+            if self._park_recoverable_exception(item, exc):
                 return
             logger.exception(
                 "pipeline item %s poisoned at %s; routing to finished(fail)",
@@ -1033,6 +1012,41 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
                 item.stage.value,
             )
             self._finish(item, passed=False, reason=f"poisoned: {exc}")
+
+    def _park_recoverable_exception(self, item: ct.WorkItem, exc: BaseException) -> bool:
+        """Park one recoverable stage exception and report whether it was parked."""
+        if isinstance(exc, InterruptedError) and self.shutdown.is_set():
+            logger.warning(
+                "shutdown interrupted item %s at %s; parking resumable",
+                self._item_key(item),
+                item.stage.value,
+            )
+            self._park_resumable(item)
+            return True
+        if is_transient_subprocess_error(exc):
+            logger.warning(
+                "transient provider failure for item %s at %s; parking resumable",
+                self._item_key(item),
+                item.stage.value,
+            )
+            self._park_resumable(item)
+            return True
+        github_failure = _classify_github_failure(exc, now_epoch=time.time())
+        if github_failure is not None and github_failure[0] == "github_rate_limit":
+            # The account budget is spent. This is a wait, not a defect in
+            # the item, so park until the quota resets instead of failing
+            # the item permanently.
+            delay = max(0.0, float(github_failure[1]) + 5.0)
+            logger.warning(
+                "GitHub rate limit reached for item %s at %s; parking resumable "
+                "for %.0fs until the quota resets",
+                self._item_key(item),
+                item.stage.value,
+                delay,
+            )
+            self._timer_park(item, delay)
+            return True
+        return False
 
     def _step_with_watchdog(
         self, stage: stages_mod.Stage, item: ct.WorkItem, ctx: stages_mod.StageContext
