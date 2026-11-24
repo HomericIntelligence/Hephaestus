@@ -1,5 +1,4 @@
-# This mixin consumes the adapter transport namespace by design.
-# ruff: noqa: F403, F405
+import re
 import subprocess
 
 import hephaestus.git.runtime as git_runtime
@@ -7,7 +6,15 @@ from hephaestus.automation.github_api import prs as github_prs
 from hephaestus.automation.operation_deadlines import operation_deadline_after
 
 from .pipeline_github_merge_mutations import PipelineGitHubMergeMutations
-from .pipeline_github_transport import *
+from .pipeline_github_transport import (
+    STATE_IMPLEMENTATION_GO,
+    STATE_IMPLEMENTATION_NO_GO,
+    STATE_LABEL_SPECS,
+    close_issue_as_covered,
+    gh_call,
+    github_api,
+    logger,
+)
 
 
 class PipelineGitHubMutations(PipelineGitHubMergeMutations):
