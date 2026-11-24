@@ -1,6 +1,6 @@
 # ADR-0048: Automation rebase triggers
 
-- Status: Accepted
+- Status: Amended 2026-11-24 (exact-head lease removed per #2954; GO record is the GitHub label per AGENTS.md)
 - Date: 2026-09-08
 - Scope: Automation loop
 
@@ -19,8 +19,11 @@ The loop permits a rebase only in these conditions:
    record so a restart does not repeat this preparation. Require host creation
    evidence for a fresh branch. An old writer without that evidence needs an
    explicit manual rebase before it can continue. Advance a new direct issue's
-   empty remote reservation to the prepared base under its exact-head lease.
-2. A PR has GO for its exact current head and a merge conflict. Start the
+   empty remote reservation to the prepared base by fetching the observed reservation head, re-deriving
+   the prepared work tree from it, and advancing only as a fast-forward; stop with a clear reason when the
+   rebase cannot be done cleanly (contract per #2954).
+2. A PR holds the `state:implementation-go` label and review thread record
+   for its head and has a merge conflict. Start the
    rebase agent. Recheck the live state before the host changes the branch.
 3. The operator supplies `--rebase` with selected issues or PRs. Apply the
    request once per selected item in the invocation. Then continue normal
@@ -28,7 +31,8 @@ The loop permits a rebase only in these conditions:
 
 Each replay uses an exact commit from `origin/main`. The host owns Git,
 signing, and publication. Conflict agents edit only the allowed files.
-Publication keeps its exact remote-head lease. A changed published head
+Publication rebases onto the observed head and pushes fast-forward only;
+a stall stops with a clear reason. A changed published head
 requires a new review unless the host proves the same change under
 [ADR-0038](0038-reviewed-head-ci-merge-gate.md). That exception keeps the
 initial review identity and requires fresh CI/CD for the resulting head.
