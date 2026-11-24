@@ -271,6 +271,21 @@ def _agents_authenticated_by_default(
             monkeypatch.setattr(target, _stub_resolve_agent)
 
 
+@pytest.fixture(autouse=True)
+def _unknown_github_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the GitHub throttle off the live ``gh api rate_limit`` probe.
+
+    The budget path belongs to the tests that drive it with fixed facts. Every
+    other test that reaches the throttle must stay deterministic and must not
+    start a GitHub request. A test that needs real budget facts overrides this
+    stub with its own monkeypatch (last writer wins).
+    """
+    monkeypatch.setattr(
+        "hephaestus.git.gh.rate_limit.gh_rate_limit_budget",
+        lambda *_args, **_kwargs: (None, None),
+    )
+
+
 @pytest.fixture
 def tmp_config_yaml(tmp_path):
     """Create a temporary YAML config file."""

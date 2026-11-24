@@ -238,13 +238,53 @@ def detect_rate_limit(text: str, *, allow_probe: bool = True) -> int | None:
     return None
 
 
-# Cached ``gh api rate_limit`` probe. Keyed by () — the cache holds the
-# most recent (epoch, fetched_at_monotonic) tuple. The TTL is short
-# because the reset window itself only updates hourly, but we still
-# revalidate every ~30s so that after a wait the next caller doesn't
-# act on a stale "0 remaining" view.
+# Cached ``gh api rate_limit`` probe. The reset cache holds the most recent
+# (epoch, fetched_at_monotonic) tuple. The remaining cache holds the paired
+# (remaining, fetched_at_monotonic) tuple. The TTL is short because the reset
+# window itself only updates hourly, but we still revalidate every ~30s so
+# that after a wait the next caller does not act on a stale "0 remaining" view.
 _RATE_LIMIT_PROBE_TTL = 30.0
 _rate_limit_probe_cache: dict[str, tuple[int | None, float]] = {}
+_rate_limit_remaining_cache: dict[str, tuple[int | None, float]] = {}
+
+
+def _probe_rate_limit_payload() -> dict[str, object] | None:
+    """Run ``gh api rate_limit`` and return the parsed payload, or ``None``.
+
+    The probe endpoint does not consume the account budget. One refresh per
+    :data:`_RATE_LIMIT_PROBE_TTL` is therefore cheap.
+    """
+    try:
+        result = run_subprocess(
+            ["gh", "api", "rate_limit"],
+            check=True,
+            timeout=10,
+            log_on_error=False,
+            env=gh_child_environment(),
+        )
+        payload = json.loads(result.stdout)
+    except (subprocess.SubprocessError, json.JSONDecodeError, ValueError, OSError) as e:
+        logger.debug("gh api rate_limit probe failed: %s", e)
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _resource_facts(payload: object, resource: str) -> dict[str, object]:
+    """Return the ``resources.<resource>`` record from a rate-limit payload."""
+    if not isinstance(payload, dict):
+        return {}
+    resources = payload.get("resources")
+    if not isinstance(resources, dict):
+        return {}
+    record = resources.get(resource)
+    return record if isinstance(record, dict) else {}
+
+
+def _non_negative_int(value: object) -> int | None:
+    """Return *value* as a non-negative integer, or ``None`` when invalid."""
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
 
 
 def gh_rate_limit_reset_epoch(resource: str = "graphql", *, allow_probe: bool = True) -> int | None:
@@ -274,23 +314,51 @@ def gh_rate_limit_reset_epoch(resource: str = "graphql", *, allow_probe: bool = 
     if not allow_probe:
         return None
 
-    try:
-        result = run_subprocess(
-            ["gh", "api", "rate_limit"],
-            check=True,
-            timeout=10,
-            log_on_error=False,
-            env=gh_child_environment(),
-        )
-        payload = json.loads(result.stdout)
-        reset_val = payload.get("resources", {}).get(resource, {}).get("reset")
-        epoch = int(reset_val) if reset_val is not None else None
-    except (subprocess.SubprocessError, json.JSONDecodeError, ValueError, OSError) as e:
-        logger.debug("gh api rate_limit probe failed: %s", e)
-        epoch = None
-
+    record = _resource_facts(_probe_rate_limit_payload(), resource)
+    epoch = _non_negative_int(record.get("reset"))
     _rate_limit_probe_cache[resource] = (epoch, now)
     return epoch
+
+
+def gh_rate_limit_budget(
+    resource: str = "graphql", *, allow_probe: bool = True
+) -> tuple[int | None, int | None]:
+    """Return ``(remaining, reset_epoch)`` for a GitHub API resource.
+
+    This is the quota view that lets a caller wait for the end of the window
+    instead of guessing a delay. Both values come from one cached
+    ``gh api rate_limit`` probe.
+
+    Args:
+        resource: Resource name as it appears under ``.resources`` in the
+            ``gh api rate_limit`` JSON.
+        allow_probe: If false, return only a recent cached result. Do not start
+            a request when the cache is absent or expired.
+
+    Returns:
+        A ``(remaining, reset_epoch)`` tuple. Each member is ``None`` when the
+        probe failed or the payload is malformed. Both members are ``None``
+        when no recent cached result is available.
+
+    """
+    cached_reset = _rate_limit_probe_cache.get(resource)
+    cached_remaining = _rate_limit_remaining_cache.get(resource)
+    now = time.monotonic()
+    if (
+        cached_reset is not None
+        and cached_remaining is not None
+        and (now - cached_reset[1]) < _RATE_LIMIT_PROBE_TTL
+    ):
+        return cached_remaining[0], cached_reset[0]
+    if not allow_probe:
+        return None, None
+
+    record = _resource_facts(_probe_rate_limit_payload(), resource)
+    remaining = _non_negative_int(record.get("remaining"))
+    reset_epoch = _non_negative_int(record.get("reset"))
+    _rate_limit_remaining_cache[resource] = (remaining, now)
+    _rate_limit_probe_cache[resource] = (reset_epoch, now)
+    return remaining, reset_epoch
 
 
 # ---------------------------------------------------------------------------
@@ -318,6 +386,16 @@ def gh_rate_limit_reset_epoch(resource: str = "graphql", *, allow_probe: bool = 
 _GH_HOURLY_QUOTA = 5_000.0
 _DEFAULT_GLOBAL_RATE = _GH_HOURLY_QUOTA / 3600.0 * 0.5  # about 0.69 tokens/second
 _DEFAULT_BURST = 30.0  # max tokens stored
+
+# Reserve of GraphQL points. At or below this number of remaining points, the
+# throttle waits for the hourly window to reset.
+_BUDGET_RESERVE = 100
+
+# Wait a little past the reset so the new window is visible to the next probe.
+_BUDGET_WAIT_MARGIN = 5.0
+
+# The automation loop spends GraphQL points, so that is the budget it watches.
+_BUDGET_RESOURCE = "graphql"
 
 #: Public alias for CLI argument defaults.
 DEFAULT_GLOBAL_RATE = _DEFAULT_GLOBAL_RATE
@@ -438,6 +516,18 @@ def _probe_private_runtime_root(root: Path) -> tuple[Path | None, str | None]:
     except (OSError, RuntimeError) as exc:
         return None, str(exc)
     return base, None
+
+
+_logged_runtime_base: Path | None = None
+
+
+def _log_runtime_base_once(base: Path) -> None:
+    """Report the resolved throttle root one time per process."""
+    global _logged_runtime_base
+    if base == _logged_runtime_base:
+        return
+    _logged_runtime_base = base
+    logger.debug("GitHub throttle scope=%s root=%s", GLOBAL_THROTTLE_SCOPE, base)
 
 
 def _runtime_base_dir() -> Path:
@@ -565,13 +655,63 @@ def _throttle_pause(
     _throttle_remaining(deadline_s, shutdown)
 
 
+def _invalidate_budget_cache() -> None:
+    """Drop the cached budget view after a wait or an elapsed reset."""
+    _rate_limit_remaining_cache.pop(_BUDGET_RESOURCE, None)
+    _rate_limit_probe_cache.pop(_BUDGET_RESOURCE, None)
+
+
+def _wait_for_budget(*, deadline_s: float | None, shutdown: threading.Event | None) -> bool:
+    """Wait for the quota window to reset when the GitHub budget is low.
+
+    A healthy budget returns immediately. A low budget waits for the reset
+    that GitHub reports, so the caller spends the last points only after the
+    new window opens. An unavailable budget returns immediately and lets the
+    token bucket pace the caller.
+
+    Returns:
+        True when the probe reported a usable budget. The caller then has no
+        reason to consult the token bucket. False when the budget is unknown.
+
+    """
+    remaining, reset_epoch = gh_rate_limit_budget(_BUDGET_RESOURCE)
+    if remaining is None or reset_epoch is None:
+        return False
+    if remaining > _BUDGET_RESERVE:
+        return True
+    delay = reset_epoch - time.time() + _BUDGET_WAIT_MARGIN
+    if delay <= 0:
+        # The reported reset already passed. The next probe sees the new
+        # window, so do not wait on a stale view.
+        _invalidate_budget_cache()
+        return True
+
+    reset_text = dt.datetime.fromtimestamp(reset_epoch).strftime("%Y-%m-%d %H:%M:%S")
+    logger.info(
+        "GitHub %s budget is low: %d remaining, reserve %d. "
+        "Waiting until the reset at %s (about %.0f seconds).",
+        _BUDGET_RESOURCE,
+        remaining,
+        _BUDGET_RESERVE,
+        reset_text,
+        delay,
+    )
+    _throttle_pause(delay, deadline_s, shutdown)
+    _invalidate_budget_cache()
+    return True
+
+
 def gh_global_throttle_acquire(
     *, deadline_s: float | None = None, shutdown: threading.Event | None = None
 ) -> None:
-    """Block until one token from the global ``gh`` rate budget is available.
+    """Block until the GitHub quota admits one more request.
 
-    The bucket is shared across all processes in one operating-system instance
-    via a small JSON state file under a node-local runtime directory. The file
+    The throttle first reads the account budget from the cached
+    ``gh api rate_limit`` probe. A healthy budget returns immediately. A
+    budget at or below the reserve waits for the reset that GitHub reports,
+    then returns. An unknown budget falls back to the token bucket, which is
+    shared across all processes in one operating-system instance via a small
+    JSON state file under a node-local runtime directory. The file
     is guarded by a nonblocking ``fcntl.flock`` poll loop, so the lock never
     waits inside the storage client. The budget scope is one machine. The
     state root never comes from an agent-wide temporary directory; an operator
@@ -592,6 +732,8 @@ def gh_global_throttle_acquire(
     _throttle_remaining(deadline_s, shutdown)
     rate = _global_throttle_rate
     if rate <= 0:
+        return
+    if _wait_for_budget(deadline_s=deadline_s, shutdown=shutdown):
         return
     burst = _global_throttle_burst
 

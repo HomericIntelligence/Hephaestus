@@ -86,3 +86,4 @@ confirm all three.
 | [0070](0070-operational-failure-diagnostics-and-recovery.md) | Operational failures retain their causes and do not invent review verdicts | Proposed |
 | [0071](0071-github-throttle-is-node-local.md) | The GitHub throttle is node local | Accepted |
 | [0072](0072-codex-admission-artifact-identity.md) | Codex admission keeps one reviewed artifact manifest and one unsigned-tree digest | Accepted |
+| [0073](0073-github-throttle-waits-on-the-reported-budget.md) | The GitHub throttle waits on the reported budget | Accepted |

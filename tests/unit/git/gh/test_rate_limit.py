@@ -18,6 +18,7 @@ from unittest.mock import ANY, MagicMock, call, patch
 
 import pytest
 
+from hephaestus.git.gh import rate_limit
 from hephaestus.git.gh.rate_limit import (
     ALLOWED_TIMEZONES,
     DEFAULT_GLOBAL_RATE,
@@ -29,6 +30,7 @@ from hephaestus.git.gh.rate_limit import (
     _global_throttle_state_path,
     _node_local_runtime_candidates,
     _rate_limit_probe_cache,
+    _rate_limit_remaining_cache,
     _throttle_remaining,
     configure_gh_global_throttle,
     detect_claude_usage_cap,
@@ -37,6 +39,7 @@ from hephaestus.git.gh.rate_limit import (
     detect_secondary_rate_limit,
     detect_session_limit,
     gh_global_throttle_acquire,
+    gh_rate_limit_budget,
     gh_rate_limit_reset_epoch,
     parse_reset_epoch,
     resolve_quota_reset_epoch,
@@ -871,10 +874,12 @@ class TestGlobalThrottle:
         state_path = _global_throttle_state_path()
         script = (
             "import sys\n"
+            "import hephaestus.git.gh.rate_limit as rate_limit\n"
             "from hephaestus.git.gh.rate_limit import (\n"
             "    configure_gh_global_throttle,\n"
             "    gh_global_throttle_acquire,\n"
             ")\n"
+            "rate_limit.gh_rate_limit_budget = lambda *args, **kwargs: (None, None)\n"
             "configure_gh_global_throttle(\n"
             "    rate=1e-6, burst=200.0, directory=sys.argv[1]\n"
             ")\n"
@@ -1237,3 +1242,196 @@ def test_expired_throttle_deadline_does_not_report_a_zero_second_subprocess_time
     message = str(caught.value)
     assert "absolute monotonic deadline expired before the next GitHub request" in message
     assert "timed out after 0 seconds" not in message
+
+
+class TestGhRateLimitBudget:
+    """Tests for gh_rate_limit_budget() and its shared probe cache."""
+
+    def setup_method(self) -> None:
+        _rate_limit_probe_cache.clear()
+        _rate_limit_remaining_cache.clear()
+
+    def test_returns_remaining_and_reset_from_one_probe(self) -> None:
+        payload = '{"resources": {"graphql": {"remaining": 4000, "reset": 1700000000}}}'
+        with patch("hephaestus.git.gh.rate_limit.run_subprocess") as mock_run:
+            mock_run.return_value.stdout = payload
+            mock_run.return_value.returncode = 0
+            assert gh_rate_limit_budget() == (4000, 1700000000)
+
+        mock_run.assert_called_once_with(
+            ["gh", "api", "rate_limit"],
+            check=True,
+            timeout=10,
+            log_on_error=False,
+            env=ANY,
+        )
+
+    def test_shares_one_probe_between_budget_and_reset_callers(self) -> None:
+        """A second caller within the TTL must reuse the budget and reset."""
+        payload = '{"resources": {"graphql": {"remaining": 4000, "reset": 1700000000}}}'
+        with patch("hephaestus.git.gh.rate_limit.run_subprocess") as mock_run:
+            mock_run.return_value.stdout = payload
+            mock_run.return_value.returncode = 0
+            assert gh_rate_limit_budget() == (4000, 1700000000)
+            assert gh_rate_limit_budget() == (4000, 1700000000)
+            assert gh_rate_limit_reset_epoch() == 1700000000
+            assert mock_run.call_count == 1
+
+    def test_returns_unavailable_on_subprocess_failure(self) -> None:
+        with patch(
+            "hephaestus.git.gh.rate_limit.run_subprocess",
+            side_effect=subprocess.CalledProcessError(1, "gh"),
+        ):
+            assert gh_rate_limit_budget() == (None, None)
+
+    def test_returns_unavailable_when_probe_is_not_json(self) -> None:
+        with patch("hephaestus.git.gh.rate_limit.run_subprocess") as mock_run:
+            mock_run.return_value.stdout = "not json"
+            mock_run.return_value.returncode = 0
+            assert gh_rate_limit_budget() == (None, None)
+
+    def test_returns_unavailable_when_fields_are_missing(self) -> None:
+        with patch("hephaestus.git.gh.rate_limit.run_subprocess") as mock_run:
+            mock_run.return_value.stdout = '{"resources": {"graphql": {}}}'
+            mock_run.return_value.returncode = 0
+            assert gh_rate_limit_budget() == (None, None)
+
+    def test_rejects_invalid_field_values(self) -> None:
+        payload = '{"resources": {"graphql": {"remaining": "many", "reset": -5}}}'
+        with patch("hephaestus.git.gh.rate_limit.run_subprocess") as mock_run:
+            mock_run.return_value.stdout = payload
+            mock_run.return_value.returncode = 0
+            assert gh_rate_limit_budget() == (None, None)
+
+    def test_does_not_probe_without_permission(self) -> None:
+        with patch("hephaestus.git.gh.rate_limit.run_subprocess") as mock_run:
+            assert gh_rate_limit_budget(allow_probe=False) == (None, None)
+            mock_run.assert_not_called()
+
+
+class TestGlobalThrottleBudget:
+    """Tests for the budget-first path through gh_global_throttle_acquire()."""
+
+    def _acquire(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        *,
+        facts: tuple[int | None, int | None],
+        wall_now: float = 1_000_000.0,
+        deadline_s: float | None = None,
+    ) -> tuple[list[float], Path]:
+        """Run one acquire call with fixed budget facts and a fixed clock."""
+        configure_gh_global_throttle(rate=10.0, burst=10.0, directory=tmp_path)
+        monkeypatch.setattr(
+            "hephaestus.git.gh.rate_limit.gh_rate_limit_budget",
+            lambda *_args, **_kwargs: facts,
+        )
+        sleep_calls: list[float] = []
+        now = [0.0]
+
+        def sleep(seconds: float) -> None:
+            sleep_calls.append(seconds)
+            now[0] += seconds
+
+        monkeypatch.setattr("hephaestus.git.gh.rate_limit.time.monotonic", lambda: now[0])
+        monkeypatch.setattr("hephaestus.git.gh.rate_limit.time.time", lambda: wall_now)
+        monkeypatch.setattr("hephaestus.git.gh.rate_limit.time.sleep", sleep)
+        gh_global_throttle_acquire(deadline_s=deadline_s)
+        return sleep_calls, _global_throttle_state_path()
+
+    def test_healthy_budget_skips_the_token_bucket(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        sleep_calls, state_path = self._acquire(
+            monkeypatch,
+            tmp_path,
+            facts=(4000, 1_001_800),
+        )
+
+        assert sleep_calls == []
+        assert not state_path.exists()
+
+    def test_low_budget_waits_for_the_reported_reset(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        with caplog.at_level(logging.INFO, logger="hephaestus.git.gh.rate_limit"):
+            sleep_calls, state_path = self._acquire(
+                monkeypatch,
+                tmp_path,
+                facts=(5, 1_000_120),
+            )
+
+        assert sleep_calls == [pytest.approx(125.0)]
+        assert not state_path.exists()
+        assert any(record.levelno == logging.INFO for record in caplog.records)
+
+    def test_elapsed_reset_does_not_wait(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        sleep_calls, state_path = self._acquire(
+            monkeypatch,
+            tmp_path,
+            facts=(5, 999_940),
+        )
+
+        assert sleep_calls == []
+        assert not state_path.exists()
+        assert "graphql" not in _rate_limit_remaining_cache
+
+    def test_low_budget_stops_at_the_operation_deadline(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        with pytest.raises(OperationDeadlineExpired):
+            self._acquire(
+                monkeypatch,
+                tmp_path,
+                facts=(5, 1_000_120),
+                deadline_s=30.0,
+            )
+
+    def test_unknown_budget_uses_the_token_bucket(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        sleep_calls, state_path = self._acquire(
+            monkeypatch,
+            tmp_path,
+            facts=(None, None),
+        )
+
+        assert sleep_calls == []
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        assert state["tokens"] == pytest.approx(9.0)
+
+    def test_disabled_throttle_does_not_probe(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        configure_gh_global_throttle(rate=0.0, burst=10.0, directory=tmp_path)
+        probe = MagicMock(return_value=(0, 1))
+        monkeypatch.setattr("hephaestus.git.gh.rate_limit.gh_rate_limit_budget", probe)
+
+        gh_global_throttle_acquire()
+
+        probe.assert_not_called()
+
+
+class TestRuntimeBaseLogging:
+    """Tests for the one-time throttle root report."""
+
+    def test_logs_the_resolved_root_once(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        monkeypatch.setattr(rate_limit, "_logged_runtime_base", None)
+        configure_gh_global_throttle(rate=10.0, burst=30.0, directory=tmp_path)
+
+        with caplog.at_level(logging.DEBUG, logger="hephaestus.git.gh.rate_limit"):
+            rate_limit._runtime_base_dir()
+            rate_limit._runtime_base_dir()
+
+        assert len(caplog.records) == 1
