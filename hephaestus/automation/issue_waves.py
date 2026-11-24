@@ -31,6 +31,7 @@ from hephaestus.utils.file_lock import LockUnavailableError, file_lock
 from hephaestus.utils.git import _is_full_commit_sha
 
 WAVE_LIMITS: tuple[int | None, ...] = (1, 2, 4, 8, None)
+# path-reference-exempt: jetstream journal schema tag, not a module
 _SCHEMA = "hephaestus.issue-wave-checkpoint.v1"
 _CHECKPOINT_NAME = "issue-wave-checkpoint.json"
 _LOCK_NAME = "issue-wave-checkpoint.lock"

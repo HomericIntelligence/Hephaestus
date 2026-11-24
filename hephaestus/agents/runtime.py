@@ -118,6 +118,7 @@ CODEX_AUTH_MAX_BYTES = 1024 * 1024
 CODEX_ATHENA_MAX_BYTES = 32 * 1024 * 1024
 CODEX_PRESERVED_STATE_MAX_FILES = 100_000
 CODEX_PRESERVED_STATE_MAX_BYTES = 2 * 1024 * 1024 * 1024
+# path-reference-exempt: external adapter entry-point group, not a module
 PI_ISOLATION_ADAPTER_ENTRY_POINT_GROUP = "hephaestus.pi_isolation_adapters"
 PI_MODEL_CONFIG_RELATIVE_PATH = Path(".pi") / "agent" / "models.json"
 PI_SETTINGS_CONFIG_RELATIVE_PATH = Path(".pi") / "agent" / "settings.json"

@@ -16,6 +16,7 @@ from itertools import pairwise
 from pathlib import Path
 from typing import Never, Protocol, cast
 
+# path-reference-exempt: external adapter entry-point group, not a module
 CODEX_ISOLATION_ADAPTER_ENTRY_POINT_GROUP = "hephaestus.codex_isolation_adapters"
 CODEX_ISOLATION_API_VERSION = 1
 CODEX_LINUX_TARGET = "aarch64-unknown-linux-musl"

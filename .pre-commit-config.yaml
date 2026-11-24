@@ -228,6 +228,19 @@ repos:
         pass_filenames: false
         files: ^(hephaestus/(cli|config|system|utils|version)/.*\.py|COMPATIBILITY\.md)$
 
+  # Dotted module-reference guard: every patch/monkeypatch/import_module
+  # string target, registry module-path string, and [project.scripts] entry
+  # must resolve against the repository tree, and every subpackage must be
+  # named by at least one pre-commit files: pattern (#3505).
+  - repo: local
+    hooks:
+      - id: hephaestus-check-path-references
+        name: Dotted module references must resolve
+        description: Fails the build on broken module-path strings and missing subpackage pre-commit coverage
+        entry: uv run hephaestus-check-path-references
+        language: system
+        pass_filenames: false
+
   # Complexity check
   - repo: local
     hooks:
