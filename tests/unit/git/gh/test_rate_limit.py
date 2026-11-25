@@ -1525,6 +1525,51 @@ class TestGlobalThrottleBudget:
         assert _rate_limit_probe_cache["graphql"][:2] == (5, 1_000_000 + 86_400_000)
         assert any(record.levelno == logging.WARNING for record in caplog.records)
 
+    def test_wrong_unit_reset_uses_the_token_bucket(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A millisecond epoch must not escape the throttle as a format error."""
+        with caplog.at_level(logging.WARNING, logger="hephaestus.git.gh.rate_limit"):
+            sleep_calls, state_path = self._acquire(
+                monkeypatch,
+                tmp_path,
+                facts=(5, 1_700_000_000_000),
+                seed_cache=(5, 1_700_000_000_000),
+            )
+
+        assert sleep_calls == []
+        assert state_path.exists()
+        assert any(record.levelno == logging.WARNING for record in caplog.records)
+
+    def test_unusable_reset_is_probed_once(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Keep a bad probe result until its TTL ends instead of probing again."""
+        configure_gh_global_throttle(rate=10.0, burst=10.0, directory=tmp_path)
+        reset_epoch = int(time.time()) + 86_400
+        payload = json.dumps({"resources": {"graphql": {"remaining": 5, "reset": reset_epoch}}})
+        probe = MagicMock(return_value=subprocess.CompletedProcess(["gh"], 0, payload, ""))
+        monkeypatch.setattr("hephaestus.git.gh.rate_limit.run_subprocess", probe)
+        facts = rate_limit._rate_limit_facts
+        monkeypatch.setattr(
+            "hephaestus.git.gh.rate_limit.gh_rate_limit_budget",
+            lambda resource, **kwargs: facts(resource, **kwargs),
+        )
+
+        with caplog.at_level(logging.WARNING, logger="hephaestus.git.gh.rate_limit"):
+            gh_global_throttle_acquire()
+            gh_global_throttle_acquire()
+
+        assert probe.call_count == 1
+        warnings = [record for record in caplog.records if record.levelno == logging.WARNING]
+        assert len(warnings) == 1
+
     def test_healthy_budget_stops_at_the_operation_deadline(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:

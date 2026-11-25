@@ -721,8 +721,15 @@ def _invalidate_budget_cache() -> None:
 
 @lru_cache(maxsize=8)
 def _warn_budget_reset(reset_epoch: int, past: bool) -> None:
-    """Warn one time for each unusual reset report."""
-    reset_text = dt.datetime.fromtimestamp(reset_epoch).strftime("%Y-%m-%d %H:%M:%S")
+    """Warn one time for each unusual reset report.
+
+    The value can be in the wrong unit or outside the datetime range. A warning
+    must not fail the call, so an unformattable value is shown as a number.
+    """
+    try:
+        reset_text = dt.datetime.fromtimestamp(reset_epoch).strftime("%Y-%m-%d %H:%M:%S")
+    except (ValueError, OSError, OverflowError):
+        reset_text = str(reset_epoch)
     if past:
         logger.warning(
             "GitHub %s budget is low and the reported reset at %s is in the "
