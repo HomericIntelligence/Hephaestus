@@ -603,10 +603,10 @@ class TestGlobalThrottle:
         return sleep_calls, state_path
 
     @pytest.mark.parametrize("rate", [0.0, 10.0])
-    def test_missing_lock_primitive_only_allows_explicitly_disabled_throttle(
+    def test_missing_lock_primitive_blocks_the_token_bucket_route(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, rate: float
     ) -> None:
-        """An enabled throttle cannot report success without its lock primitive."""
+        """An enabled throttle cannot use the token bucket without its primitive."""
         monkeypatch.setitem(sys.modules, "fcntl", None)
         configure_gh_global_throttle(rate=rate, burst=10, directory=tmp_path)
         state_path = _global_throttle_state_path()
@@ -1309,6 +1309,21 @@ class TestGhRateLimitBudget:
             assert gh_rate_limit_budget(allow_probe=False) == (None, None)
             mock_run.assert_not_called()
 
+    def test_probe_lock_timeout_returns_unavailable(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A busy probe lock must not become an unbounded wait."""
+
+        class BusyLock:
+            def acquire(self, timeout: float | None = None) -> bool:
+                assert timeout == rate_limit._PROBE_TIMEOUT
+                return False
+
+            def release(self) -> None:
+                raise AssertionError("a failed acquire must not release the lock")
+
+        monkeypatch.setattr(rate_limit, "_rate_limit_probe_lock", BusyLock())
+
+        assert gh_rate_limit_budget("graphql", allow_probe=True) == (None, None)
+
     def test_reset_only_probe_refreshes_the_whole_pair(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -1401,6 +1416,10 @@ class TestGhRateLimitBudget:
 class TestGlobalThrottleBudget:
     """Tests for the budget-first path through gh_global_throttle_acquire()."""
 
+    def setup_method(self) -> None:
+        _rate_limit_probe_cache.clear()
+        rate_limit._warn_budget_reset.cache_clear()
+
     def _acquire(
         self,
         monkeypatch: pytest.MonkeyPatch,
@@ -1409,15 +1428,21 @@ class TestGlobalThrottleBudget:
         facts: tuple[int | None, int | None],
         wall_now: float = 1_000_000.0,
         deadline_s: float | None = None,
+        probe_cost: float = 0.0,
+        seed_cache: tuple[int, int] | None = None,
     ) -> tuple[list[float], Path]:
         """Run one acquire call with fixed budget facts and a fixed clock."""
         configure_gh_global_throttle(rate=10.0, burst=10.0, directory=tmp_path)
-        monkeypatch.setattr(
-            "hephaestus.git.gh.rate_limit.gh_rate_limit_budget",
-            lambda *_args, **_kwargs: facts,
-        )
         sleep_calls: list[float] = []
         now = [0.0]
+
+        def budget(*_args: object, **_kwargs: object) -> tuple[int | None, int | None]:
+            now[0] += probe_cost
+            return facts
+
+        monkeypatch.setattr("hephaestus.git.gh.rate_limit.gh_rate_limit_budget", budget)
+        if seed_cache is not None:
+            _rate_limit_probe_cache["graphql"] = (*seed_cache, now[0])
 
         def sleep(seconds: float) -> None:
             sleep_calls.append(seconds)
@@ -1458,18 +1483,27 @@ class TestGlobalThrottleBudget:
         assert not state_path.exists()
         assert any(record.levelno == logging.INFO for record in caplog.records)
 
-    def test_elapsed_reset_does_not_wait(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    def test_past_reset_uses_the_token_bucket(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
-        sleep_calls, state_path = self._acquire(
-            monkeypatch,
-            tmp_path,
-            facts=(5, 999_940),
-        )
+        """A low budget with a past reset must not fail open."""
+        with caplog.at_level(logging.WARNING, logger="hephaestus.git.gh.rate_limit"):
+            sleep_calls, state_path = self._acquire(
+                monkeypatch,
+                tmp_path,
+                facts=(5, 999_940),
+                seed_cache=(5, 999_940),
+            )
 
         assert sleep_calls == []
-        assert not state_path.exists()
-        assert "graphql" not in _rate_limit_probe_cache
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        assert state["tokens"] == pytest.approx(9.0)
+        # Keep the probe result for its TTL. Do not probe again on every call.
+        assert _rate_limit_probe_cache["graphql"][:2] == (5, 999_940)
+        assert any(record.levelno == logging.WARNING for record in caplog.records)
 
     def test_implausible_reset_uses_the_token_bucket(
         self,
@@ -1483,11 +1517,26 @@ class TestGlobalThrottleBudget:
                 monkeypatch,
                 tmp_path,
                 facts=(5, 1_000_000 + 86_400_000),
+                seed_cache=(5, 1_000_000 + 86_400_000),
             )
 
         assert sleep_calls == []
         assert state_path.exists()
+        assert _rate_limit_probe_cache["graphql"][:2] == (5, 1_000_000 + 86_400_000)
         assert any(record.levelno == logging.WARNING for record in caplog.records)
+
+    def test_healthy_budget_stops_at_the_operation_deadline(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A probe that uses the whole budget must not return a healthy result."""
+        with pytest.raises(OperationDeadlineExpired):
+            self._acquire(
+                monkeypatch,
+                tmp_path,
+                facts=(4000, 1_001_800),
+                deadline_s=3.0,
+                probe_cost=5.0,
+            )
 
     def test_low_budget_stops_at_the_operation_deadline(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path

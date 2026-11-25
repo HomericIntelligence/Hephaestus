@@ -27,7 +27,7 @@ import threading
 import time
 from collections.abc import Callable
 from concurrent.futures import CancelledError
-from functools import cache
+from functools import cache, lru_cache
 from pathlib import Path
 from typing import TextIO
 from zoneinfo import ZoneInfo
@@ -719,17 +719,39 @@ def _invalidate_budget_cache() -> None:
     _rate_limit_probe_cache.pop(_BUDGET_RESOURCE, None)
 
 
+@lru_cache(maxsize=8)
+def _warn_budget_reset(reset_epoch: int, past: bool) -> None:
+    """Warn one time for each unusual reset report."""
+    reset_text = dt.datetime.fromtimestamp(reset_epoch).strftime("%Y-%m-%d %H:%M:%S")
+    if past:
+        logger.warning(
+            "GitHub %s budget is low and the reported reset at %s is in the "
+            "past. Using the token bucket. Check the host clock.",
+            _BUDGET_RESOURCE,
+            reset_text,
+        )
+        return
+    logger.warning(
+        "GitHub %s budget reports a reset at %s, beyond the %.0f-second "
+        "limit. Using the token bucket instead. Check the host clock.",
+        _BUDGET_RESOURCE,
+        reset_text,
+        _BUDGET_MAX_WAIT,
+    )
+
+
 def _wait_for_budget(*, deadline_s: float | None, shutdown: threading.Event | None) -> bool:
     """Wait for the quota window to reset when the GitHub budget is low.
 
     A healthy budget returns immediately. A low budget waits for the reset
     that GitHub reports, so the caller spends the last points only after the
-    new window opens. An unavailable budget returns immediately and lets the
-    token bucket pace the caller.
+    new window opens. An unavailable or unusable budget returns immediately
+    and lets the token bucket pace the caller.
 
     Returns:
         True when the probe reported a usable budget. The caller then has no
-        reason to consult the token bucket. False when the budget is unknown.
+        reason to consult the token bucket. False when the budget is unknown,
+        past, or implausible.
 
     """
     remaining, reset_epoch = gh_rate_limit_budget(
@@ -741,20 +763,12 @@ def _wait_for_budget(*, deadline_s: float | None, shutdown: threading.Event | No
         return True
     delay = reset_epoch - time.time() + _BUDGET_WAIT_MARGIN
     if delay <= 0:
-        # The reported reset already passed. The next probe sees the new
-        # window, so do not wait on a stale view.
-        _invalidate_budget_cache()
-        return True
+        # A low budget with a reset in the past is not healthy. The payload is
+        # stale or the host clock is ahead. The token bucket is the safe path.
+        _warn_budget_reset(reset_epoch, past=True)
+        return False
     if delay > _BUDGET_MAX_WAIT:
-        logger.warning(
-            "GitHub %s budget reports a reset %.0f seconds away, beyond the "
-            "%.0f-second limit. Using the token bucket instead. Check the host "
-            "clock.",
-            _BUDGET_RESOURCE,
-            delay,
-            _BUDGET_MAX_WAIT,
-        )
-        _invalidate_budget_cache()
+        _warn_budget_reset(reset_epoch, past=False)
         return False
 
     reset_text = dt.datetime.fromtimestamp(reset_epoch).strftime("%Y-%m-%d %H:%M:%S")

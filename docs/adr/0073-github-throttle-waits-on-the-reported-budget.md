@@ -27,8 +27,12 @@ does not spend the account budget.
    caller does not mix values from two windows.
 2. A budget above 100 remaining points returns immediately. The call does not
    spend a token from the bucket.
-3. A budget at or below 100 remaining points waits until the reported reset
-   plus 5 s. Then the call returns. A later call probes the new window.
+3. A budget at or below 100 remaining points with a future reset waits
+   until the reported reset plus 5 s. Then the call returns, and the cache is
+   dropped so the next call probes the new window. A low budget with a reset
+   in the past does not fail open: the throttle logs a warning and uses the
+   token bucket. That state indicates a stale payload or a host clock that is
+   ahead.
 4. An unknown budget uses the existing token bucket. The probe can fail, and
    the throttle must still work. The configured `--gh-global-rate` and
    `--gh-global-burst` values apply to this fallback.
@@ -41,8 +45,10 @@ does not spend the account budget.
    time, and the throttle re-checks the deadline before it returns.
 8. The throttle accepts a reported reset only when it is within one window
    (65 minutes). A reset further away can come from a corrupted payload, a
-   clock error, or a value in the wrong unit. The throttle logs a warning and
-   uses the token bucket for that call.
+   clock error, or a value in the wrong unit. The throttle logs a warning one
+   time for that reset value and uses the token bucket. It keeps the probe
+   result until its cache lifetime ends, so a persistent bad payload does not
+   cause one probe for each call.
 
 ## Alternatives considered
 
@@ -66,6 +72,8 @@ does not spend the account budget.
 - A depleted GraphQL budget stops the caller until the window resets. A REST
   caller also stops, because one throttle serves the account. This behavior is
   conservative. The account is near a limit.
+- A low budget with a reset in the past uses the token bucket. The warning
+  names the clock check. The call is paced, not unpaced.
 - The probe adds one `gh` subprocess call for each 30 s in each process. The
   probe does not spend the account budget.
 - The account budget is global. The reserve and the cache are per host. A
