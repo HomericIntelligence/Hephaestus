@@ -1423,11 +1423,10 @@ class TestRuntimeBaseLogging:
 
     def test_logs_the_resolved_root_once(
         self,
-        monkeypatch: pytest.MonkeyPatch,
         tmp_path: Path,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        monkeypatch.setattr(rate_limit, "_logged_runtime_base", None)
+        rate_limit._log_runtime_base_once.cache_clear()
         configure_gh_global_throttle(rate=10.0, burst=30.0, directory=tmp_path)
 
         with caplog.at_level(logging.DEBUG, logger="hephaestus.git.gh.rate_limit"):

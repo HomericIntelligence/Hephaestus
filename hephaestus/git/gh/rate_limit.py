@@ -27,6 +27,7 @@ import threading
 import time
 from collections.abc import Callable
 from concurrent.futures import CancelledError
+from functools import cache
 from pathlib import Path
 from typing import TextIO
 from zoneinfo import ZoneInfo
@@ -518,15 +519,9 @@ def _probe_private_runtime_root(root: Path) -> tuple[Path | None, str | None]:
     return base, None
 
 
-_logged_runtime_base: Path | None = None
-
-
+@cache
 def _log_runtime_base_once(base: Path) -> None:
-    """Report the resolved throttle root one time per process."""
-    global _logged_runtime_base
-    if base == _logged_runtime_base:
-        return
-    _logged_runtime_base = base
+    """Report the resolved throttle root one time for each base."""
     logger.debug("GitHub throttle scope=%s root=%s", GLOBAL_THROTTLE_SCOPE, base)
 
 
