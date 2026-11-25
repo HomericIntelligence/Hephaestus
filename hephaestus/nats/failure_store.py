@@ -63,6 +63,7 @@ FAILURE_SUBJECT_PREFIX = "hephaestus.nats.failure"
 REPLAY_RECEIPT_SUBJECT_PREFIX = "hephaestus.nats.replay.receipt"
 ADVISORY_SUBJECT_PREFIX = "$JS.EVENT.ADVISORY.CONSUMER.MAX_DELIVERIES"
 
+# path-reference-exempt: JSON key for a managed NATS role, not a module
 MANAGED_ROLE_KEY = "hephaestus.role"
 RETENTION_SECONDS_30_DAYS = 2_592_000
 _SMALL_MESSAGE_BYTES = 16_384

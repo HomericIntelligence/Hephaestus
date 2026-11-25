@@ -27,6 +27,7 @@ from .repository_validation import (
     valid_repository_name,
 )
 
+# path-reference-exempt: external profile entry-point group, not a module
 PROFILE_ENTRY_POINT_GROUP = "hephaestus.repository_validation_profiles"
 PROFILES_MAX = 32
 CONTROLS_MAX = 256

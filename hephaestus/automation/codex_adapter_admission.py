@@ -31,6 +31,7 @@ from typing import Any, cast
 
 from hephaestus.agents.codex_isolation import parse_release_tag
 
+# path-reference-exempt: external adapter entry-point group, not a module
 _ENTRY_POINT_GROUP = "hephaestus.codex_isolation_adapters"
 _TARGET = "aarch64-unknown-linux-musl"
 _FULCIO_ISSUER = "O=sigstore.dev, CN=sigstore-intermediate"

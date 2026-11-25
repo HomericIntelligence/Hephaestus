@@ -177,6 +177,7 @@ hephaestus-validate-agents = "hephaestus.agents.frontmatter:validate_agents_main
 hephaestus-check-cli-tier-docs = "hephaestus.validation.cli_tier_docs:main"
 hephaestus-check-api-table-docs = "hephaestus.validation.api_table_docs:main"
 hephaestus-check-api-reference = "hephaestus.validation.api_reference:main"
+hephaestus-check-path-references = "hephaestus.validation.path_references:main"
 hephaestus-check-unlinked-todo = "hephaestus.validation.unlinked_todo:main"
 hephaestus-check-environment-variables = "hephaestus.validation.environment_variables:main"
 

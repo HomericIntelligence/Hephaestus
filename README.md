@@ -318,7 +318,7 @@ remaining narrowly approved runtime variables and the deny-by-default policy.
 
 Run any command with `--help` to see full usage.
 
-The 59 console scripts are declared in `[project.scripts]` in
+The 60 console scripts are declared in `[project.scripts]` in
 [`pyproject.toml`](pyproject.toml).
 
 ### Automation
@@ -499,6 +499,7 @@ process-group support does not prevent normal execution.
 | `hephaestus-check-doc-config` | Enforce consistency between documentation metric values and authoritative config sources |
 | `hephaestus-check-docstrings` | Check Python docstrings for genuine sentence fragments |
 | `hephaestus-check-environment-variables` | Enforce the exact deny-by-default runtime environment registry |
+| `hephaestus-check-path-references` | Resolve dotted module references against the repository tree |
 | `hephaestus-check-python-version` | Check Python version consistency across project configuration files |
 | `hephaestus-check-readmes` | Markdown validation utilities for HomericIntelligence projects |
 | `hephaestus-check-stale-scripts` | Detect scripts in `scripts/` with no references in CI configs or other scripts |
