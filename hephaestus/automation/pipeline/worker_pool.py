@@ -2737,10 +2737,7 @@ class WorkerPool:
                 # Convert job execution failures into a JobResult so the callback
                 # never re-raises into its thread.
                 logger.exception("Job %s raised, returning error result", job)
-                result = JobResult(
-                    ok=False,
-                    error=f"{type(exc).__name__}: {exc!s}"[:_ERR_MAX],
-                )
+                result = _agent_exception_result(exc)
 
             # Mandatory post-check: SIGINT to the process group makes subprocess
             # children return "normally" (rc=0 or some other code), so an
@@ -3245,7 +3242,11 @@ class WorkerPool:
             return JobResult(ok=False, error="interrupted", interrupted=True)
         except SourceWorkspacePreparationError as exc:
             if exc.cause is SourceWorkspacePreparationCause.GIT_TIMEOUT:
-                return JobResult(ok=False, error="timeout")
+                return JobResult(
+                    ok=False,
+                    error="timeout",
+                    pre_agent_failure="source_workspace_preparation",
+                )
             return _agent_exception_result(exc)
         except AgentExecutionError as exc:
             message = str(exc).casefold()

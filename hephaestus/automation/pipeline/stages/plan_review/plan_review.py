@@ -277,6 +277,11 @@ _PLAN_FEEDBACK_INTEGRATED = "plan_feedback_integrated"
 #: or stamping labels (#911). Reset whenever a real verdict arrives.
 REVIEW_ERROR_RETRY_CAP = 2
 
+#: Max CONSECUTIVE source-workspace preparation failures before an agent runs.
+#: These failures are infrastructure, so they use this budget instead of the
+#: review verdict, model fallback, or decomposition generation-round budgets.
+PRE_AGENT_FAILURE_RETRY_CAP = 2
+
 #: The convergence trigger: decomposition starts after this many confirmed
 #: real NOGO records in one requirements epoch (issue #2982).
 NOGO_DECOMPOSITION_THRESHOLD: Final[int] = 5
@@ -358,6 +363,106 @@ class _AcceptedPlanReview:
     charged_round: int | None = None
     comment_published: bool = False
     label_proposed: bool = False
+
+
+def _record_pre_agent_failure(item: WorkItem, prefix: str, result: JobResult) -> None:
+    """Record one workspace failure that happened before an agent session."""
+    item.payload[f"{prefix}_pre_agent_failure_pending"] = True
+    item.payload[f"{prefix}_pre_agent_failure_kind"] = result.pre_agent_failure
+    item.payload[f"{prefix}_pre_agent_failure_error"] = bounded_pipeline_diagnostic(
+        result.error or "source workspace operation failed",
+        limit=500,
+    )
+    logger.warning(
+        "plan_review:%s: %s pre-agent failure: %s",
+        item.issue,
+        prefix.replace("_", " "),
+        result.error,
+    )
+
+
+def _pre_agent_failure_parts(item: WorkItem, prefix: str) -> tuple[str, str]:
+    """Pop and return the bounded kind and cause of a recorded pre-agent failure."""
+    item.payload.pop(f"{prefix}_pre_agent_failure_pending", None)
+    kind = str(item.payload.pop(f"{prefix}_pre_agent_failure_kind", "") or "")
+    cause = str(
+        item.payload.pop(f"{prefix}_pre_agent_failure_error", "")
+        or "source workspace operation failed"
+    )
+    return kind, cause
+
+
+def _review_pre_agent_failure_outcome(item: WorkItem) -> StageOutcome | None:
+    """Consume a review job that failed before any reviewer session existed."""
+    if not item.payload.get("review_pre_agent_failure_pending"):
+        return None
+    kind, cause = _pre_agent_failure_parts(item, "review")
+    if kind == "source_workspace_ownership":
+        reason = f"review source workspace ownership unavailable: {cause}"
+        logger.error("plan_review:%s: %s", item.issue, reason)
+        return StageOutcome(Disposition.FINISH_FAIL, reason)
+    retries = int(item.payload.get("review_pre_agent_failure_retries", 0)) + 1
+    item.payload["review_pre_agent_failure_retries"] = retries
+    reason = f"review source workspace preparation failed: {cause}"
+    if retries > PRE_AGENT_FAILURE_RETRY_CAP:
+        logger.error(
+            "plan_review:%s: %s; exhausted after %d retries",
+            item.issue,
+            reason,
+            PRE_AGENT_FAILURE_RETRY_CAP,
+        )
+        return StageOutcome(
+            Disposition.FINISH_FAIL,
+            f"{reason}; exhausted after {PRE_AGENT_FAILURE_RETRY_CAP} retries",
+        )
+    logger.warning(
+        "plan_review:%s: %s; retry %d/%d",
+        item.issue,
+        reason,
+        retries,
+        PRE_AGENT_FAILURE_RETRY_CAP,
+    )
+    item.state = REVIEW_WAIT
+    return StageOutcome(
+        Disposition.RETRY,
+        f"{reason}; retry {retries}/{PRE_AGENT_FAILURE_RETRY_CAP}",
+    )
+
+
+def _decomposition_pre_agent_failure_outcome(item: WorkItem) -> StageOutcome | Continue | None:
+    """Consume a generation job that never reached the agent."""
+    if not item.payload.get("decomposition_pre_agent_failure_pending"):
+        return None
+    kind, cause = _pre_agent_failure_parts(item, "decomposition")
+    rounds = int(item.payload.get(_DECOMP_GEN_ROUNDS_KEY, 0))
+    item.payload[_DECOMP_GEN_ROUNDS_KEY] = max(0, rounds - 1)
+    if kind == "source_workspace_ownership":
+        reason = f"decomposition source workspace ownership unavailable: {cause}"
+        logger.error("plan_review:%s: %s", item.issue, reason)
+        return StageOutcome(Disposition.FINISH_FAIL, reason)
+    retries = int(item.payload.get("decomposition_pre_agent_failure_retries", 0)) + 1
+    item.payload["decomposition_pre_agent_failure_retries"] = retries
+    reason = f"decomposition source workspace preparation failed: {cause}"
+    if retries > PRE_AGENT_FAILURE_RETRY_CAP:
+        logger.error(
+            "plan_review:%s: %s; exhausted after %d retries",
+            item.issue,
+            reason,
+            PRE_AGENT_FAILURE_RETRY_CAP,
+        )
+        return StageOutcome(
+            Disposition.FINISH_FAIL,
+            f"{reason}; exhausted after {PRE_AGENT_FAILURE_RETRY_CAP} retries",
+        )
+    logger.warning(
+        "plan_review:%s: %s; retry %d/%d",
+        item.issue,
+        reason,
+        retries,
+        PRE_AGENT_FAILURE_RETRY_CAP,
+    )
+    item.payload["retry_delay_s"] = 2.0
+    return Continue(next_state=DECOMP_GEN_WAIT)
 
 
 def _reviewer_failure(item: WorkItem, reason: str) -> StageOutcome:
@@ -1297,6 +1402,10 @@ class PlanReviewStage(Stage):
             # transient reviewer failure must not let the first ERROR of
             # a new cycle immediately exceed REVIEW_ERROR_RETRY_CAP.
             item.payload.pop("review_error_retries", None)
+            item.payload.pop("review_pre_agent_failure_retries", None)
+            item.payload.pop("review_pre_agent_failure_pending", None)
+            item.payload.pop("review_pre_agent_failure_kind", None)
+            item.payload.pop("review_pre_agent_failure_error", None)
             item.payload.pop("unclassified_review_text", None)
             item.payload.pop("review_verdict_followup_attempted", None)
             item.payload.pop("review_verdict_followup_pending", None)
@@ -1585,6 +1694,8 @@ class PlanReviewStage(Stage):
         """Publish one accepted review without charging its retries again."""
         if item.issue is None:  # guarded by step(); kept for type narrowing
             return StageOutcome(Disposition.FINISH_FAIL, "no issue number")
+        if pre_agent_failure := _review_pre_agent_failure_outcome(item):
+            return pre_agent_failure
         issue_number = item.issue
         review = self._capture_accepted_review(item, ctx, issue_number)
         if isinstance(review, StageOutcome):
@@ -1606,6 +1717,7 @@ class PlanReviewStage(Stage):
             item.payload["review_round"] = round_done
             item.attempts["plan_review_iter"] = item.attempts.get("plan_review_iter", 0) + 1
             item.payload["review_error_retries"] = 0
+            item.payload.pop("review_pre_agent_failure_retries", None)
         # GO/NOGO audit text is durable before its proposed label. Regardless
         # of prose, only the confirmed exclusive label below can route.
         if not review.comment_published:
@@ -2033,6 +2145,8 @@ class PlanReviewStage(Stage):
     def _eval_decomposition_generation(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """Validate one generation output, publish the draft, or re-request."""
         assert item.issue is not None  # noqa: S101 - step() validates the issue
+        if pre_agent_failure := _decomposition_pre_agent_failure_outcome(item):
+            return pre_agent_failure
         output = item.payload.pop(_DECOMP_OUTPUT_KEY, None)
         item.payload.pop(_DECOMP_ERRORS_KEY, None)
         if not isinstance(output, str) or not output.strip():
@@ -2089,6 +2203,7 @@ class PlanReviewStage(Stage):
         item.payload[_DECOMP_DRAFT_KEY] = [unit.as_dict() for unit in units]
         item.payload[_DECOMP_DRAFT_DIGEST_KEY] = draft_digest
         item.payload.pop(_DECOMP_REJECTED_KEY, None)
+        item.payload.pop("decomposition_pre_agent_failure_retries", None)
         logger.info(
             "plan_review:%d: validated draft %s with %d work units",
             item.issue,
@@ -2572,6 +2687,17 @@ class PlanReviewStage(Stage):
             ctx: Stage context.
 
         """
+        if (
+            not result.ok
+            and result.pre_agent_failure
+            and item.state in {REVIEW_WAIT, DECOMP_GEN_WAIT}
+        ):
+            _record_pre_agent_failure(
+                item,
+                "review" if item.state == REVIEW_WAIT else "decomposition",
+                result,
+            )
+            return
         if _checkpoint_review_identity(item, result, ctx):
             return
         if not result.ok:

@@ -9,7 +9,7 @@ import re
 import subprocess
 import time
 from dataclasses import replace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 import hephaestus.automation.git_utils as git_utils
 from hephaestus.agents.runtime import AgentExecutionError
@@ -37,6 +37,7 @@ from hephaestus.automation.provider_transport_failures import (
 )
 from hephaestus.automation.review_journal import CommentJournalReadError
 from hephaestus.automation.source_worktree import (
+    SourceWorkspaceError,
     SourceWorkspacePreparationCause,
     SourceWorkspacePreparationError,
 )
@@ -446,9 +447,17 @@ def _agent_exception_result(exc: Exception) -> JobResult:
             error=f"agent_error: {exc!s}"[:_ERR_MAX],
         )
     logger.exception("Agent job raised, returning error result")
+    pre_agent_failure: (
+        Literal["source_workspace_preparation", "source_workspace_ownership"] | None
+    ) = None
+    if isinstance(exc, SourceWorkspacePreparationError):
+        pre_agent_failure = "source_workspace_preparation"
+    elif isinstance(exc, SourceWorkspaceError):
+        pre_agent_failure = "source_workspace_ownership"
     return JobResult(
         ok=False,
         error=f"{type(exc).__name__}: {exc!s}"[:_ERR_MAX],
+        pre_agent_failure=pre_agent_failure,
     )
 
 

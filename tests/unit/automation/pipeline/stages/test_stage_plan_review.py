@@ -3384,6 +3384,159 @@ class TestFinalizedPlanAdmission:
         assert github.mutation_log == []
 
 
+class TestPreAgentFailureClassification:
+    """Workspace failures before an agent runs keep their own retry budgets."""
+
+    @pytest.mark.parametrize("bound_session", [False, True])
+    def test_review_pre_agent_preparation_failure_retries_without_provider_fallback(
+        self,
+        bound_session: bool,
+        make_ctx: Any,
+        make_work_item: Any,
+        tmp_path: Path,
+    ) -> None:
+        """A review that never started does not charge the provider or verdict budget."""
+        stage = PlanReviewStage()
+        github = FakeStageGitHub(labels=[STATE_NEEDS_PLAN])
+        _seed_canonical_plan(github, 61)
+        store = PlanReviewSessionStore(lambda: tmp_path) if bound_session else None
+        ctx = make_ctx(github=github, plan_review_sessions=store)
+        if bound_session:
+            item = make_work_item(issue=61, state="ENTER")
+            assert stage.on_enter(item, ctx) is None
+            assert store is not None
+            store.bind_session(item.payload["plan_review_cycle_id"], "opaque-reviewer")
+            item.state = "REVIEW_WAIT"
+        else:
+            item = _review_item(make_work_item, github, issue=61, state="REVIEW_WAIT")
+
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=False,
+                error="SourceWorkspacePreparationError: source workspace is unavailable",
+                pre_agent_failure="source_workspace_preparation",
+            ),
+            ctx,
+        )
+        item.state = "EVAL"
+        outcome = stage.step(item, ctx)
+
+        assert isinstance(outcome, StageOutcome)
+        assert outcome.disposition is Disposition.RETRY
+        assert item.state == "REVIEW_WAIT"
+        assert item.payload["review_pre_agent_failure_retries"] == 1
+        assert item.payload.get("review_error_retries", 0) == 0
+        assert "review_provider_error" not in item.payload
+        assert "review_model_override" not in item.payload
+
+    def test_review_pre_agent_ownership_failure_fails_closed(
+        self,
+        make_ctx: Any,
+        make_work_item: Any,
+    ) -> None:
+        """An ownership conflict remains terminal and preserves its cause."""
+        stage = PlanReviewStage()
+        github = FakeStageGitHub(labels=[STATE_NEEDS_PLAN])
+        _seed_canonical_plan(github, 62)
+        item = _review_item(make_work_item, github, issue=62, state="REVIEW_WAIT")
+
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=False,
+                error="SourceWorkspaceError: workspace registration changed",
+                pre_agent_failure="source_workspace_ownership",
+            ),
+            make_ctx(github=github),
+        )
+        item.state = "EVAL"
+        outcome = stage.step(item, make_ctx(github=github))
+
+        assert isinstance(outcome, StageOutcome)
+        assert outcome.disposition is Disposition.FINISH_FAIL
+        assert "source workspace ownership unavailable" in outcome.note
+        assert "workspace registration changed" in outcome.note
+
+    def test_decomposition_pre_agent_failure_does_not_consume_a_model_round(
+        self,
+        make_ctx: Any,
+        make_work_item: Any,
+    ) -> None:
+        """A generation job that never ran gives its semantic round back."""
+        stage = PlanReviewStage()
+        github = FakeStageGitHub(labels=[STATE_NEEDS_PLAN])
+        _seed_canonical_plan(github, 63)
+        ctx = make_ctx(github=github)
+        item = _review_item(make_work_item, github, issue=63, state="DECOMP_GEN_WAIT")
+        item.payload["decomposition_generation_rounds"] = 1
+
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=False,
+                error="SourceWorkspacePreparationError: source workspace is unavailable",
+                pre_agent_failure="source_workspace_preparation",
+            ),
+            ctx,
+        )
+        item.state = "DECOMP_GEN_EVAL"
+        outcome = stage.step(item, ctx)
+
+        assert outcome == Continue(next_state="DECOMP_GEN_WAIT")
+        assert item.payload["decomposition_generation_rounds"] == 0
+        assert item.payload["decomposition_pre_agent_failure_retries"] == 1
+        assert "decomposition_generation_retries" not in item.payload
+
+    def test_decomposition_pre_agent_ownership_failure_fails_closed(
+        self,
+        make_ctx: Any,
+        make_work_item: Any,
+    ) -> None:
+        """A decomposition ownership conflict does not retry the model."""
+        stage = PlanReviewStage()
+        github = FakeStageGitHub(labels=[STATE_NEEDS_PLAN])
+        _seed_canonical_plan(github, 64)
+        ctx = make_ctx(github=github)
+        item = _review_item(make_work_item, github, issue=64, state="DECOMP_GEN_WAIT")
+        item.payload["decomposition_generation_rounds"] = 1
+
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=False,
+                error="SourceWorkspaceError: workspace registration changed",
+                pre_agent_failure="source_workspace_ownership",
+            ),
+            ctx,
+        )
+        item.state = "DECOMP_GEN_EVAL"
+        outcome = stage.step(item, ctx)
+
+        assert isinstance(outcome, StageOutcome)
+        assert outcome.disposition is Disposition.FINISH_FAIL
+        assert "source workspace ownership unavailable" in outcome.note
+        assert "workspace registration changed" in outcome.note
+
+    def test_decomposition_missing_output_still_consumes_the_semantic_round(
+        self,
+        make_ctx: Any,
+        make_work_item: Any,
+    ) -> None:
+        """A missing model output keeps the existing generation retry semantics."""
+        stage = PlanReviewStage()
+        github = FakeStageGitHub(labels=[STATE_NEEDS_PLAN])
+        _seed_canonical_plan(github, 65)
+        item = _review_item(make_work_item, github, issue=65, state="DECOMP_GEN_EVAL")
+        item.payload["decomposition_generation_rounds"] = 1
+
+        outcome = stage.step(item, make_ctx(github=github))
+
+        assert outcome == Continue(next_state="DECOMP_GEN_WAIT")
+        assert item.payload["decomposition_generation_rounds"] == 1
+        assert item.payload["decomposition_generation_retries"] == 1
+
+
 class TestStalePlanRecheck:
     """A stale-plan recheck NO-GO re-plans instead of blocking for a human."""
 
