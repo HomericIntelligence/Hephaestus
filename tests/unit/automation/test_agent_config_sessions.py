@@ -23,6 +23,10 @@ from hephaestus.automation.agent_config import (
     session_name,
     session_uuid,
 )
+from hephaestus.automation.plan_review_session import (
+    decomposition_generation_session_key,
+    decomposition_review_session_key,
+)
 
 
 @pytest.fixture
@@ -117,6 +121,32 @@ class TestSessionName:
         """Only the exact recovery-key form is accepted (PR F-001)."""
         with pytest.raises(ValueError, match="unknown agent"):
             session_name("R", 5, agent)
+
+    def test_decomposition_session_keys_are_session_agents(self) -> None:
+        """One-shot plan decomposition keys pass session validation (#3732)."""
+        epoch = "a" * 64
+        digest = "b" * 64
+        keys = (
+            decomposition_generation_session_key(epoch),
+            decomposition_review_session_key(epoch, digest),
+        )
+
+        for key in keys:
+            assert session_name("R", 2758, key).startswith("R_2758_")
+
+    @pytest.mark.parametrize(
+        "key",
+        [
+            "plan-decomposition-generator:" + "A" * 64,
+            "plan-decomposition-generator:deadbeef",
+            "plan-decomposition-reviewer:" + "a" * 64 + ":" + "B" * 64,
+            "plan-decomposition-reviewer:" + "a" * 64,
+        ],
+    )
+    def test_decomposition_key_shape_rejects_near_misses(self, key: str) -> None:
+        """Only the exact pipeline-created key shapes are accepted."""
+        with pytest.raises(ValueError, match="unknown agent"):
+            session_name("R", 2758, key)
 
     @pytest.mark.parametrize(
         ("repo", "issue"),

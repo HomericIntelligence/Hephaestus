@@ -300,16 +300,14 @@ def _is_valid_agent(agent: str) -> bool:
     base, sep, suffix = agent.rpartition("-r")
     if sep and base in _PER_ITERATION_REVIEWERS and suffix.isdigit():
         return True
-    return bool(
-        re.fullmatch(
+    return any(
+        re.fullmatch(pattern, agent)
+        for pattern in (
             r"plan-reviewer-cycle-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
             r"[0-9a-f]{4}-[0-9a-f]{12}",
-            agent,
-        )
-    ) or bool(
-        re.fullmatch(
             r"requirements-recovery(?:-review)?:[0-9]+:[0-9a-f]+",
-            agent,
+            r"plan-decomposition-generator:[0-9a-f]{64}",
+            r"plan-decomposition-reviewer:[0-9a-f]{64}:[0-9a-f]{64}",
         )
     )
 
@@ -346,8 +344,9 @@ def _joined_session_name(
         raise ValueError(
             f"unknown agent {agent!r}; must be one of {sorted(_ALL_AGENTS)} "
             f"or a scoped reviewer token (e.g. 'plan-reviewer-r0'), "
-            f"a plan-reviewer-cycle-<uuid> token, or a recovery key "
-            f"('requirements-recovery:<issue>:<hex>')"
+            f"a plan-reviewer-cycle-<uuid> token, a recovery key "
+            f"('requirements-recovery:<issue>:<hex>'), or a plan decomposition "
+            f"session key"
         )
     repo_s = repo.strip()
     if not repo_s:
