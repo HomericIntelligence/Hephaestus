@@ -1,6 +1,3 @@
-# This mixin consumes the stage thread namespace by design.
-# ruff: noqa: F403, F405
-
 from hephaestus.agents.execution_policy import (
     AgentOperation,
     AgentRole,
@@ -15,7 +12,51 @@ from ...coordinator_sessions import agent_session_lifecycle
 from ...diagnostics import redact_diagnostic_text
 from ...stage_base import _terminal_pr_outcome, source_workspace_binding
 from ...summary import record_review_run
-from .pr_review_threads import *
+from .pr_review_threads import (
+    _COMMENT_VALIDATION_ONLY,
+    _THREAD_READ_RETRIES,
+    ADOPT_WORKTREE_WAIT,
+    AGENT_PR_REVIEWER,
+    CLEANUP_REVIEW_WORKTREE_WAIT,
+    ENTER,
+    GIT_JOB_TIMEOUT_S,
+    POST,
+    REVIEW_CHECKOUT_RETRY_CAP,
+    REVIEW_CHECKOUT_WAIT,
+    REVIEW_ERROR_RETRY_CAP,
+    REVIEW_WAIT,
+    VALIDATE_WAIT,
+    AgentJob,
+    CompactJob,
+    Continue,
+    Disposition,
+    GitJob,
+    ItemKind,
+    JobRequest,
+    JobResult,
+    ReviewAudit,
+    StageContext,
+    StageOutcome,
+    StepResult,
+    WorkItem,
+    _clear_round_review_state,
+    _issue_number,
+    _normalize_remediation_threads,
+    _parse_review_response,
+    _ParsedReviewResponse,
+    _PrReviewHost,
+    _review_context_kind,
+    _scope_retraction_paths,
+    _thread_snapshots,
+    _worktree_path,
+    agent_provider,
+    is_full_commit_sha,
+    logger,
+    pr_reviewer_claude_timeout,
+    reviewer_model,
+    stage_model,
+    stage_timeout,
+)
 
 
 def empty_diff_outcome(item: WorkItem) -> StageOutcome | None:

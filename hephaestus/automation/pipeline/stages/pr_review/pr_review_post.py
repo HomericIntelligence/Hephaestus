@@ -1,5 +1,3 @@
-# This mixin consumes the stage thread namespace by design.
-# ruff: noqa: F403, F405
 import json
 from pathlib import Path
 
@@ -15,7 +13,37 @@ from ...stage_base import (
     stage_network_deadline,
 )
 from ..durable_request import PENDING_GITHUB_REQUEST, pending_request
-from .pr_review_threads import *
+from .pr_review_threads import (
+    _COMMENT_VALIDATION_ONLY,
+    AGENT_PR_REVIEWER,
+    EVAL,
+    POST,
+    POST_APPLY,
+    REVIEW_ERROR_RETRY_CAP,
+    REVIEW_WAIT,
+    AgentJob,
+    Continue,
+    Disposition,
+    JobRequest,
+    JobResult,
+    ReviewAudit,
+    StageContext,
+    StageOutcome,
+    StepResult,
+    WorkItem,
+    _issue_number,
+    _normalize_remediation_threads,
+    _PrReviewHost,
+    _review_context_kind,
+    _thread_snapshots,
+    _validation_decisions,
+    agent_provider,
+    logger,
+    pr_reviewer_claude_timeout,
+    reviewer_model,
+    stage_model,
+    stage_timeout,
+)
 
 _PR_REVIEW_RECEIPT = "_pr_review_reconciliation_receipt"
 _PR_REVIEW_RECEIPT_ERROR = "_pr_review_reconciliation_error"

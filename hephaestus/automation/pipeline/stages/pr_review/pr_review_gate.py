@@ -1,7 +1,21 @@
-# This mixin consumes the stage thread namespace by design.
-# ruff: noqa: F403, F405
+from typing import Any
+
 from ...stage_base import _terminal_pr_outcome, records_retry_exceeded_cap
-from .pr_review_threads import *
+from .pr_review_threads import (
+    REVIEW_ERROR_RETRY_CAP,
+    STATE_SKIP,
+    Disposition,
+    ReviewAudit,
+    StageContext,
+    StageOutcome,
+    StepResult,
+    WorkItem,
+    _issue_number,
+    _normalize_remediation_threads,
+    _PrReviewHost,
+    logger,
+    write_skip_label,
+)
 
 
 class PrReviewGate(_PrReviewHost):

@@ -1,7 +1,6 @@
-# This mixin consumes the adapter transport namespace by design.
-# ruff: noqa: F403, F405
 import subprocess
 from collections.abc import Callable
+from typing import Any
 
 from hephaestus.automation.comment_identity import (
     has_marker_alias,
@@ -14,7 +13,12 @@ from hephaestus.automation.comment_identity import (
 from hephaestus.automation.protocol import comment_marker_aliases
 
 from .pipeline_github_contract import _PipelineGitHubHost
-from .pipeline_github_transport import *
+from .pipeline_github_transport import (
+    PLAN_CANONICAL_MARKER,
+    LockUnavailableError,
+    github_api,
+    logger,
+)
 from .review_journal import (
     has_exact_leading_marker,
 )
