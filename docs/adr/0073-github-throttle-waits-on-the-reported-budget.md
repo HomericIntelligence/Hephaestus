@@ -22,7 +22,9 @@ does not spend the account budget.
 ## Decision
 
 1. The global throttle reads the GraphQL budget from one cached
-   `gh api rate_limit` probe. The cache lifetime is 30 s for each process.
+   `gh api rate_limit` probe. The cache lifetime is 30 s for each process. One
+   cache entry holds the `(remaining, reset)` pair from the same probe, so a
+   caller does not mix values from two windows.
 2. A budget above 100 remaining points returns immediately. The call does not
    spend a token from the bucket.
 3. A budget at or below 100 remaining points waits until the reported reset
@@ -34,7 +36,13 @@ does not spend the account budget.
    does not probe GitHub in this mode.
 6. The throttle reports the resolved state root one time for each process.
 7. The node-local scope, the private state directory, the lock, the deadline,
-   and the cancellation behavior do not change (ADR-0071).
+   and the cancellation behavior do not change (ADR-0071). The probe obeys the
+   operation deadline and the cancellation event. One probe is in flight at a
+   time, and the throttle re-checks the deadline before it returns.
+8. The throttle accepts a reported reset only when it is within one window
+   (65 minutes). A reset further away can come from a corrupted payload, a
+   clock error, or a value in the wrong unit. The throttle logs a warning and
+   uses the token bucket for that call.
 
 ## Alternatives considered
 
@@ -51,13 +59,20 @@ does not spend the account budget.
 
 - A healthy budget removes the fixed pace from the call path. An operator does
   not need a low `--gh-global-rate` workaround.
+- A healthy budget also skips the token bucket, so requests above the reserve
+  are not serialized across processes. A burst of worker processes can spend
+  points at the same time. The reported budget, refreshed every 30 s, is the
+  control for that case. Each process still sees its own cached view.
 - A depleted GraphQL budget stops the caller until the window resets. A REST
   caller also stops, because one throttle serves the account. This behavior is
   conservative. The account is near a limit.
 - The probe adds one `gh` subprocess call for each 30 s in each process. The
   probe does not spend the account budget.
+- The account budget is global. The reserve and the cache are per host. A
+  second host can spend the budget between probes, and this process cannot see
+  that spend until the next probe.
 - A test must replace the budget probe when it checks the token bucket. The
-  shared test fixture does this.
+  shared test fixture does this and points the throttle at a temporary root.
 
 ## Rollback
 

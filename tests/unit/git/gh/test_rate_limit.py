@@ -9,6 +9,7 @@ import math
 import os
 import subprocess
 import sys
+import threading
 import time
 import types
 from datetime import UTC
@@ -30,7 +31,6 @@ from hephaestus.git.gh.rate_limit import (
     _global_throttle_state_path,
     _node_local_runtime_candidates,
     _rate_limit_probe_cache,
-    _rate_limit_remaining_cache,
     _throttle_remaining,
     configure_gh_global_throttle,
     detect_claude_usage_cap,
@@ -528,6 +528,7 @@ class TestGhRateLimitResetEpoch:
             timeout=10,
             log_on_error=False,
             env=ANY,
+            shutdown=None,
         )
         assert mock_run.call_args.kwargs["env"]["PATH"]
 
@@ -1249,7 +1250,6 @@ class TestGhRateLimitBudget:
 
     def setup_method(self) -> None:
         _rate_limit_probe_cache.clear()
-        _rate_limit_remaining_cache.clear()
 
     def test_returns_remaining_and_reset_from_one_probe(self) -> None:
         payload = '{"resources": {"graphql": {"remaining": 4000, "reset": 1700000000}}}'
@@ -1264,6 +1264,7 @@ class TestGhRateLimitBudget:
             timeout=10,
             log_on_error=False,
             env=ANY,
+            shutdown=None,
         )
 
     def test_shares_one_probe_between_budget_and_reset_callers(self) -> None:
@@ -1307,6 +1308,94 @@ class TestGhRateLimitBudget:
         with patch("hephaestus.git.gh.rate_limit.run_subprocess") as mock_run:
             assert gh_rate_limit_budget(allow_probe=False) == (None, None)
             mock_run.assert_not_called()
+
+    def test_reset_only_probe_refreshes_the_whole_pair(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A reset refresh must not leave a remaining value from an older probe."""
+        now = [100.0]
+        monkeypatch.setattr("hephaestus.git.gh.rate_limit.time.monotonic", lambda: now[0])
+        _rate_limit_probe_cache["graphql"] = (4000, 1_000_000, 1.0)
+        payload = '{"resources": {"graphql": {"remaining": 5, "reset": 2000000}}}'
+        with patch("hephaestus.git.gh.rate_limit.run_subprocess") as mock_run:
+            mock_run.return_value.stdout = payload
+            assert gh_rate_limit_reset_epoch() == 2_000_000
+            assert gh_rate_limit_budget() == (5, 2_000_000)
+            assert mock_run.call_count == 1
+
+    def test_probe_is_bounded_by_the_operation_deadline(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The probe must not run past the remaining operation budget."""
+        now = [100.0]
+        shutdown = threading.Event()
+        monkeypatch.setattr("hephaestus.git.gh.rate_limit.time.monotonic", lambda: now[0])
+        payload = '{"resources": {"graphql": {"remaining": 4000, "reset": 1700000000}}}'
+        with patch("hephaestus.git.gh.rate_limit.run_subprocess") as mock_run:
+            mock_run.return_value.stdout = payload
+            assert gh_rate_limit_budget(deadline_s=104.0, shutdown=shutdown) == (
+                4000,
+                1700000000,
+            )
+
+        assert mock_run.call_args.kwargs["timeout"] == pytest.approx(4.0)
+        assert mock_run.call_args.kwargs["shutdown"] is shutdown
+
+    def test_probe_that_crosses_the_deadline_is_not_cached(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A probe interrupted by the deadline must not leave a 30 s cache entry."""
+        now = [100.0]
+        monkeypatch.setattr("hephaestus.git.gh.rate_limit.time.monotonic", lambda: now[0])
+        payload = '{"resources": {"graphql": {"remaining": 4000, "reset": 1700000000}}}'
+
+        def probe(_cmd: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            now[0] = 111.0
+            return subprocess.CompletedProcess(["gh"], 0, payload, "")
+
+        monkeypatch.setattr("hephaestus.git.gh.rate_limit.run_subprocess", probe)
+
+        with pytest.raises(OperationDeadlineExpired):
+            gh_rate_limit_budget(deadline_s=110.0)
+
+        assert "graphql" not in _rate_limit_probe_cache
+
+    def test_concurrent_callers_share_one_probe(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A cold cache admits one probe, not one subprocess per thread."""
+        entered = threading.Event()
+        release = threading.Event()
+        calls = 0
+
+        def probe(_cmd: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            nonlocal calls
+            calls += 1
+            entered.set()
+            assert release.wait(5)
+            return subprocess.CompletedProcess(
+                ["gh"],
+                0,
+                '{"resources": {"graphql": {"remaining": 7, "reset": 1700000000}}}',
+                "",
+            )
+
+        monkeypatch.setattr("hephaestus.git.gh.rate_limit.run_subprocess", probe)
+        results: list[tuple[int | None, int | None]] = []
+
+        def worker() -> None:
+            results.append(gh_rate_limit_budget())
+
+        first = threading.Thread(target=worker)
+        first.start()
+        assert entered.wait(5)
+        rest = [threading.Thread(target=worker) for _ in range(7)]
+        for thread in rest:
+            thread.start()
+        release.set()
+        for thread in [first, *rest]:
+            thread.join(5)
+
+        assert calls == 1
+        assert results == [(7, 1700000000)] * 8
 
 
 class TestGlobalThrottleBudget:
@@ -1380,7 +1469,25 @@ class TestGlobalThrottleBudget:
 
         assert sleep_calls == []
         assert not state_path.exists()
-        assert "graphql" not in _rate_limit_remaining_cache
+        assert "graphql" not in _rate_limit_probe_cache
+
+    def test_implausible_reset_uses_the_token_bucket(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A reset beyond one window must not become an unbounded sleep."""
+        with caplog.at_level(logging.WARNING, logger="hephaestus.git.gh.rate_limit"):
+            sleep_calls, state_path = self._acquire(
+                monkeypatch,
+                tmp_path,
+                facts=(5, 1_000_000 + 86_400_000),
+            )
+
+        assert sleep_calls == []
+        assert state_path.exists()
+        assert any(record.levelno == logging.WARNING for record in caplog.records)
 
     def test_low_budget_stops_at_the_operation_deadline(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
