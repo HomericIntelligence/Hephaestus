@@ -1,4 +1,4 @@
-"""Shared GraphQL connection pagination for automation GitHub reads."""
+"""Shared GraphQL connection pagination for GitHub reads."""
 
 from __future__ import annotations
 

@@ -6,8 +6,7 @@ import re
 from typing import Any, cast
 
 import hephaestus.automation.github_api as _api
-
-from .pagination import (
+from hephaestus.git.github.policy.pagination import (
     MAX_PR_REVIEW_THREAD_COMMENTS,
     collect_graphql_connection_nodes,
 )

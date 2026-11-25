@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from hephaestus.automation.github_api.pagination import (
+from hephaestus.git.github.policy.pagination import (
     collect_graphql_connection_nodes,
 )
 
