@@ -122,7 +122,10 @@ Repository and direct intake use the same row boundary. Intake does not write
 - **Provider-specific isolation.** Each agent call declares its tool scope
  and workspace binding. Provider admission and host verification apply their
  own process and filesystem boundaries. A tool allowlist alone does not
- provide an OS sandbox. See [agent policy](../AGENTS.md#agent-runtime).
+ provide an OS sandbox. Follow the
+  [agent authority and host permissions policy](https://github.com/HomericIntelligence/Athena/blob/main/docs/policies/agent-authority.md)
+  for authority, host permissions, security invariants, and stop conditions.
+  See [agent policy](../AGENTS.md#agent-runtime).
 - **No MCP runtime dependency.** `.mcp.json` is intentionally empty. Plugin
  marketplaces, NATS JetStream and HTTP REST remain the maintained
  integration contracts ([ADR-0011](adr/0011-mcp-integration-posture.md)).
