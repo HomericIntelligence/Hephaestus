@@ -158,9 +158,7 @@ from ...plan_journal import (
     DecompositionReviewReceipt,
     DecompositionSeal,
     DecompositionTransitionReceipt,
-    PlanNogoRecord,
     plan_nogo_count,
-    plan_nogo_digest,
     plan_nogo_records,
     publish_decomposition_bindings,
     publish_decomposition_draft,
@@ -168,7 +166,6 @@ from ...plan_journal import (
     publish_decomposition_review_receipt,
     publish_decomposition_seal,
     publish_decomposition_transition,
-    publish_plan_nogo,
     publish_plan_revision,
     reconcile_plan_journal,
     recover_decomposition_bindings,
@@ -1450,11 +1447,6 @@ class PlanReviewStage(Stage):
         if item.state == FEEDBACK_WAIT:
             return self._submit_feedback_integrate_job(item, ctx)
 
-        if item.state.startswith("DECOMP_"):
-            decomposition_outcome = self._decomposition_step(item, ctx)
-            if decomposition_outcome is not None:
-                return decomposition_outcome
-
         logger.warning("plan_review:%d: unknown state %r", item.issue, item.state)
         return StageOutcome(Disposition.FINISH_FAIL, f"unknown state: {item.state}")
 
@@ -1484,17 +1476,6 @@ class PlanReviewStage(Stage):
                 Disposition.FINISH_FAIL,
                 "planning made no progress; the plan did not change",
             )
-
-        # Restart reconciliation (issue #2982): a prior run that already
-        # reached a decomposition trigger starts or resumes decomposition
-        # without another plan review. Durable NOGO records and the
-        # complete-plan size are the only authority.
-        assert item.issue is not None  # noqa: S101 - step() validates the issue
-        comments = ctx.github.issue_comments(item.issue)
-        epoch = requirements_epoch(_issue_body(item))
-        trigger = decomposition_required(item, comments, epoch=epoch)
-        if trigger is not None and item.issue not in ctx.generated_issue_ids:
-            return self._start_or_resume_decomposition(item, ctx, trigger)
 
         # Counters advance in EVAL, and only for real verdicts — a
         # submission is not an iteration (#1554/#1794). The 0-based
@@ -1528,6 +1509,7 @@ class PlanReviewStage(Stage):
         )
         workspace = planning_source_workspace_binding(item, ctx)
         verdict_followup = bool(item.payload.pop("review_verdict_followup_pending", False))
+        assert item.issue is not None  # noqa: S101 - step() validates the issue
         job = AgentJob(
             repo=item.repo,
             issue=item.issue,
@@ -1883,57 +1865,6 @@ class PlanReviewStage(Stage):
             return StageOutcome(Disposition.RETRY, "plan-no-go label was not confirmed")
         if identity_outcome := self._review_identity_outcome(item, ctx, review):
             return identity_outcome
-
-        # Every real NOGO verdict is durable control state bound to its review
-        # identity. The record never persists for infrastructure failures, so
-        # the convergence count only reads real judgements (#2982).
-        epoch = requirements_epoch(_issue_body(item))
-        record = PlanNogoRecord(
-            repository=item.repo,
-            issue=item.issue,
-            requirements_epoch=epoch,
-            plan_revision=review.revision,
-            review_cycle=item.attempts.get("plan_cycles", 0),
-            review_round=review.charged_round or 0,
-            review_digest=plan_nogo_digest(
-                plan_revision=review.revision,
-                review_cycle=item.attempts.get("plan_cycles", 0),
-                review_round=review.charged_round or 0,
-                review_raw=verdict.raw,
-            ),
-            findings=_nogo_findings(item),
-            recorded_at=recorded_at(),
-        )
-        publish_plan_nogo(item.issue, record, ctx.github)
-        if item.issue in ctx.generated_issue_ids:
-            # Same-run generated-child rule (issue #2982): persist and confirm
-            # the one valid NOGO record and the exclusive state:plan-no-go
-            # label, create no decomposition artifact, skip only this run, and
-            # keep the label so a later run discovers the issue again.
-            _complete_review_cycle(item, ctx)
-            logger.info(
-                "plan_review:%d: generated child defers decomposition to a later run",
-                item.issue,
-            )
-            return StageOutcome(Disposition.SKIP, GENERATED_CHILD_DEFERRAL)
-        trigger = decomposition_required(
-            item,
-            ctx.github.issue_comments(item.issue),
-            epoch=epoch,
-        )
-        if trigger is not None:
-            # The record is durable first, so a later run or a restart keeps
-            # the confirmed convergence count. The stage now owns the
-            # decomposition transaction (#2982).
-            item.payload[_DECOMP_TRIGGER_KEY] = trigger
-            logger.warning(
-                "plan_review:%d: %s decomposition trigger after round %d",
-                item.issue,
-                trigger,
-                review.charged_round,
-            )
-            _complete_review_cycle(item, ctx)
-            return self._start_or_resume_decomposition(item, ctx, trigger)
 
         # NOGO: amend within the cycle-relative budget.
         budget_iter = ctx.budget("plan_review_iter")

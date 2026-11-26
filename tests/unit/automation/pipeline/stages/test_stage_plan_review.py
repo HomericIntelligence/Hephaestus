@@ -19,17 +19,7 @@ from hephaestus.automation.learning_journal import LearningJournalStore
 from hephaestus.automation.pipeline.diagnostics import bounded_pipeline_diagnostic
 from hephaestus.automation.pipeline.jobs import AgentJob, JobResult
 from hephaestus.automation.pipeline.plan_journal import (
-    NOGO_MARKER_PREFIX,
-    PlanNogoRecord,
-    plan_nogo_count,
-    plan_nogo_digest,
-    publish_plan_nogo,
     publish_plan_revision,
-    recover_decomposition_bindings,
-    recover_decomposition_intent,
-    recover_decomposition_seal,
-    recover_decomposition_transition,
-    requirements_epoch,
 )
 from hephaestus.automation.pipeline.routing import Disposition
 from hephaestus.automation.pipeline.stages import (
@@ -110,35 +100,13 @@ def _seed_canonical_plan(github: FakeStageGitHub, issue: int, plan: str = "Durab
     ]
 
 
-def _nogo_record_marker(
-    item: Any,
-    *,
-    plan_revision: int | None = None,
-    review_cycle: int | None = None,
-    review_round: int | None = None,
-    review_raw: str | None = None,
-) -> str:
-    """Return the durable NOGO record marker the stage publishes for *item*.
-
-    The stage computes the digest before ``plan_cycles`` increments, and an
-    ERROR eval clears the accepted review, so tests pass the pre-increment
-    values explicitly when the item state moved on.
-    """
-    review = item.payload.get("accepted_plan_review")
-    raw = getattr(getattr(review, "verdict", None), "raw", "") if review_raw is None else review_raw
-    digest = plan_nogo_digest(
-        plan_revision=(
-            int(item.payload.get("plan_revision") or 0) if plan_revision is None else plan_revision
-        ),
-        review_cycle=(
-            item.attempts.get("plan_cycles", 0) if review_cycle is None else review_cycle
-        ),
-        review_round=(
-            int(getattr(review, "charged_round", 0) or 0) if review_round is None else review_round
-        ),
-        review_raw=str(raw),
+def _finalized_body(content: str = "## Why\n\nUse the reviewed implementation plan.") -> str:
+    """Return a finalized planning body fixture."""
+    return (
+        f"{content}\n\n"
+        f"{ATHENA_FINALIZED_PLAN_PREFIX}R={'a' * 64} P=123456789:{'b' * 64} "
+        f"V=987654321:{'c' * 64} F={'d' * 64} -->"
     )
-    return f"{NOGO_MARKER_PREFIX}{digest} -->"
 
 
 def _review_item(make_work_item: Any, github: FakeStageGitHub, **kwargs: Any) -> Any:
@@ -1361,8 +1329,6 @@ class TestPlanReviewStageStep:
                 "edit_labels",
                 (4, (STATE_PLAN_NO_GO,), (STATE_PLAN_GO, STATE_NEEDS_PLAN)),
             ),
-            # Every real NOGO verdict persists one durable record (#2982).
-            ("gh_issue_upsert_comment", (4, _nogo_record_marker(item))),
         ]
         assert item.payload["review_round"] == 1  # round counted in EVAL
         assert item.attempts["plan_review_iter"] == 1  # lifetime audit trail
@@ -1406,7 +1372,6 @@ class TestPlanReviewStageStep:
                 "edit_labels",
                 (5, (STATE_PLAN_NO_GO,), (STATE_PLAN_GO, STATE_NEEDS_PLAN)),
             ),
-            ("gh_issue_upsert_comment", (5, _nogo_record_marker(item, review_cycle=0))),
         ]
 
     def test_eval_nogo_plan_cycles_exhausted(self, make_ctx: Any, make_work_item: Any) -> None:
@@ -1732,12 +1697,10 @@ class TestPlanReviewStageOnJobDone:
         stage.on_job_done(item, JobResult(ok=True, value="Plan v2 with tests"), ctx)
 
         comments = github.comments[2]
-        assert len(comments) == 3
+        assert len(comments) == 2
         assert comments[0].startswith(PLAN_CANONICAL_MARKER)
         assert "<!-- revision: 2 -->" in comments[0]
         assert comments[1].startswith(PLAN_REVIEW_CANONICAL_MARKER)
-        # The durable NOGO record comment stays last (#2982).
-        assert comments[2].startswith(NOGO_MARKER_PREFIX)
 
     def test_revised_plan_waits_for_exclusive_needs_plan_confirmation(
         self, make_ctx: Any, make_work_item: Any
@@ -2218,15 +2181,6 @@ class TestStaleVerdictAndErrorAccounting:
                 "edit_labels",
                 (30, (STATE_PLAN_NO_GO,), (STATE_PLAN_GO, STATE_NEEDS_PLAN)),
             ),
-            (
-                "gh_issue_upsert_comment",
-                (
-                    30,
-                    _nogo_record_marker(
-                        item, plan_revision=1, review_round=1, review_raw=_NOGO_RAW
-                    ),
-                ),
-            ),
             ("gh_issue_upsert_comment", (30, PLAN_CANONICAL_MARKER)),
             ("gh_issue_upsert_comment", (30, PLAN_REVIEW_CANONICAL_MARKER)),
             (
@@ -2277,11 +2231,6 @@ class TestStaleVerdictAndErrorAccounting:
                 "edit_labels",
                 (31, (STATE_PLAN_NO_GO,), (STATE_PLAN_GO, STATE_NEEDS_PLAN)),
             ),
-            # The prior round's real NOGO persisted one durable record (#2982).
-            (
-                "gh_issue_upsert_comment",
-                (31, _nogo_record_marker(item, review_round=1, review_raw=_NOGO_RAW)),
-            ),
         ]  # prior NOGO is durable; ERROR adds no mutation
 
         # A completed retry supplies a new review result.
@@ -2297,18 +2246,10 @@ class TestStaleVerdictAndErrorAccounting:
                 "edit_labels",
                 (31, (STATE_PLAN_NO_GO,), (STATE_PLAN_GO, STATE_NEEDS_PLAN)),
             ),
-            (
-                "gh_issue_upsert_comment",
-                (31, _nogo_record_marker(item, review_round=1, review_raw=_NOGO_RAW)),
-            ),
             ("gh_issue_upsert_comment", (31, PLAN_REVIEW_CANONICAL_MARKER)),
             (
                 "edit_labels",
                 (31, (STATE_PLAN_NO_GO,), (STATE_PLAN_GO, STATE_NEEDS_PLAN)),
-            ),
-            (
-                "gh_issue_upsert_comment",
-                (31, _nogo_record_marker(item, review_round=2, review_raw=_NOGO_RAW)),
             ),
         ]
 
@@ -2415,22 +2356,13 @@ class TestCycleRelativeBudget:
         assert item.attempts["plan_cycles"] == 1
 
         # Fail-back routes through planning; the item re-enters this stage.
-        # The fifth real NOGO in one requirements epoch starts the
-        # decomposition transaction before the sixth review (#2982).
         item.state = "ENTER"
-        second = run_cycle([0, 1])
-        assert isinstance(second, Continue)
-        assert second.next_state == "DECOMP_GEN_WAIT"
-        assert item.attempts["plan_review_iter"] == 5  # lifetime audit trail
-        assert item.attempts["plan_cycles"] == 1  # the trigger fired within cycle 2
-        # The intent is durable before the generation job runs (#2982).
-        comments = github.issue_comments(33)
-        epoch = requirements_epoch(str(item.payload.get("issue_body") or ""))
-        assert recover_decomposition_intent(comments, epoch) is not None
-        item.state = "DECOMP_GEN_WAIT"
-        generation = stage.step(item, ctx)
-        assert isinstance(generation, JobRequest)
-        assert generation.job.descr == "decompose"
+        second = run_cycle([0, 1, 2])
+        assert isinstance(second, StageOutcome)
+        assert second.disposition == Disposition.FAIL_BACK
+        assert second.note == "plan_cycles_exhausted"
+        assert item.attempts["plan_review_iter"] == 6
+        assert item.attempts["plan_cycles"] == 2
 
     def test_new_cycle_gets_full_error_retry_budget(
         self, make_ctx: Any, make_work_item: Any
@@ -2511,7 +2443,6 @@ class TestAtomicLabelWrites:
                 "edit_labels",
                 (35, (STATE_PLAN_NO_GO,), (STATE_PLAN_GO, STATE_NEEDS_PLAN)),
             ),
-            ("gh_issue_upsert_comment", (35, _nogo_record_marker(item, review_cycle=0))),
         ]
 
 
@@ -2601,15 +2532,6 @@ class TestReviewFlowWithFakePool:
             (
                 "edit_labels",
                 (21, (STATE_PLAN_NO_GO,), (STATE_PLAN_GO, STATE_NEEDS_PLAN)),
-            ),
-            (
-                "gh_issue_upsert_comment",
-                (
-                    21,
-                    _nogo_record_marker(
-                        item, plan_revision=1, review_round=1, review_raw=_NOGO_RAW
-                    ),
-                ),
             ),
             ("gh_issue_upsert_comment", (21, PLAN_CANONICAL_MARKER)),
             ("gh_issue_upsert_comment", (21, PLAN_REVIEW_CANONICAL_MARKER)),
@@ -2965,345 +2887,6 @@ def _seed_oversized_plan(github: FakeStageGitHub, issue: int) -> None:
     plan = "## Oversized plan\n\n" + ("A large decision paragraph.\n" * 2_000)
     _seed_canonical_plan(github, issue, plan)
 
-
-class TestPlanDecompositionTriggers:
-    """Durable decomposition triggers (issue #2982)."""
-
-    def test_fifth_nogo_starts_decomposition_without_sixth_review(
-        self, make_ctx: Any, make_work_item: Any
-    ) -> None:
-        """The fifth real NOGO blocks for decomposition instead of a sixth review."""
-        stage = PlanReviewStage()
-        github = FakeStageGitHub()
-        _seed_canonical_plan(github, 50)
-        ctx = make_ctx(github=github)
-        item = make_work_item(issue=50, state="ENTER")
-        assert stage.on_enter(item, ctx) is None
-
-        for round_index in range(4):
-            item.state = "EVAL"
-            item.payload["review_round"] = round_index
-            item.payload["review_verdict"] = _verdict("NOGO")
-            outcome = stage.step(item, ctx)
-            # Rounds 1..4 stay inside the amendment budget or fail back.
-            assert isinstance(outcome, (StageOutcome, Continue))
-            if isinstance(outcome, StageOutcome):
-                assert outcome.disposition is not Disposition.BLOCKED
-            item.state = "AMEND_WAIT"
-            stage.on_job_done(item, JobResult(ok=True, value=f"# Amended r{round_index}"), ctx)
-            item.state = "REVIEW_WAIT"
-            stage.step(item, ctx)
-
-        item.state = "EVAL"
-        item.payload["review_round"] = 4
-        item.payload["review_verdict"] = _verdict("NOGO")
-        outcome = stage.step(item, ctx)
-
-        # The fifth NOGO starts the decomposition transaction (#2982): the
-        # intent record is durable before the generation job, and the stage
-        # continues into the generation wait state without a sixth review.
-        assert isinstance(outcome, Continue)
-        assert outcome.next_state == "DECOMP_GEN_WAIT"
-        assert (
-            plan_nogo_count(
-                github.issue_comments(50),
-                requirements_epoch(str(item.payload.get("issue_body", ""))),
-            )
-            == 5
-        )
-        assert (
-            recover_decomposition_intent(
-                github.issue_comments(50),
-                requirements_epoch(str(item.payload.get("issue_body", ""))),
-            )
-            is not None
-        )
-        item.state = "DECOMP_GEN_WAIT"
-        generation = stage.step(item, ctx)
-        assert isinstance(generation, JobRequest)
-        assert generation.job.descr == "decompose"
-
-    def test_oversized_plan_decomposes_after_first_nogo(
-        self, make_ctx: Any, make_work_item: Any
-    ) -> None:
-        """An oversized plan skips amendment after its first NOGO verdict."""
-        stage = PlanReviewStage()
-        github = FakeStageGitHub()
-        _seed_oversized_plan(github, 51)
-        ctx = make_ctx(github=github)
-        item = _review_item(make_work_item, github, issue=51, state="EVAL")
-        item.payload["review_round"] = 0
-        item.payload["review_verdict"] = _verdict("NOGO")
-
-        outcome = stage.step(item, ctx)
-
-        # The first oversized-plan NOGO skips amendment and starts the
-        # decomposition transaction directly (#2982).
-        assert isinstance(outcome, Continue)
-        assert outcome.next_state == "DECOMP_GEN_WAIT"
-        assert (
-            recover_decomposition_intent(
-                github.issue_comments(51),
-                requirements_epoch(str(item.payload.get("issue_body", ""))),
-            )
-            is not None
-        )
-
-    def test_provider_error_or_timeout_or_invalid_verdict_does_not_increment_nogo(
-        self, make_ctx: Any, make_work_item: Any
-    ) -> None:
-        """Infrastructure failures never persist a NOGO record."""
-        stage = PlanReviewStage()
-        github = FakeStageGitHub()
-        _seed_canonical_plan(github, 52)
-        ctx = make_ctx(github=github)
-        item = _review_item(make_work_item, github, issue=52, state="EVAL")
-
-        # Reviewer infrastructure ERROR rounds leave labels and records alone.
-        for _attempt in range(REVIEW_ERROR_RETRY_CAP):
-            item.state = "EVAL"
-            item.payload["review_verdict"] = _verdict("ERROR")
-            outcome = stage.step(item, ctx)
-            assert isinstance(outcome, StageOutcome)
-            assert outcome.disposition is Disposition.RETRY
-
-        epoch = requirements_epoch(str(item.payload.get("issue_body", "")))
-        assert plan_nogo_count(github.issue_comments(52), epoch) == 0
-        assert github.mutation_log == []
-
-    def test_ordinary_nogo_still_amends(self, make_ctx: Any, make_work_item: Any) -> None:
-        """A fitting plan with one NOGO keeps the amendment path."""
-        stage = PlanReviewStage()
-        github = FakeStageGitHub()
-        _seed_canonical_plan(github, 53)
-        ctx = make_ctx(github=github)
-        item = _review_item(make_work_item, github, issue=53, state="EVAL")
-        item.payload["review_round"] = 0
-        item.payload["review_verdict"] = _verdict("NOGO")
-
-        outcome = stage.step(item, ctx)
-
-        assert isinstance(outcome, Continue)
-        assert outcome.next_state == "AMEND_WAIT"
-
-    def test_plan_cycle_reset_preserves_convergence_count(
-        self, make_ctx: Any, make_work_item: Any
-    ) -> None:
-        """A new plan cycle keeps the epoch NOGO count durable."""
-        stage = PlanReviewStage()
-        github = FakeStageGitHub()
-        _seed_canonical_plan(github, 54)
-        ctx = make_ctx(github=github)
-        item = make_work_item(issue=54, state="ENTER")
-        assert stage.on_enter(item, ctx) is None
-
-        for round_index in range(3):
-            item.state = "EVAL"
-            item.payload["review_round"] = round_index
-            item.payload["review_verdict"] = _verdict("NOGO")
-            stage.step(item, ctx)
-            item.state = "AMEND_WAIT"
-            stage.on_job_done(item, JobResult(ok=True, value=f"# Amended r{round_index}"), ctx)
-            item.state = "REVIEW_WAIT"
-            stage.step(item, ctx)
-
-        epoch = requirements_epoch(str(item.payload.get("issue_body", "")))
-        count_after_cycle_one = plan_nogo_count(github.issue_comments(54), epoch)
-        assert count_after_cycle_one == 3
-
-        # Fail-back re-entry resets the cycle-relative round, not the count.
-        item.state = "ENTER"
-        item.attempts["plan_cycles"] = 1
-        assert stage.on_enter(item, ctx) is None
-        assert item.payload["review_round"] == 0
-        assert plan_nogo_count(github.issue_comments(54), epoch) == count_after_cycle_one
-
-
-class TestGeneratedChildDeferral:
-    """The same-run generated-child rule (issue #2982)."""
-
-    def test_generated_child_persists_nogo_once_and_defers(
-        self, make_ctx: Any, make_work_item: Any
-    ) -> None:
-        """A generated child persists one NOGO record, keeps the label, and SKIPs."""
-        stage = PlanReviewStage()
-        github = FakeStageGitHub()
-        _seed_canonical_plan(github, 60)
-        ctx = make_ctx(github=github)
-        ctx.generated_issue_ids.add(60)
-        item = _review_item(make_work_item, github, issue=60, state="EVAL")
-        item.payload["review_round"] = 0
-        item.payload["review_verdict"] = _verdict("NOGO")
-
-        outcome = stage.step(item, ctx)
-
-        assert isinstance(outcome, StageOutcome)
-        assert outcome.disposition is Disposition.SKIP
-        assert outcome.note == "generated-child decomposition deferred to a later run"
-        epoch = requirements_epoch(str(item.payload.get("issue_body", "")))
-        assert plan_nogo_count(github.issue_comments(60), epoch) == 1
-        labels = {
-            entry["name"]
-            for entry in github.gh_issue_json(60).get("labels", [])
-            if isinstance(entry, dict)
-        }
-        assert "state:plan-no-go" in labels
-        # No decomposition artifact exists for the generated child.
-        comments = github.issue_comments(60)
-        assert recover_decomposition_intent(comments, epoch) is None
-
-    def test_generated_child_creates_no_decomposition_artifacts(
-        self, make_ctx: Any, make_work_item: Any
-    ) -> None:
-        """The SKIP path never amends and never records a second NOGO."""
-        stage = PlanReviewStage()
-        github = FakeStageGitHub()
-        _seed_canonical_plan(github, 61)
-        ctx = make_ctx(github=github)
-        ctx.generated_issue_ids.add(61)
-        item = _review_item(make_work_item, github, issue=61, state="EVAL")
-        item.payload["review_round"] = 0
-        item.payload["review_verdict"] = _verdict("NOGO")
-
-        first = stage.step(item, ctx)
-        assert isinstance(first, StageOutcome)
-        assert first.disposition is Disposition.SKIP
-
-        # The item never re-runs: no amendment or decomposition job follows.
-        epoch = requirements_epoch(str(item.payload.get("issue_body", "")))
-        comments = github.issue_comments(61)
-        assert plan_nogo_count(comments, epoch) == 1
-        assert recover_decomposition_intent(comments, epoch) is None
-        assert recover_decomposition_seal(comments, epoch) is None
-        assert recover_decomposition_bindings(comments, epoch) is None
-        assert recover_decomposition_transition(comments, epoch) is None
-
-    def test_generated_child_keeps_plan_no_go(self, make_ctx: Any, make_work_item: Any) -> None:
-        """state:plan-no-go stays durable so a later run rediscovers the issue."""
-        stage = PlanReviewStage()
-        github = FakeStageGitHub()
-        _seed_canonical_plan(github, 62)
-        ctx = make_ctx(github=github)
-        ctx.generated_issue_ids.add(62)
-        item = _review_item(make_work_item, github, issue=62, state="EVAL")
-        item.payload["review_round"] = 0
-        item.payload["review_verdict"] = _verdict("NOGO")
-
-        stage.step(item, ctx)
-
-        labels = {
-            entry["name"]
-            for entry in github.gh_issue_json(62).get("labels", [])
-            if isinstance(entry, dict)
-        }
-        assert "state:plan-no-go" in labels
-        assert "state:plan-go" not in labels
-        assert "state:needs-plan" not in labels
-
-
-class TestLaterRunRecovery:
-    """A later run counts the durable NOGO and decomposes without a review (#2982)."""
-
-    def test_later_run_recovers_generated_child_nogo_count_and_decomposes_without_another_review(
-        self, make_ctx: Any, make_work_item: Any
-    ) -> None:
-        """A fresh run (empty generated set) resumes decomposition directly."""
-        stage = PlanReviewStage()
-        github = FakeStageGitHub()
-        _seed_oversized_plan(github, 63)
-        epoch = requirements_epoch(str(github.gh_issue_json(63).get("body") or ""))
-        # One prior run confirmed this generated child's NOGO record.
-        record = PlanNogoRecord(
-            repository="test-org/test-repo",
-            issue=63,
-            requirements_epoch=epoch,
-            plan_revision=1,
-            review_cycle=0,
-            review_round=1,
-            review_digest=plan_nogo_digest(
-                plan_revision=1,
-                review_cycle=0,
-                review_round=1,
-                review_raw="state:plan-no-go",
-            ),
-            findings=(),
-            recorded_at="2026-01-01T00:00:00+00:00",
-        )
-        publish_plan_nogo(63, record, github)
-
-        ctx = make_ctx(github=github)
-        item = make_work_item(issue=63, state="ENTER")
-        assert stage.on_enter(item, ctx) is None
-        assert isinstance(stage.step(item, ctx), Continue)  # ENTER
-        item.state = "REVIEW_WAIT"
-
-        outcome = stage.step(item, ctx)
-
-        # The durable trigger reconciles before any review request (#2982).
-        assert isinstance(outcome, Continue)
-        assert outcome.next_state == "DECOMP_GEN_WAIT"
-        assert recover_decomposition_intent(github.issue_comments(63), epoch) is not None
-
-
-class TestDecompositionDryRun:
-    """Dry-run decomposition reports the preview and never mutates (#2982)."""
-
-    def test_decomposition_dry_run_reports_complete_preview(
-        self, make_ctx: Any, make_work_item: Any, caplog: Any
-    ) -> None:
-        """A dry run parses and reports without comments, records, or labels."""
-        stage = PlanReviewStage()
-        github = FakeStageGitHub()
-        _seed_oversized_plan(github, 64)
-        epoch = requirements_epoch(str(github.gh_issue_json(64).get("body") or ""))
-        record = PlanNogoRecord(
-            repository="test-org/test-repo",
-            issue=64,
-            requirements_epoch=epoch,
-            plan_revision=1,
-            review_cycle=0,
-            review_round=1,
-            review_digest=plan_nogo_digest(
-                plan_revision=1,
-                review_cycle=0,
-                review_round=1,
-                review_raw="state:plan-no-go",
-            ),
-            findings=(),
-            recorded_at="2026-01-01T00:00:00+00:00",
-        )
-        publish_plan_nogo(64, record, github)
-        mutations_before = len(github.mutation_log)
-
-        ctx = make_ctx(github=github, dry_run=True)
-        item = make_work_item(issue=64, state="ENTER")
-        assert stage.on_enter(item, ctx) is None
-        assert isinstance(stage.step(item, ctx), Continue)  # ENTER
-        item.state = "REVIEW_WAIT"
-
-        with caplog.at_level(logging.WARNING):
-            outcome = stage.step(item, ctx)
-
-        assert isinstance(outcome, StageOutcome)
-        assert outcome.disposition is Disposition.BLOCKED
-        assert outcome.note == "plan_decomposition_dry_run_preview"
-        # No GitHub mutation and no queue entry happened.
-        assert len(github.mutation_log) == mutations_before
-        assert "decomposition dry-run preview" in caplog.text
-        assert "lossless-size" in caplog.text
-        assert "state:needs-plan" in caplog.text
-
-
-def _finalized_body(content: str = "## Why\n\nUse the reviewed implementation plan.") -> str:
-    """Return a finalized planning body fixture."""
-    return (
-        f"{content}\n\n"
-        f"{ATHENA_FINALIZED_PLAN_PREFIX}R={'a' * 64} P=123456789:{'b' * 64} "
-        f"V=987654321:{'c' * 64} F={'d' * 64} -->"
-    )
-
-
-class TestFinalizedPlanAdmission:
     """A durable Athena finalized plan is admitted without plan comments (#3665)."""
 
     @staticmethod
@@ -3457,84 +3040,6 @@ class TestPreAgentFailureClassification:
         assert outcome.disposition is Disposition.FINISH_FAIL
         assert "source workspace ownership unavailable" in outcome.note
         assert "workspace registration changed" in outcome.note
-
-    def test_decomposition_pre_agent_failure_does_not_consume_a_model_round(
-        self,
-        make_ctx: Any,
-        make_work_item: Any,
-    ) -> None:
-        """A generation job that never ran gives its semantic round back."""
-        stage = PlanReviewStage()
-        github = FakeStageGitHub(labels=[STATE_NEEDS_PLAN])
-        _seed_canonical_plan(github, 63)
-        ctx = make_ctx(github=github)
-        item = _review_item(make_work_item, github, issue=63, state="DECOMP_GEN_WAIT")
-        item.payload["decomposition_generation_rounds"] = 1
-
-        stage.on_job_done(
-            item,
-            JobResult(
-                ok=False,
-                error="SourceWorkspacePreparationError: source workspace is unavailable",
-                pre_agent_failure="source_workspace_preparation",
-            ),
-            ctx,
-        )
-        item.state = "DECOMP_GEN_EVAL"
-        outcome = stage.step(item, ctx)
-
-        assert outcome == Continue(next_state="DECOMP_GEN_WAIT")
-        assert item.payload["decomposition_generation_rounds"] == 0
-        assert item.payload["decomposition_pre_agent_failure_retries"] == 1
-        assert "decomposition_generation_retries" not in item.payload
-
-    def test_decomposition_pre_agent_ownership_failure_fails_closed(
-        self,
-        make_ctx: Any,
-        make_work_item: Any,
-    ) -> None:
-        """A decomposition ownership conflict does not retry the model."""
-        stage = PlanReviewStage()
-        github = FakeStageGitHub(labels=[STATE_NEEDS_PLAN])
-        _seed_canonical_plan(github, 64)
-        ctx = make_ctx(github=github)
-        item = _review_item(make_work_item, github, issue=64, state="DECOMP_GEN_WAIT")
-        item.payload["decomposition_generation_rounds"] = 1
-
-        stage.on_job_done(
-            item,
-            JobResult(
-                ok=False,
-                error="SourceWorkspaceError: workspace registration changed",
-                pre_agent_failure="source_workspace_ownership",
-            ),
-            ctx,
-        )
-        item.state = "DECOMP_GEN_EVAL"
-        outcome = stage.step(item, ctx)
-
-        assert isinstance(outcome, StageOutcome)
-        assert outcome.disposition is Disposition.FINISH_FAIL
-        assert "source workspace ownership unavailable" in outcome.note
-        assert "workspace registration changed" in outcome.note
-
-    def test_decomposition_missing_output_still_consumes_the_semantic_round(
-        self,
-        make_ctx: Any,
-        make_work_item: Any,
-    ) -> None:
-        """A missing model output keeps the existing generation retry semantics."""
-        stage = PlanReviewStage()
-        github = FakeStageGitHub(labels=[STATE_NEEDS_PLAN])
-        _seed_canonical_plan(github, 65)
-        item = _review_item(make_work_item, github, issue=65, state="DECOMP_GEN_EVAL")
-        item.payload["decomposition_generation_rounds"] = 1
-
-        outcome = stage.step(item, make_ctx(github=github))
-
-        assert outcome == Continue(next_state="DECOMP_GEN_WAIT")
-        assert item.payload["decomposition_generation_rounds"] == 1
-        assert item.payload["decomposition_generation_retries"] == 1
 
 
 class TestStalePlanRecheck:
