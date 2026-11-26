@@ -1192,16 +1192,6 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
             return
         disposition = outcome.disposition
 
-        if item.stage is ct.StageName.PLAN_REVIEW and isinstance(
-            item.payload.get("decomposition_children"), list
-        ):
-            # Child admission owns the durable transition before the parent's
-            # own terminal routing runs (#2982). Admission may finish the
-            # parent failed and queue no child when verification refuses.
-            self._admit_decomposition_children(item)
-            if item.stage is not ct.StageName.PLAN_REVIEW or item.result is not None:
-                return
-
         if item.stage is ct.StageName.FINISHED:
             # Sink outcomes are terminal: the result is already recorded.
             self._record_event("done", self._item_key(item), outcome.note)
@@ -1528,10 +1518,6 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
 
     def _finish(self, item: ct.WorkItem, *, passed: bool, reason: str) -> None:
         """Set the item's result and hand it to the finished sink."""
-        # Decomposition admission releases or blocks descendants when one
-        # finished child's own run ends (#2982). The hook runs for every
-        # finished work item; only child items match an open graph entry.
-        self._release_decomposition_dependents(item, passed=passed)
         if self._fleet_executor is not None and item.issue == self._fleet_executor.attempt.issue:
             self._hold_fleet_item(item, "reconciliation_required", reason=reason)
             return
