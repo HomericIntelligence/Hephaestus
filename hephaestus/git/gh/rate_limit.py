@@ -472,16 +472,6 @@ GLOBAL_THROTTLE_SCOPE = "machine"
 _global_throttle_rate = _DEFAULT_GLOBAL_RATE
 _global_throttle_burst = _DEFAULT_BURST
 _global_throttle_directory: Path | None = None
-_logged_runtime_base: Path | None = None
-
-
-def _log_runtime_base_once(base: Path) -> None:
-    """Report the resolved throttle root once per process and distinct root."""
-    global _logged_runtime_base
-    if base == _logged_runtime_base:
-        return
-    _logged_runtime_base = base
-    logger.debug("GitHub throttle scope=%s root=%s", GLOBAL_THROTTLE_SCOPE, base)
 
 
 def configure_gh_global_throttle(
