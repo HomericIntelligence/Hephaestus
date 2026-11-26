@@ -13,6 +13,7 @@ import json
 import logging
 import shlex
 import sys
+import urllib.parse
 import urllib.request
 from collections.abc import Callable, Mapping
 from importlib.metadata import PackageNotFoundError, distribution, version as distribution_version
@@ -47,8 +48,13 @@ _check_completed = False
 
 def _fetch_release_metadata(url: str, timeout: float) -> Mapping[str, Any]:
     """Fetch and decode size-bounded release metadata from the package index."""
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.scheme != "https" or not parsed.netloc:
+        raise ValueError("release metadata URL must be an absolute HTTPS URL")
+    # The scheme and host are validated as HTTPS above; no local or custom
+    # scheme reaches the request.
     request = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT})
-    with urllib.request.urlopen(request, timeout=timeout) as response:
+    with urllib.request.urlopen(request, timeout=timeout) as response:  # nosec B310
         payload = response.read(_MAX_RESPONSE_BYTES + 1)
     if len(payload) > _MAX_RESPONSE_BYTES:
         raise ValueError("release metadata exceeds the response size cap")
