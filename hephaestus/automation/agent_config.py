@@ -491,35 +491,44 @@ def _registered_worktree_roots(
 
     The explicit invocation path is authoritative. Ambient Git repository
     environment variables are removed so an outer checkout cannot redirect
-    this discovery to a different repository.
+    this discovery to a different repository. Git before 2.36 rejects ``-z``
+    with exit status 129. One retry uses the line-based porcelain format.
     """
     resolved_cwd = cwd.resolve()
     roots = {resolved_cwd}
     timeout = min(5, remaining_timeout()) if remaining_timeout is not None else 5
-    try:
+    env = _repo_scoped_git_env()
+    base_argv = ["git", "-C", str(resolved_cwd), "worktree", "list", "--porcelain"]
+
+    def run(argv: list[str]) -> str:
         result = subprocess.run(
-            [
-                "git",
-                "-C",
-                str(resolved_cwd),
-                "worktree",
-                "list",
-                "--porcelain",
-                "-z",
-            ],
+            argv,
             check=True,
             capture_output=True,
-            env=_repo_scoped_git_env(),
+            env=env,
             text=True,
             timeout=timeout,
         )
+        return result.stdout
+
+    try:
+        stdout = run([*base_argv, "-z"])
+        separator = "\0"
+    except subprocess.CalledProcessError as error:
+        if error.returncode != 129:
+            return (resolved_cwd,)
+        try:
+            stdout = run(base_argv)
+            separator = "\n"
+        except (OSError, subprocess.SubprocessError):
+            return (resolved_cwd,)
     except (OSError, subprocess.SubprocessError):
         return (resolved_cwd,)
     finally:
         if remaining_timeout is not None:
             remaining_timeout()
 
-    for field in result.stdout.split("\0"):
+    for field in stdout.split(separator):
         if field.startswith("worktree "):
             roots.add(Path(field.removeprefix("worktree ")).resolve())
     return tuple(sorted(roots, key=str))
