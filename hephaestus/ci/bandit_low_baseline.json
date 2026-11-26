@@ -1,8 +1,8 @@
 {
-  "generated_by": "issue #3698",
+  "generated_by": "PR #3743",
   "severity": "LOW",
   "counts": {
-    "B101": 58,
+    "B101": 57,
     "B105": 1,
     "B110": 1,
     "B112": 1,
@@ -57,7 +57,6 @@
     "hephaestus/automation/pipeline/admission.py::B404": 1,
     "hephaestus/automation/pipeline/auxiliary_worker_pool.py::B404": 1,
     "hephaestus/automation/pipeline/coordinator.py::B101": 1,
-    "hephaestus/automation/pipeline/coordinator_decomposition.py::B101": 1,
     "hephaestus/automation/pipeline/coordinator_execution.py::B101": 2,
     "hephaestus/automation/pipeline/coordinator_runtime.py::B101": 2,
     "hephaestus/automation/pipeline/coordinator_sources.py::B101": 1,
