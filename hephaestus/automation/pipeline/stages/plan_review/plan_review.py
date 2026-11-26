@@ -2530,7 +2530,9 @@ class PlanReviewStage(Stage):
         if identity_outcome := self._review_identity_outcome(item, ctx, review):
             return identity_outcome
         _complete_review_cycle(item, ctx)
-        item.payload.pop("stale_plan_recheck", None)
+        # Keep the recheck marker for the GO-to-implementation handoff. It is
+        # the within-run, plan-identity-keyed suppression that prevents the
+        # stale gate from re-arming on the unchanged plan.
         return StageOutcome(Disposition.ADVANCE, "plan approved")
 
     @staticmethod

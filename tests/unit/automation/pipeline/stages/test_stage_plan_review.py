@@ -3064,3 +3064,22 @@ class TestStalePlanRecheck:
         assert not any(
             "hephaestus-stale-plan-block" in str(comment) for comment in github.comments[1]
         )
+
+    def test_stale_plan_go_keeps_marker_for_implementation_handoff(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A recheck GO keeps the marker so implementation does not re-arm the gate."""
+        stage = PlanReviewStage()
+        github = FakeStageGitHub(labels=[STATE_PLAN_GO])
+        _seed_canonical_plan(github, 2)
+        item = _review_item(make_work_item, github, issue=2, state="EVAL")
+        marker = {"plan_sha256": "a" * 64, "age_days": 9}
+        item.payload["stale_plan_recheck"] = marker
+        item.payload["review_verdict"] = _verdict("GO")
+
+        outcome = stage.step(
+            item, make_ctx(github=github, config_overrides={"enable_learn": False})
+        )
+
+        assert outcome == StageOutcome(Disposition.ADVANCE, "plan approved")
+        assert item.payload["stale_plan_recheck"] == marker
