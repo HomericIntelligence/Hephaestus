@@ -114,7 +114,6 @@ from hephaestus.automation.protocol import (
 )
 from hephaestus.automation.review_journal import (
     MAX_CURRENT_REVISION_CONTEXT_CHARS,
-    STALE_PLAN_RECHECK_MARKER,
     CommentJournalReadError,
     IssueComment,
     JournalSnapshot,
@@ -123,11 +122,9 @@ from hephaestus.automation.review_journal import (
     current_plan_context,
     is_pending_review,
     journal_snapshot,
-    newest_plan_comment_identity,
     parse_plan_review_state,
     plan_fingerprint,
     render_current_review,
-    render_stale_plan_recheck_record,
 )
 from hephaestus.automation.review_types import ReviewVerdict
 from hephaestus.automation.state_labels import (
@@ -2533,61 +2530,8 @@ class PlanReviewStage(Stage):
         if identity_outcome := self._review_identity_outcome(item, ctx, review):
             return identity_outcome
         _complete_review_cycle(item, ctx)
-        if recheck := item.payload.pop("stale_plan_recheck", None):
-            self._record_stale_plan_recheck(item, ctx, recheck)
+        item.payload.pop("stale_plan_recheck", None)
         return StageOutcome(Disposition.ADVANCE, "plan approved")
-
-    @staticmethod
-    def _record_stale_plan_recheck(
-        item: WorkItem,
-        ctx: StageContext,
-        recheck: object,
-    ) -> None:
-        """Publish the durable one-recheck-per-plan receipt (fail-open).
-
-        The receipt keys on the plan fingerprint, so a later plan edit re-arms
-        the staleness gate while an untouched plan rechecks only once.
-        """
-        if item.issue is None:  # the caller only arms a recheck on issue items
-            return
-        plan_sha256 = ""
-        if isinstance(recheck, dict):
-            value = recheck.get("plan_sha256")
-            plan_sha256 = str(value) if isinstance(value, str) else ""
-        if not plan_sha256:
-            try:
-                identity = newest_plan_comment_identity(ctx.github.issue_comments(item.issue))
-            except (CommentJournalReadError, RuntimeError) as exc:
-                logger.warning(
-                    "plan_review:%d: stale-plan recheck receipt identity read failed: %s",
-                    item.issue,
-                    exc,
-                )
-                identity = None
-            plan_sha256 = identity[2] if identity is not None and identity[2] else ""
-            if not plan_sha256:
-                logger.warning(
-                    "plan_review:%d: stale-plan recheck GO could not record its "
-                    "receipt; the next run rechecks again",
-                    item.issue,
-                )
-                return
-        try:
-            ctx.github.upsert_issue_comment(
-                item.issue,
-                STALE_PLAN_RECHECK_MARKER,
-                render_stale_plan_recheck_record(
-                    plan_sha256,
-                    datetime.now(UTC).isoformat(timespec="seconds"),
-                ),
-            )
-        except RuntimeError as exc:
-            logger.warning(
-                "plan_review:%d: stale-plan recheck receipt write failed: %s; "
-                "the next run rechecks again",
-                item.issue,
-                exc,
-            )
 
     @staticmethod
     def _write_verdict_labels(issue_number: int, ctx: StageContext, *, is_go: bool) -> None:

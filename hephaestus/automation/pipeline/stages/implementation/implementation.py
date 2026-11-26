@@ -101,7 +101,6 @@ from hephaestus.automation.review_journal import (
     STALE_PLAN_RECHECK_AGE_DAYS,
     CommentJournalReadError,
     newest_plan_comment_identity,
-    stale_plan_recheck_record_present,
 )
 from hephaestus.automation.source_worktree import (
     SourceWorkspaceError,
@@ -494,9 +493,8 @@ def _stale_plan_recheck_outcome(
     """Route one recheck round for an accepted plan older than the stale age.
 
     The recheck round in plan_review reviews the accepted plan against the
-    current tree: its GO records the durable one-recheck-per-plan-identity
-    receipt and names the tweaks; its NO-GO re-plans the accepted plan
-    against the current tree.
+    current tree: its GO names the tweaks and clears the gate for this run;
+    its NO-GO re-plans the accepted plan against the current tree.
 
     Every read failure stays fail-open: a journal hiccup must not stop a
     running component, and a fresh plan carries no staleness gate at all.
@@ -517,8 +515,6 @@ def _stale_plan_recheck_outcome(
         return None
     age_days = (datetime.now(UTC) - latest).total_seconds() / 86400.0
     if age_days <= STALE_PLAN_RECHECK_AGE_DAYS:
-        return None
-    if stale_plan_recheck_record_present(comments, plan_sha256):
         return None
     logger.warning(
         "implementation:%d: accepted plan is %d days old (stale after %d); "

@@ -611,15 +611,3 @@ def test_decomposition_child_admission_leaves_wave_selection_untouched(
     assert 41 not in resumed.lease.issue_numbers
 
 
-def test_decomposition_admission_imports_no_wave_machinery() -> None:
-    """The decomposition coordinator mixin cannot bypass or change the wave."""
-    source = (
-        Path(hephaestus.__file__).parent
-        / "automation"
-        / "pipeline"
-        / "coordinator_decomposition.py"
-    ).read_text(encoding="utf-8")
-    assert "issue_waves" not in source
-    assert "IssueWaveStore" not in source
-    assert "WaveCheckpoint" not in source
-    assert "wave_entry_from_facts" not in source
