@@ -1,6 +1,7 @@
 """Detect scripts in ``scripts/`` with no usage references.
 
-A script is considered potentially stale if its filename does not appear in any of:
+A script is considered potentially stale if an exact reference to its
+scripts-relative path or Python module does not appear in any of:
 
 - GitHub Actions workflows and repository configuration
 - root documentation and ``docs/``
@@ -66,7 +67,7 @@ def _is_always_active(script_name: str) -> bool:
 
 def get_all_scripts(
     scripts_dir: Path,
-    extensions: tuple[str, ...] = (".py", ".sh", ".mojo"),
+    extensions: tuple[str, ...] = (".py", ".sh", ".mojo", ".sbatch"),
 ) -> list[str]:
     """Return paths relative to *scripts_dir* for all script files.
 
@@ -127,7 +128,7 @@ def get_reference_targets(repo_root: Path) -> list[Path]:
 
 
 def _script_referenced_by_name(script_path: str, targets: list[Path], own_path: Path) -> bool:
-    """Return True if *script_name* appears in at least one target file (not itself).
+    """Return True if *script_path* appears in at least one target file (not itself).
 
     Args:
         script_path: Path relative to ``scripts/`` to search for.
@@ -151,30 +152,92 @@ def _script_referenced_by_name(script_path: str, targets: list[Path], own_path: 
     return False
 
 
-def _script_referenced_by_import(script_stem: str, targets: list[Path], own_path: Path) -> bool:
-    """Return True if *script_stem* appears as a Python import or path reference.
+def _script_referenced_by_import(
+    script_path: str,
+    scripts_dir: Path,
+    targets: list[Path],
+    own_path: Path,
+) -> bool:
+    """Return True if an exact import or path reference names this script.
 
-    Catches patterns like ``from scripts.check_stale_scripts import`` or
-    ``run scripts/check_stale_scripts``.
+    A Python script is matched by its full dotted module path
+    (``scripts.shell.tool``), by ``from scripts.shell import tool``, or by a
+    bare sibling import from a file in the same directory. Path forms that use
+    the scripts-relative path without a suffix are also matched. A basename
+    shared with a script in another directory does not create a false match.
 
     Args:
-        script_stem: Stem (name without suffix) of the script.
+        script_path: POSIX path of the script relative to ``scripts/``.
+        scripts_dir: Path to the ``scripts/`` directory.
         targets: Files to search through.
         own_path: Resolved path of the script itself (excluded from search).
 
     Returns:
-        True if an import reference exists.
+        True if an exact import or path reference exists.
 
     """
-    pattern = re.compile(r"(?:from|import|run)\s+(?:\w+/)*" + re.escape(script_stem) + r"\b")
+    module_prefix = scripts_dir.name
+    stem: str | None = None
+    patterns: list[re.Pattern[str]] = []
+
+    if script_path.endswith(".py"):
+        parts = script_path[: -len(".py")].split("/")
+        stem = parts[-1]
+        module = ".".join((module_prefix, *parts))
+        parent = ".".join((module_prefix, *parts[:-1]))
+        patterns.append(re.compile(r"(?<![\w.-])(?:from|import)\s+" + re.escape(module) + r"\b"))
+        patterns.append(
+            re.compile(
+                r"(?<![\w.-])from\s+"
+                + re.escape(parent)
+                + r"\s+import\s+"
+                + re.escape(stem)
+                + r"\b"
+            )
+        )
+
+    name = Path(script_path).name
+    slash_path = script_path[: -len(Path(script_path).suffix)] if "." in name else script_path
+    if "/" in slash_path:
+        path_pattern = re.compile(
+            r"(?<![\w./-])(?:"
+            + re.escape(module_prefix)
+            + r"/)?"
+            + re.escape(slash_path)
+            + r"(?![\w.-])"
+        )
+    else:
+        path_pattern = re.compile(
+            r"(?<![\w./-])"
+            + re.escape(module_prefix)
+            + r"/"
+            + re.escape(slash_path)
+            + r"(?![\w.-])"
+        )
+    patterns.append(path_pattern)
+
+    sibling_pattern: re.Pattern[str] | None = None
+    if stem is not None:
+        sibling_pattern = re.compile(
+            r"^\s*(?:import|from)\s+" + re.escape(stem) + r"\b", re.MULTILINE
+        )
+
+    script_parent = (scripts_dir / script_path).parent.resolve()
     for target in targets:
-        if target.resolve() == own_path:
+        resolved = target.resolve()
+        if resolved == own_path:
             continue
         try:
             content = target.read_text(encoding="utf-8", errors="ignore")
         except OSError:
             continue
-        if pattern.search(content):
+        if any(pattern.search(content) for pattern in patterns):
+            return True
+        if (
+            sibling_pattern is not None
+            and resolved.parent == script_parent
+            and sibling_pattern.search(content)
+        ):
             return True
     return False
 
@@ -183,18 +246,18 @@ def find_stale_scripts(
     repo_root: Path,
     exclude_pattern: str | None = None,
 ) -> list[str]:
-    """Return basenames of scripts with no external references.
+    """Return scripts-relative paths of scripts with no exact external reference.
 
     Scripts in ``_ALWAYS_ACTIVE`` or matching ``_ACTIVE_PATTERNS`` are excluded.
-    If *exclude_pattern* is given, any script whose name contains that substring is
-    also excluded.
+    If *exclude_pattern* is given, any script whose path contains that substring
+    is also excluded.
 
     Args:
         repo_root: Root of the repository.
         exclude_pattern: Optional substring; matching scripts are excluded.
 
     Returns:
-        Sorted list of possibly-stale script basenames.
+        Sorted list of possibly-stale paths relative to ``scripts/``.
 
     """
     scripts_dir = repo_root / "scripts"
@@ -212,10 +275,9 @@ def find_stale_scripts(
         if exclude_pattern and exclude_pattern in script_path:
             continue
         own_path = (scripts_dir / script_path).resolve()
-        stem = Path(script_name).stem
         referenced = _script_referenced_by_name(
             script_path, targets, own_path
-        ) or _script_referenced_by_import(stem, targets, own_path)
+        ) or _script_referenced_by_import(script_path, scripts_dir, targets, own_path)
         if not referenced:
             stale.append(script_path)
 

@@ -63,6 +63,19 @@ class TestGetAllScripts:
         result = get_all_scripts(scripts_dir)
         assert "run.sh" in result
 
+    def test_finds_sbatch_files(self, tmp_path: Path) -> None:
+        scripts_dir = tmp_path / "scripts"
+        scripts_dir.mkdir()
+        (scripts_dir / "job.sbatch").write_text("#!/bin/bash\n")
+        assert "job.sbatch" in get_all_scripts(scripts_dir)
+
+    def test_nested_scripts_use_scripts_relative_paths(self, tmp_path: Path) -> None:
+        scripts_dir = tmp_path / "scripts"
+        nested = scripts_dir / "shell" / "lib"
+        nested.mkdir(parents=True)
+        (nested / "helpers.sh").write_text("")
+        assert get_all_scripts(scripts_dir) == ["shell/lib/helpers.sh"]
+
     def test_ignores_dotfiles(self, tmp_path: Path) -> None:
         scripts_dir = tmp_path / "scripts"
         scripts_dir.mkdir()
@@ -222,6 +235,108 @@ class TestFindStaleScripts:
         scripts_dir.mkdir()
         _write_script(scripts_dir, "orphan.py", "# scripts/orphan.py\n")
         assert find_stale_scripts(tmp_path) == ["orphan.py"]
+
+    def test_same_basename_in_other_directory_does_not_activate(self, tmp_path: Path) -> None:
+        scripts_dir = tmp_path / "scripts"
+        shell_dir = scripts_dir / "shell"
+        other_dir = scripts_dir / "other"
+        shell_dir.mkdir(parents=True)
+        other_dir.mkdir(parents=True)
+        _write_script(shell_dir, "tool.py")
+        _write_script(other_dir, "tool.py")
+        _write_script(shell_dir, "test_sibling.py", "import tool\n")
+
+        stale = find_stale_scripts(tmp_path)
+
+        assert "shell/tool.py" not in stale
+        assert "other/tool.py" in stale
+
+    def test_dotted_module_import_activates_exact_script(self, tmp_path: Path) -> None:
+        scripts_dir = tmp_path / "scripts"
+        nested = scripts_dir / "shell"
+        nested.mkdir(parents=True)
+        _write_script(nested, "tool.py")
+        tests_dir = tmp_path / "tests"
+        tests_dir.mkdir()
+        (tests_dir / "test_use_tool.py").write_text("import scripts.shell.tool\n")
+        assert find_stale_scripts(tmp_path) == []
+
+    def test_from_parent_module_import_activates_exact_script(self, tmp_path: Path) -> None:
+        scripts_dir = tmp_path / "scripts"
+        nested = scripts_dir / "shell"
+        nested.mkdir(parents=True)
+        _write_script(nested, "tool.py")
+        tests_dir = tmp_path / "tests"
+        tests_dir.mkdir()
+        (tests_dir / "test_use_tool.py").write_text("from scripts.shell import tool\n")
+        assert find_stale_scripts(tmp_path) == []
+
+    def test_from_module_import_activates_exact_script(self, tmp_path: Path) -> None:
+        scripts_dir = tmp_path / "scripts"
+        nested = scripts_dir / "shell"
+        nested.mkdir(parents=True)
+        _write_script(nested, "tool.py")
+        tests_dir = tmp_path / "tests"
+        tests_dir.mkdir()
+        (tests_dir / "test_use_tool.py").write_text("from scripts.shell.tool import run\n")
+        assert find_stale_scripts(tmp_path) == []
+
+    def test_dotted_module_import_does_not_cross_directories(self, tmp_path: Path) -> None:
+        scripts_dir = tmp_path / "scripts"
+        shell_dir = scripts_dir / "shell"
+        other_dir = scripts_dir / "other"
+        shell_dir.mkdir(parents=True)
+        other_dir.mkdir(parents=True)
+        _write_script(shell_dir, "tool.py")
+        _write_script(other_dir, "tool.py")
+        docs_dir = tmp_path / "docs"
+        docs_dir.mkdir()
+        (docs_dir / "guide.md").write_text("import scripts.shell.tool\n")
+
+        stale = find_stale_scripts(tmp_path)
+
+        assert "shell/tool.py" not in stale
+        assert "other/tool.py" in stale
+
+    def test_sibling_import_activates_only_same_directory(self, tmp_path: Path) -> None:
+        scripts_dir = tmp_path / "scripts"
+        shell_dir = scripts_dir / "shell"
+        other_dir = scripts_dir / "other"
+        shell_dir.mkdir(parents=True)
+        other_dir.mkdir(parents=True)
+        _write_script(shell_dir, "tool.py")
+        _write_script(other_dir, "tool.py")
+        _write_script(shell_dir, "test_sibling.py", "from tool import run\n")
+
+        stale = find_stale_scripts(tmp_path)
+
+        assert "shell/tool.py" not in stale
+        assert "other/tool.py" in stale
+
+    def test_shell_source_path_form_activates_nested_script(self, tmp_path: Path) -> None:
+        scripts_dir = tmp_path / "scripts"
+        nested = scripts_dir / "shell"
+        nested.mkdir(parents=True)
+        (nested / "tool.sh").write_text("#!/bin/bash\n")
+        _write_workflow(tmp_path, "ci.yml", "source scripts/shell/tool.sh\n")
+        assert find_stale_scripts(tmp_path) == []
+
+    def test_sbatch_path_form_activates_nested_script(self, tmp_path: Path) -> None:
+        scripts_dir = tmp_path / "scripts"
+        nested = scripts_dir / "slurm"
+        nested.mkdir(parents=True)
+        (nested / "job.sbatch").write_text("#!/bin/bash\n")
+        docs_dir = tmp_path / "docs"
+        docs_dir.mkdir()
+        (docs_dir / "guide.md").write_text("sbatch scripts/slurm/job.sbatch\n")
+        assert find_stale_scripts(tmp_path) == []
+
+    def test_sbatch_script_without_reference_is_stale(self, tmp_path: Path) -> None:
+        scripts_dir = tmp_path / "scripts"
+        nested = scripts_dir / "slurm"
+        nested.mkdir(parents=True)
+        (nested / "job.sbatch").write_text("#!/bin/bash\n")
+        assert find_stale_scripts(tmp_path) == ["slurm/job.sbatch"]
 
 
 class TestCheckStaleScripts:
