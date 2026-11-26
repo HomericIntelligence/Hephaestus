@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import re
 import subprocess
-import time
 from pathlib import Path
 from typing import Any, TypeVar, cast
 
@@ -284,14 +282,12 @@ __all__ = [
     'SCOPE_RETRACTION_MARKER_PREFIX', 'SKIP_REASON_MARKER',
     'STATE_IMPLEMENTATION_GO', 'STATE_IMPLEMENTATION_NO_GO', 'STATE_LABEL_SPECS', 'STATE_SKIP',
     '_CLOSES_ISSUE_LINE_RE', '_FULL_COMMIT_SHA_RE',
-    '_IMPLEMENTATION_REPLY_BODY_RE', '_STANDALONE_VERDICT_LINE_RE', 'Any',
+    '_IMPLEMENTATION_REPLY_BODY_RE', '_STANDALONE_VERDICT_LINE_RE',
     'AutoMergeEnableResult',
     'IssueComment',
-    'LockUnavailableError', 'Path', 'PipelineGitHubTransport',
-    'annotations',
+    'LockUnavailableError', 'PipelineGitHubTransport',
     'close_issue_as_covered', 'ensure_state_dir', 'file_lock', 'find_merged_closing_pr',
     'find_merged_pr_for_issue', 'format_skip_reason_comment', 'get_pr_head_branch', 'gh_call',
-    'github_api', 'has_exact_closing_line', 'has_label', 'hashlib', 'is_implementation_go',
-    'issue_auto_impl_branch_name', 'json', 'logger', 'logging', 'normalize_scope_retraction_paths',
-    'rate_limit_remaining', 're', 'scope_retraction_marker', 'subprocess',
-    'time']
+    'github_api', 'has_exact_closing_line', 'has_label', 'is_implementation_go',
+    'issue_auto_impl_branch_name', 'logger', 'normalize_scope_retraction_paths',
+    'rate_limit_remaining', 'scope_retraction_marker']

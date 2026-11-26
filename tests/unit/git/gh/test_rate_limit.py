@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import subprocess
@@ -1014,6 +1015,25 @@ class TestGlobalThrottleStateRoot:
         assert _global_throttle_state_path() == (
             usable / f"hephaestus-{uid}" / "gh-rate" / "hephaestus_gh_rate.json"
         )
+
+    def test_runtime_root_is_logged_once(self, caplog, tmp_path) -> None:
+        """Repeated state-root resolution logs the same root only once."""
+        root = tmp_path / "configured"
+        root.mkdir()
+        configure_gh_global_throttle(rate=10, burst=30, directory=root)
+        uid = getattr(os, "getuid", lambda: "user")()
+        expected = root / f"hephaestus-{uid}"
+
+        with caplog.at_level(logging.DEBUG, logger="hephaestus.git.gh.rate_limit"):
+            for _ in range(3):
+                assert _global_throttle_state_path() == (
+                    expected / "gh-rate" / "hephaestus_gh_rate.json"
+                )
+
+        root_messages = [
+            message for message in caplog.messages if message.startswith("GitHub throttle scope=")
+        ]
+        assert root_messages == [f"GitHub throttle scope=machine root={expected}"]
 
     def test_no_usable_candidate_names_the_override(self, monkeypatch, tmp_path) -> None:
         """An empty candidate set fails closed with the recovery flag."""

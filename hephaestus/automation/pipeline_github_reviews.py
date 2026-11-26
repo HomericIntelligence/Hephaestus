@@ -1,12 +1,16 @@
-# This mixin consumes the adapter transport namespace by design.
-# ruff: noqa: F403, F405
-
+import hashlib
 import json
 from collections.abc import Mapping, Sequence
+from pathlib import Path
+from typing import Any
 
 from .github_api.graphql import GraphQLQuerySpec
 from .pipeline_github_contract import _PipelineGitHubHost
-from .pipeline_github_transport import *
+from .pipeline_github_transport import (
+    LockUnavailableError,
+    ensure_state_dir,
+    github_api,
+)
 
 THREAD_COMMENT_MAX = 2_000
 THREAD_COMMENT_PAGE_MAX = 20

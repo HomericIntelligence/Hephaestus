@@ -91,7 +91,7 @@ may change incompatibly in a minor release.
 
 ## Console-Script Stability Tiers
 
-The 59 console scripts registered in `[project.scripts]` are classified into one
+The 60 console scripts registered in `[project.scripts]` are classified into one
 of three tiers:
 
 The installed script inventory is `[project.scripts]` in `pyproject.toml`.
@@ -175,6 +175,7 @@ inventory or table before commit.
 | `hephaestus-check-cli-tier-docs` | Internal | Enforces this very table; added in #766 |
 | `hephaestus-check-api-table-docs` | Internal | Enforces per-symbol `__all__` documentation in COMPATIBILITY.md |
 | `hephaestus-check-api-reference` | Internal | Verifies generated pdoc API reference output before Pages upload |
+| `hephaestus-check-path-references` | Internal | Validates dotted module strings (patch targets, registry paths, script entries) resolve; requires subpackage pre-commit coverage |
 | `hephaestus-check-unlinked-todo` | Internal | Repo CI tech-debt-marker linkage validator; added in #1492 |
 | `hephaestus-check-environment-variables` | Internal | Enforces the exact deny-by-default runtime environment registry |
 

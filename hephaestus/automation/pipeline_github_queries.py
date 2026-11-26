@@ -1,16 +1,27 @@
-# This mixin consumes the adapter transport namespace by design.
-# ruff: noqa: F403, F405
 import json
 import subprocess
 import time
 from collections.abc import Sequence
 from threading import Event
+from typing import Any
 
 from .dependency_parser import DependencyFact, canonical_dependency_numbers
 from .github_api.graphql import batch_dependency_facts_query, reviewed_pr_state_query
 from .github_api.issues import issue_read_error
 from .pipeline_github_contract import _PipelineGitHubHost
-from .pipeline_github_transport import *
+from .pipeline_github_transport import (
+    _CLOSES_ISSUE_LINE_RE,
+    STATE_IMPLEMENTATION_NO_GO,
+    find_merged_closing_pr,
+    find_merged_pr_for_issue,
+    get_pr_head_branch,
+    github_api,
+    has_exact_closing_line,
+    has_label,
+    is_implementation_go,
+    issue_auto_impl_branch_name,
+    logger,
+)
 from .review_journal import (
     CommentJournalReadError,
     IssueComment,
