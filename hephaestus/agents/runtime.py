@@ -26,11 +26,22 @@ import time
 import tomllib
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass
-from enum import StrEnum
 from importlib.metadata import entry_points
 from pathlib import Path
 from typing import Any, Literal, Protocol, cast
 
+from hephaestus.agents.catalog import (
+    AGENT_CAPABILITIES,
+    DEFAULT_EFFORT_SENTINEL,
+    HARNESS_RECORDS,
+    AgentCapabilities as AgentCapabilities,
+    AgentCapability as AgentCapability,
+    EffortRequiresModelError,
+    Harness,
+    UnsupportedAgentError,
+    apply_effort,
+    harness_record,
+)
 from hephaestus.agents.codex_isolation import (
     CodexIsolationAdapterV1,
     CodexIsolationError,
@@ -97,7 +108,9 @@ ProcessTracker = Callable[[int], contextlib.AbstractContextManager[None]]
 RemainingTimeout = Callable[[], int]
 SubprocessCommandPart = str | bytes | os.PathLike[str] | os.PathLike[bytes]
 SubprocessCommand = SubprocessCommandPart | Sequence[SubprocessCommandPart]
-AGENT_CHOICES: tuple[AgentName, ...] = ("claude", "codex", "pi", "opencode", "opencode2")
+AGENT_CHOICES: tuple[AgentName, ...] = cast(
+    tuple[AgentName, ...], tuple(record.name.value for record in HARNESS_RECORDS.values())
+)
 DEFAULT_AGENT: AgentName = "claude"
 CODEX_HELP_PROBE_SECONDS = 10
 GIT_COMMON_DIR_PROBE_SECONDS = 5
@@ -148,20 +161,12 @@ PI_AUTOMATION_PREFLIGHT_ERROR = (
     "Pi automation preflight is unavailable. Run "
     "`hephaestus-install-pi-plugins --dry-run --json` to inspect the required setup."
 )
-AGENT_AUTH_STATUS_COMMANDS: dict[AgentName, tuple[tuple[str, ...], ...]] = {
-    "claude": (("claude", "auth", "status"),),
-    "codex": (("codex", "login", "status"),),
-    "pi": (("pi", "--version"),),
-    # Exit 0 only proves the CLI runs. OpenCode serves models from stored
-    # credentials OR environment keys, so `providers list` legitimately reports
-    # "0 credentials" on fully working setups; credential-count parsing would
-    # false-negative those. Deeper authentication is verified by the run itself.
-    "opencode": (("opencode", "providers", "list"),),
-    # OpenCode 2 removed the V1 `providers list` surface; the probe proves
-    # only that the V2 CLI starts. Provider configuration and authentication
-    # are verified by the run itself, the same contract as the V1 probe.
-    "opencode2": (("opencode", "--version"),),
-}
+# Each probe is one field of its harness record in the catalog. The rationale
+# for the OpenCode probes stays with those records.
+AGENT_AUTH_STATUS_COMMANDS: dict[AgentName, tuple[tuple[str, ...], ...]] = cast(
+    dict[AgentName, tuple[tuple[str, ...], ...]],
+    {record.name.value: record.auth_probe for record in HARNESS_RECORDS.values()},
+)
 
 
 @dataclass(frozen=True)
@@ -451,108 +456,8 @@ def _require_pi_isolation_adapter(adapter_name: str | None = None) -> None:
         )
 
 
-class AgentCapability(StrEnum):
-    """Provider capability names used by the provider-neutral parity contract."""
-
-    FILE_READ = "file-read"
-    FILE_WRITE = "file-write"
-    SHELL = "shell"
-    SEARCH = "search"
-    SESSION = "session"
-    RESUME = "resume"
-    SKILL = "skill"
-    TOOL_ALLOWLIST = "tool-allowlist"
-    SUBAGENT = "subagent"
-    WEB_ACCESS = "web-access"
-    INTERACTIVE_APPROVAL = "interactive-approval"
-    OS_SANDBOX = "os-sandbox"
-
-
-@dataclass(frozen=True)
-class AgentCapabilities:
-    """Backend capabilities used by provider-neutral call sites.
-
-    ``core_capabilities`` are provided by the provider's base CLI.
-    ``package_capabilities`` require an explicit, separately verified package.
-    ``unavailable_capabilities`` must fail closed rather than being inferred from
-    a similarly named provider feature. The Pi entries form the executable
-    companion to ADR-0019; later bootstrap and pipeline stages consume this
-    distinction instead of creating stage-specific provider forks.
-    """
-
-    direct_runner: bool
-    supports_approval: bool
-    supports_sandbox: bool
-    supports_sessions: bool
-    core_capabilities: frozenset[AgentCapability] = frozenset()
-    package_capabilities: frozenset[AgentCapability] = frozenset()
-    unavailable_capabilities: frozenset[AgentCapability] = frozenset()
-
-
-AGENT_CAPABILITIES: dict[AgentName, AgentCapabilities] = {
-    "claude": AgentCapabilities(
-        direct_runner=False,
-        supports_approval=False,
-        supports_sandbox=True,
-        supports_sessions=True,
-    ),
-    "codex": AgentCapabilities(
-        direct_runner=True,
-        supports_approval=True,
-        supports_sandbox=True,
-        supports_sessions=True,
-    ),
-    "pi": AgentCapabilities(
-        direct_runner=True,
-        supports_approval=False,
-        supports_sandbox=False,
-        supports_sessions=True,
-        core_capabilities=frozenset(
-            {
-                AgentCapability.FILE_READ,
-                AgentCapability.FILE_WRITE,
-                AgentCapability.SHELL,
-                AgentCapability.SEARCH,
-                AgentCapability.SESSION,
-                AgentCapability.RESUME,
-                AgentCapability.SKILL,
-                AgentCapability.TOOL_ALLOWLIST,
-            }
-        ),
-        package_capabilities=frozenset(
-            {
-                AgentCapability.SUBAGENT,
-                AgentCapability.WEB_ACCESS,
-            }
-        ),
-        unavailable_capabilities=frozenset(
-            {
-                AgentCapability.INTERACTIVE_APPROVAL,
-                AgentCapability.OS_SANDBOX,
-            }
-        ),
-    ),
-    "opencode": AgentCapabilities(
-        direct_runner=True,
-        supports_approval=False,
-        supports_sandbox=True,
-        supports_sessions=True,
-    ),
-    "opencode2": AgentCapabilities(
-        direct_runner=True,
-        supports_approval=False,
-        supports_sandbox=True,
-        supports_sessions=True,
-    ),
-}
-
-
-@dataclass(frozen=True)
-class CodexModelConfig:
-    """Literal Codex model selection with an optional effort."""
-
-    model: str
-    reasoning_effort: str = ""
+# AgentCapability, AgentCapabilities, and AGENT_CAPABILITIES come from the
+# catalog. They are imported above so existing callers keep the same names.
 
 
 def add_agent_argument(parser: argparse.ArgumentParser) -> None:
@@ -836,7 +741,7 @@ def _resolve_pi_model_selection(
 ) -> AgentModelSelection:
     """Return the explicit Pi model and thinking selection."""
     selection = parse_model_selection(model)
-    if selection.model and selection.reasoning_effort not in {"", "default"}:
+    if selection.model and selection.reasoning_effort not in {"", DEFAULT_EFFORT_SENTINEL}:
         return selection
     configured = _load_pi_default_model_selection(
         pi_dir, required=not selection.model, explicit_model=selection.model
@@ -846,7 +751,7 @@ def _resolve_pi_model_selection(
     selected_model = selection.model or configured.model
     selected_effort = (
         configured.reasoning_effort
-        if selection.reasoning_effort in {"", "default"}
+        if selection.reasoning_effort in {"", DEFAULT_EFFORT_SENTINEL}
         else selection.reasoning_effort
     )
     return AgentModelSelection(selected_model, selected_effort)
@@ -968,7 +873,7 @@ def resolve_agent(
         authentication_options["shutdown"] = shutdown
     if agent is not None:
         if agent not in AGENT_CHOICES:
-            raise ValueError(f"Unsupported agent: {agent}")
+            raise UnsupportedAgentError(agent)
         _validate_fixed_provider_model_references(agent, model_references)
         if agent == "pi":
             _validate_pi_model_references_before_admission(
@@ -1103,31 +1008,17 @@ def uses_direct_agent_runner(agent: str) -> bool:
     """Return True when the provider is invoked through runtime text/session helpers."""
     if agent not in AGENT_CAPABILITIES:
         return False
-    return AGENT_CAPABILITIES[agent].direct_runner
+    return harness_record(agent).capabilities.direct_runner
 
 
 def agent_cli_name(agent: str) -> str:
-    """Return the executable name for a supported agent backend."""
-    if agent not in AGENT_CAPABILITIES:
-        raise ValueError(f"Unsupported agent: {agent}")
-    if agent == "opencode2":
-        return "opencode"
-    return agent
+    """Return the executable name recorded for one harness."""
+    return harness_record(agent).cli_name
 
 
 def agent_display_name(agent: str) -> str:
-    """Return a short human-facing name for a supported agent backend."""
-    names = {
-        "claude": "Claude Code",
-        "codex": "Codex",
-        "pi": "Pi",
-        "opencode": "OpenCode",
-        "opencode2": "OpenCode 2",
-    }
-    try:
-        return names[agent]
-    except KeyError as e:
-        raise ValueError(f"Unsupported agent: {agent}") from e
+    """Return the short human-facing name recorded for one harness."""
+    return harness_record(agent).display_name
 
 
 def _resolve_pi_denylist_root(root: Path, *, require_readable: bool) -> Path | None:
@@ -1576,27 +1467,37 @@ def codex_approval_args(approval: str) -> list[str]:
     return []
 
 
-def _codex_model_config(model: str, *, use_default: bool = False) -> CodexModelConfig:
-    """Split the literal model and free-form effort for Codex."""
-    selection = parse_model_selection(model)
-    effort = selection.reasoning_effort
-    return CodexModelConfig(selection.model, "" if effort == "default" else effort)
-
-
-def _codex_model_args(model: str, *, use_default: bool = False) -> list[str]:
+def _codex_model_args(model: str) -> list[str]:
     """Return Codex CLI arguments for the literal model and effort."""
-    model_config = _codex_model_config(model, use_default=use_default)
+    selection = parse_model_selection(model)
     args: list[str] = []
-    if model_config.model:
-        args.extend(["--model", model_config.model])
-    if model_config.reasoning_effort:
-        args.extend(
-            [
-                "-c",
-                f"model_reasoning_effort={json.dumps(model_config.reasoning_effort)}",
-            ]
-        )
+    if selection.model:
+        args.extend(["--model", selection.model])
+    effort = apply_effort(
+        HARNESS_RECORDS[Harness.CODEX].model_transport,
+        selection.model,
+        selection.reasoning_effort,
+    )
+    args.extend(effort.extra_args)
     return args
+
+
+def run_codex_effort_attempts(
+    execute: Callable[[str], AgentRunResult], model: str
+) -> AgentRunResult:
+    """Retry one pre-work Codex effort rejection through the catalog rule."""
+    selection = parse_model_selection(model)
+    effort = apply_effort(
+        HARNESS_RECORDS[Harness.CODEX].model_transport,
+        selection.model,
+        selection.reasoning_effort,
+    )
+    try:
+        return execute(selection.reference)
+    except _CodexReasoningEffortRejectedError:
+        if not effort.emits_effort:
+            raise
+    return execute(AgentModelSelection(selection.model, DEFAULT_EFFORT_SENTINEL))
 
 
 def _codex_extra_writable_dirs(cwd: Path, sandbox: str | None) -> list[Path]:
@@ -1681,7 +1582,7 @@ def _codex_base_cmd(
             "exec",
         ]
     )
-    cmd.extend(_codex_model_args(model, use_default=resume_id is None))
+    cmd.extend(_codex_model_args(model))
     primary_review = (
         execution_request is not None
         and execution_request.role is AgentRole.PR_REVIEWER
@@ -4720,17 +4621,18 @@ def _run_codex_session_with_effort_fallback(
         )
 
     selection = parse_model_selection(model)
-    effective_config = _codex_model_config(
-        selection.reference,
-        use_default=resume_id is None,
+    effort = apply_effort(
+        HARNESS_RECORDS[Harness.CODEX].model_transport,
+        selection.model,
+        selection.reasoning_effort,
     )
     try:
         return execute(selection.reference)
     except _CodexReasoningEffortRejectedError:
-        if not effective_config.reasoning_effort:
+        if not effort.emits_effort:
             raise
     LOG.warning("Codex rejected the selected reasoning effort. Retrying with the model default.")
-    return execute(AgentModelSelection(effective_config.model, "default"))
+    return execute(AgentModelSelection(selection.model, DEFAULT_EFFORT_SENTINEL))
 
 
 def _run_codex_command(
@@ -5012,8 +4914,12 @@ def _opencode_base_cmd(
     cmd = ["opencode", "run", "--dir", str(cwd), "--format", "json"]
     if selection.model:
         cmd.extend(["--model", selection.model])
-    if selection.reasoning_effort and selection.reasoning_effort != "default":
-        cmd.extend(["--variant", selection.reasoning_effort])
+    effort = apply_effort(
+        HARNESS_RECORDS[Harness.OPENCODE].model_transport,
+        selection.model,
+        selection.reasoning_effort,
+    )
+    cmd.extend(effort.extra_args)
     if session_id:
         cmd.extend(["--session", session_id])
     cmd.extend(_opencode_sandbox_args(sandbox))
@@ -5296,20 +5202,22 @@ def _opencode2_base_cmd(
     """
     selection = parse_model_selection(model)
     cmd = ["opencode", "run", "--format", "json"]
-    effort = selection.reasoning_effort
-    if selection.model:
-        effective = (
-            f"{selection.model}#{effort}" if effort and effort != "default" else selection.model
+    try:
+        effort = apply_effort(
+            HARNESS_RECORDS[Harness.OPENCODE2].model_transport,
+            selection.model,
+            selection.reasoning_effort,
         )
-        cmd.extend(["--model", effective])
-    elif effort and effort != "default":
+    except EffortRequiresModelError as exc:
         raise AgentExecutionError(
             text(
                 "OpenCode 2 cannot apply effort %(effort)r without an explicit model; "
                 "pass provider/model[:effort]",
-                effort=effort,
+                effort=exc.effort,
             )
-        )
+        ) from exc
+    if selection.model:
+        cmd.extend(["--model", effort.model_override or selection.model])
     if session_id:
         cmd.extend(["--session", session_id])
     cmd.extend(_opencode2_sandbox_args(sandbox))
@@ -5473,9 +5381,13 @@ def _pi_automation_cmd(
             selection.model,
         ]
     )
-    effective_thinking = thinking or selection.reasoning_effort
-    if effective_thinking and effective_thinking != "default":
-        cmd.extend(["--thinking", effective_thinking])
+    effort = apply_effort(
+        HARNESS_RECORDS[Harness.PI].model_transport,
+        selection.model,
+        selection.reasoning_effort,
+        thinking=thinking,
+    )
+    cmd.extend(effort.extra_args)
     return cmd
 
 

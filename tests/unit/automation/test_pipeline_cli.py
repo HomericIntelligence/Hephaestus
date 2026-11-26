@@ -13,6 +13,7 @@ from types import ModuleType
 
 import pytest
 
+from hephaestus.agents.catalog import UnsupportedAgentError
 from hephaestus.automation.pipeline.coordinator_types import PipelineConfig
 from hephaestus.automation.pipeline.routing import StageName
 from hephaestus.cli.localization import using_localizer
@@ -65,6 +66,33 @@ def test_podman_name_error_uses_stable_human_template() -> None:
     with using_localizer({source: "Nom de machine Podman non valide."}):
         with pytest.raises(argparse.ArgumentTypeError, match="Nom de machine"):
             cli._parse_podman_machine_name("bad name")
+
+
+def test_unsupported_agent_error_is_localized() -> None:
+    """Localize by error type instead of by matching human wording."""
+    cli = _cli()
+    error = UnsupportedAgentError("ghost")
+    template = "Unsupported agent: %(agent)s"
+
+    with using_localizer({template: "Agent non pris en charge : %(agent)s"}):
+        rendered = cli._localize_cli_error(error)
+
+    assert rendered == "Agent non pris en charge : ghost"
+    assert cli._localize_cli_error("Unsupported agent: ghost") == "Unsupported agent: ghost"
+
+
+def test_unsupported_agent_localization_ignores_changed_prose(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A change to the human text cannot break the localized message."""
+    cli = _cli()
+    error = UnsupportedAgentError("ghost")
+    monkeypatch.setattr(UnsupportedAgentError, "__str__", lambda _self: "PROSE CHANGED")
+
+    with using_localizer({"Unsupported agent: %(agent)s": "Agente desconocido: %(agent)s"}):
+        rendered = cli._localize_cli_error(error)
+
+    assert rendered == "Agente desconocido: ghost"
 
 
 @pytest.mark.parametrize(

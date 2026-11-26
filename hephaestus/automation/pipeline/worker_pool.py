@@ -223,7 +223,6 @@ from hephaestus.automation.pipeline.worker_codex import (
     _initialize_codex_adapter as _initialize_codex_adapter,
     _owned_codex_adapter as _owned_codex_adapter,
     _reject_codex_terminal_cleanup_tombstone as _reject_codex_terminal_cleanup_tombstone,
-    _run_isolated_codex_effort_attempts as _run_isolated_codex_effort_attempts,
     _uses_codex_implementation_adapter as _uses_codex_implementation_adapter,
     _validate_staged_codex_executable as _validate_staged_codex_executable,
 )
@@ -3174,7 +3173,7 @@ class WorkerPool:
                                 finally:
                                     boundary.verify_after_return()
 
-                        return _run_isolated_codex_effort_attempts(execute, job.model)
+                        return agent_runtime.run_codex_effort_attempts(execute, job.model)
                     finally:
                         close_staged_linux_executable(executable)
 
