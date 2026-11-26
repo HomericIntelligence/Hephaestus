@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
+import sys
 import uuid
 from pathlib import Path
 from typing import Any
@@ -42,6 +44,31 @@ def non_repo_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
     monkeypatch.setattr(agent_config, "_repo_scoped_git_env", isolated_git_env)
     return tmp_path
+
+
+def _write_fake_worktree_git(
+    bin_dir: Path, argv_log: Path, roots: tuple[Path, ...], *, legacy: bool
+) -> None:
+    """Install a fake ``git`` that rejects ``-z`` with exit 129 when legacy."""
+    script = f"""\
+#!{sys.executable}
+import sys
+paths = {[str(root) for root in roots]!r}
+with open({str(argv_log)!r}, "a", encoding="utf-8") as log:
+    log.write(" ".join(sys.argv[1:]) + "\\n")
+if "-z" in sys.argv[1:]:
+    if {legacy!r}:
+        sys.stderr.write("error: unknown option `z'\\n")
+        raise SystemExit(129)
+    sys.stdout.buffer.write(
+        b"".join(b"worktree " + p.encode() + b"\\0HEAD deadbeef\\0\\n\\0" for p in paths)
+    )
+else:
+    sys.stdout.write("\\n".join("worktree " + p + "\\nHEAD deadbeef\\n" for p in paths))
+"""
+    fake_git = bin_dir / "git"
+    fake_git.write_text(script, encoding="utf-8")
+    fake_git.chmod(0o755)
 
 
 class TestReviewerAgent:
@@ -506,6 +533,36 @@ class TestSessionJsonlPath:
         assert "GIT_DIR" not in kwargs["env"]
         assert "GIT_WORK_TREE" not in kwargs["env"]
 
+    @pytest.mark.parametrize("legacy_git", [False, True], ids=["modern-git", "legacy-git-129"])
+    def test_registered_roots_survive_legacy_git_rejecting_nul(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        legacy_git: bool,
+    ) -> None:
+        """Exit 129 from -z triggers one line-format retry with the same roots."""
+        repo_root = tmp_path / "Repo"
+        worktree = repo_root / "build" / ".worktrees" / "issue-3731"
+        worktree.mkdir(parents=True)
+        roots = (repo_root.resolve(), worktree.resolve())
+        fake_bin = tmp_path / "fake-bin"
+        fake_bin.mkdir()
+        argv_log = tmp_path / "git-argv"
+        _write_fake_worktree_git(fake_bin, argv_log, roots, legacy=legacy_git)
+        # The helper scrubs the environment to os.defpath, so the fake binary
+        # must be prepended there for the Git subprocess to find it.
+        monkeypatch.setattr(os, "defpath", f"{fake_bin}{os.pathsep}{os.defpath}")
+
+        assert agent_config._registered_worktree_roots(worktree) == tuple(sorted(roots, key=str))
+
+        calls = argv_log.read_text(encoding="utf-8").splitlines()
+        nul_call = f"-C {worktree.resolve()} worktree list --porcelain -z"
+        assert calls[0] == nul_call
+        if legacy_git:
+            assert calls == [nul_call, nul_call.removesuffix(" -z")]
+        else:
+            assert calls == [nul_call]
+
     def test_git_discovery_failure_falls_back_to_exact_cwd_path(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -518,8 +575,9 @@ class TestSessionJsonlPath:
         with patch(
             "hephaestus.automation.agent_config.subprocess.run",
             side_effect=subprocess.CalledProcessError(128, ["git"]),
-        ):
+        ) as run:
             assert resolve_session_jsonl_path(sid, cwd) == session_jsonl_path(sid, cwd)
+        assert run.call_count == 1
 
     def test_historical_duplicates_choose_lexicographically_first_path(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

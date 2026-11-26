@@ -1,5 +1,5 @@
 {
-  "generated_by": "issue #3698",
+  "generated_by": "PR #3744",
   "severity": "LOW",
   "counts": {
     "B101": 58,
@@ -10,7 +10,7 @@
     "B403": 3,
     "B404": 92,
     "B603": 61,
-    "B607": 20
+    "B607": 19
   },
   "files": {
     "hephaestus/agents/pi_plugins.py::B404": 1,
@@ -21,7 +21,7 @@
     "hephaestus/agents/workspace.py::B404": 1,
     "hephaestus/automation/agent_config.py::B404": 1,
     "hephaestus/automation/agent_config.py::B603": 2,
-    "hephaestus/automation/agent_config.py::B607": 2,
+    "hephaestus/automation/agent_config.py::B607": 1,
     "hephaestus/automation/claude_invoke.py::B404": 1,
     "hephaestus/automation/claude_invoke.py::B603": 1,
     "hephaestus/automation/codex_adapter_admission.py::B404": 1,
