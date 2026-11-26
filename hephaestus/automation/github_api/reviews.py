@@ -13,8 +13,7 @@ from pathlib import Path
 from typing import Any
 
 import hephaestus.automation.github_api as _api
-
-from .pagination import collect_graphql_connection_nodes
+from hephaestus.git.github.policy.pagination import collect_graphql_connection_nodes
 
 ReviewCommentIndexKey = tuple[str, Any] | tuple[str, Any, str]
 

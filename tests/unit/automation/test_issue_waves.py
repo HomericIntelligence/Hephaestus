@@ -10,7 +10,6 @@ from typing import Any
 
 import pytest
 
-import hephaestus
 from hephaestus.automation.issue_waves import (
     IssueWaveBlockedError,
     IssueWaveConflictError,
@@ -609,5 +608,3 @@ def test_decomposition_child_admission_leaves_wave_selection_untouched(
     assert resumed.lease is not None
     assert resumed.lease.issue_numbers == (19,)
     assert 41 not in resumed.lease.issue_numbers
-
-

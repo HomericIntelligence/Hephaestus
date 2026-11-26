@@ -13,10 +13,11 @@ from hephaestus.git.gh import client, rate_limit
 
 
 @pytest.fixture(autouse=True)
-def reset_github_state() -> None:
+def reset_github_state(monkeypatch: pytest.MonkeyPatch) -> None:
     """Reset process-local state for each operation check."""
     client._GH_BREAKER.reset()
     rate_limit.configure_gh_global_throttle(rate=10.0, burst=30.0)
+    monkeypatch.setattr(rate_limit, "gh_rate_limit_budget", lambda *_args, **_kwargs: (None, None))
 
 
 def test_throttle_wait_cannot_outlive_operation(

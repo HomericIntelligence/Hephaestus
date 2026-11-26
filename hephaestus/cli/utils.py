@@ -414,7 +414,8 @@ def add_github_throttle_args(parser: argparse.ArgumentParser) -> None:
         help=text(
             "Global gh token-bucket refill rate for this machine in calls/sec "
             "(default: half the 5,000/hour account quota, about 0.69). "
-            "Pass 0 to disable the global throttle."
+            "The throttle waits for the reported GitHub budget reset before "
+            "it uses the bucket. Pass 0 to disable the global throttle."
         ),
     )
     group.add_argument(

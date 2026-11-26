@@ -41,7 +41,7 @@ def test_rate_limit_classification_performs_no_request(
     monkeypatch.setattr(
         rate_limit,
         "_rate_limit_probe_cache",
-        {"graphql": (_RESET_EPOCH, 99.0)} if cached else {},
+        {"graphql": (None, _RESET_EPOCH, 99.0)} if cached else {},
     )
     probe = Mock(
         return_value=subprocess.CompletedProcess(

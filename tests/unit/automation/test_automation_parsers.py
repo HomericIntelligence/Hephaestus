@@ -24,7 +24,8 @@ NO_UI_HELP = "Disable curses UI (use plain logging instead)"
 THROTTLE_RATE_HELP = (
     "Global gh token-bucket refill rate in calls/sec "
     "(default: half the 5,000/hour account quota, about 0.69). "
-    "Pass 0 to disable the global throttle."
+    "The throttle waits for the reported GitHub budget reset before "
+    "it uses the bucket. Pass 0 to disable the global throttle."
 )
 THROTTLE_BURST_HELP = "Global gh token-bucket burst size (default: 30.0)."
 THROTTLE_DIR_HELP = (
