@@ -5509,7 +5509,7 @@ class TestAgentErrorHandling:
     ) -> None:
         """Exceptions escaping _run_agent are still capped in _run."""
         small_err_max = 40
-        monkeypatch.setattr(f"{_WP}._ERR_MAX", small_err_max)
+        monkeypatch.setattr(f"{_JF}._ERR_MAX", small_err_max)
         job = _agent_job(model="model-run-generic", prompt_builder=lambda: "prompt")
 
         with patch.object(pool, "_run_agent", side_effect=RuntimeError("z" * 200)):
