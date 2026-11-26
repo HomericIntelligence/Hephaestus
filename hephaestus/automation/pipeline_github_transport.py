@@ -63,34 +63,11 @@ type _Scalar = int | str
 
 _CLOSES_ISSUE_LINE_RE = re.compile(r"^Closes #(\d+)\s*$", re.MULTILINE)
 _STANDALONE_VERDICT_LINE_RE = re.compile(r"(?i)^\s*verdict\s*:")
-_HTTP_STATUS_RE = re.compile(r"^HTTP/\S+\s+(\d{3})\b", re.MULTILINE)
 _IMPLEMENTATION_REPLY_BODY_RE = re.compile(
     r"(?s)\A(.*)\n\n<!-- hephaestus-implementation-reply:[0-9a-f]{24} -->\n"
     r"<!-- hephaestus-implementation-batch:([0-9a-f]{32}) -->\Z"
 )
 _FULL_COMMIT_SHA_RE = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
-
-
-def _parse_included_http_response(
-    stdout: str,
-) -> tuple[int | None, dict[str, Any] | None, bool]:
-    """Parse ``gh api --include`` status/JSON and fail closed on malformed payloads."""
-    matches = list(_HTTP_STATUS_RE.finditer(stdout))
-    if not matches:
-        return None, None, False
-    status = int(matches[-1].group(1))
-    headers_end = re.search(r"\r?\n\r?\n", stdout[matches[-1].start() :])
-    if headers_end is None:
-        return status, None, True
-    body_start = matches[-1].start() + headers_end.end()
-    body = stdout[body_start:].strip()
-    if not body:
-        return status, None, True
-    try:
-        parsed = json.loads(body)
-    except json.JSONDecodeError:
-        return status, None, True
-    return (status, parsed, False) if isinstance(parsed, dict) else (status, None, True)
 
 
 def rate_limit_remaining(*, call: GitHubCommandRunner) -> tuple[int, int] | None:
@@ -304,12 +281,11 @@ __all__ = [
     'PLAN_COMMENT_MARKER', 'PLAN_REVIEW_CANONICAL_MARKER', 'PLAN_REVIEW_PREFIX',
     'SCOPE_RETRACTION_MARKER_PREFIX', 'SKIP_REASON_MARKER',
     'STATE_IMPLEMENTATION_GO', 'STATE_IMPLEMENTATION_NO_GO', 'STATE_LABEL_SPECS', 'STATE_SKIP',
-    '_CLOSES_ISSUE_LINE_RE', '_FULL_COMMIT_SHA_RE', '_HTTP_STATUS_RE',
+    '_CLOSES_ISSUE_LINE_RE', '_FULL_COMMIT_SHA_RE',
     '_IMPLEMENTATION_REPLY_BODY_RE', '_STANDALONE_VERDICT_LINE_RE',
     'AutoMergeEnableResult',
     'IssueComment',
     'LockUnavailableError', 'PipelineGitHubTransport',
-    '_parse_included_http_response',
     'close_issue_as_covered', 'ensure_state_dir', 'file_lock', 'find_merged_closing_pr',
     'find_merged_pr_for_issue', 'format_skip_reason_comment', 'get_pr_head_branch', 'gh_call',
     'github_api', 'has_exact_closing_line', 'has_label', 'is_implementation_go',
