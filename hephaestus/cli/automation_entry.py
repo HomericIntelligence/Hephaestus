@@ -9,8 +9,8 @@ with a raw ``ModuleNotFoundError`` traceback (issue #3528).
 Each shim checks for the extra's runtime modules first. When one is absent the
 shim reports a ``ConfigurationError`` through ``hephaestus.errors`` so the
 user gets one reproducible stderr line, exit code ``CONFIGURATION``, and a
-recovery instruction. With the extra installed, the shim delegates to the
-real automation module unchanged.
+recovery instruction. With the extra installed, the shim runs the bounded
+startup update notice and then delegates to the real automation module.
 """
 
 from __future__ import annotations
@@ -19,6 +19,7 @@ import importlib
 import importlib.util
 
 from hephaestus.errors import ConfigurationError, boundary_main
+from hephaestus.version.update_check import check_for_updates
 
 __all__ = [
     "automation_loop_main",
@@ -58,6 +59,7 @@ def _run(module_name: str, argv: list[str] | None) -> int:
 
     def entry(args: list[str] | None) -> int:
         _require_automation_extra()
+        check_for_updates()
         main = importlib.import_module(module_name).main
         return int(main(args))
 

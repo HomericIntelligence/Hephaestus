@@ -101,3 +101,28 @@ def test_system_exit_passes_through(
     monkeypatch.setitem(sys.modules, module_name, fake)
 
     assert _entry(entry_name)(None) == 3
+
+
+def test_entry_runs_startup_update_check(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The shared entry shim runs the advisory update check before dispatch."""
+    module_name = ENTRY_POINTS["automation_loop_main"]
+    fake = types.ModuleType(module_name)
+
+    def fake_main(argv: list[str] | None = None) -> int:
+        return 0
+
+    fake.main = fake_main  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, module_name, fake)
+
+    calls: list[str] = []
+
+    def record_check() -> bool:
+        calls.append("checked")
+        return False
+
+    monkeypatch.setattr(automation_entry, "check_for_updates", record_check)
+
+    assert _entry("automation_loop_main")(None) == 0
+    assert calls == ["checked"]
