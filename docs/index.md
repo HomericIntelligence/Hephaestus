@@ -76,6 +76,23 @@ See the [README](../README.md) for installation and development setup instructio
 - [ASD-STE100 Writing Standard](asd-ste100.md) — Required writing policy,
   scope, principles exception, and official sources
 
+## Startup update notices
+
+A console entry point may call
+`hephaestus.version.update_check.check_for_updates()` when it starts work. The
+helper compares the installed version with the latest stable release from the
+package index. It uses package-version ordering and a two-second network
+timeout. When an update exists, the helper writes one notice to stderr. The
+notice names the active interpreter and gives a command that updates that
+installation. The helper does not install a package.
+
+The helper runs at CLI startup, not at library import. It skips development,
+editable, and uninstalled checkouts. An index failure, a timeout, or a malformed
+response produces no notice and does not change the exit code. The automation
+console scripts call the helper through
+`hephaestus.cli.automation_entry`. Other console scripts may call the same
+helper at their entry point.
+
 ## Contributing
 
 See [CONTRIBUTING.md](../CONTRIBUTING.md) for guidelines.
