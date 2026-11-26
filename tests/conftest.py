@@ -5,6 +5,7 @@ import contextlib
 import json
 import os
 import subprocess
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -269,6 +270,34 @@ def _agents_authenticated_by_default(
         # A module that does not import resolve_agent by value has nothing to patch.
         with contextlib.suppress(AttributeError):
             monkeypatch.setattr(target, _stub_resolve_agent)
+
+
+@pytest.fixture(autouse=True)
+def _unknown_github_budget(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[None]:
+    """Keep the GitHub throttle off the live probe and the machine-wide root.
+
+    The budget path belongs to the tests that drive it with fixed facts. Every
+    other test that reaches the throttle must stay deterministic, must not
+    start a GitHub request, and must not share the host throttle file. A test
+    that needs real budget facts overrides the stub with its own monkeypatch
+    (last writer wins), and a test that needs a specific root configures it.
+    """
+    from hephaestus.git.gh.rate_limit import (
+        DEFAULT_GLOBAL_RATE,
+        configure_gh_global_throttle,
+    )
+
+    configure_gh_global_throttle(
+        rate=DEFAULT_GLOBAL_RATE,
+        burst=30.0,
+        directory=tmp_path / "gh-throttle",
+    )
+    monkeypatch.setattr(
+        "hephaestus.git.gh.rate_limit.gh_rate_limit_budget",
+        lambda *_args, **_kwargs: (None, None),
+    )
+    yield
+    configure_gh_global_throttle(rate=DEFAULT_GLOBAL_RATE, burst=30.0, directory=None)
 
 
 @pytest.fixture

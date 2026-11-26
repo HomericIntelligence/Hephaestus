@@ -49,7 +49,7 @@ def test_bounded_rate_limit_error_does_not_start_another_request(
     shutdown = threading.Event()
     monkeypatch.setattr("time.monotonic", lambda: now[0])
     if stale_cache:
-        rate_limit._rate_limit_probe_cache["graphql"] = (_RESET_EPOCH, 1.0)
+        rate_limit._rate_limit_probe_cache["graphql"] = (None, _RESET_EPOCH, 1.0)
     probe = reset_probe(monkeypatch)
 
     def fail_request(argv: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
@@ -90,7 +90,7 @@ def test_bounded_rate_limit_error_retains_known_reset_evidence(
     probe = reset_probe(monkeypatch)
     message = _LIMIT_MESSAGE
     if evidence == "cached":
-        rate_limit._rate_limit_probe_cache["graphql"] = (_RESET_EPOCH, 99.0)
+        rate_limit._rate_limit_probe_cache["graphql"] = (None, _RESET_EPOCH, 99.0)
     else:
         message = "Limit reached for resource core, resets 2:30pm (UTC)"
     request = Mock(
