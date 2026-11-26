@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import Any, Literal, Protocol, cast
 
 from hephaestus.agents.catalog import (
-    AGENT_CAPABILITIES,
+    AGENT_CAPABILITIES as AGENT_CAPABILITIES,
     DEFAULT_EFFORT_SENTINEL,
     HARNESS_RECORDS,
     AgentCapabilities as AgentCapabilities,
