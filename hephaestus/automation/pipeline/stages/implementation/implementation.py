@@ -123,6 +123,12 @@ from hephaestus.automation.test_summary import (
     summary_reports_no_executed_test,
 )
 from hephaestus.automation.worktree_manager import ADOPTED_HEAD_FAILURES, BRANCH_WORKTREE_OWNED
+from hephaestus.git.verification import (
+    HEPHAESTUS_REQUIRED_CHECK_ARGV as HEPHAESTUS_REQUIRED_CHECK_ARGV,
+    HEPHAESTUS_REQUIRED_CHECK_TIMEOUT_S as HEPHAESTUS_REQUIRED_CHECK_TIMEOUT_S,
+    PRE_PR_TEST_ARGV as PRE_PR_TEST_ARGV,
+    publish_host_verification_failure as publish_host_verification_failure,
+)
 from hephaestus.prompts import PromptCatalog
 from hephaestus.prompts.fencing import fence_content
 from hephaestus.utils.git import _is_full_digest
@@ -146,7 +152,6 @@ from ...github_jobs import (
     ReadCurrentPlanScopeRequest,
 )
 from ...host_capabilities import CapabilityRequestTarget, HostCapabilityReceipt
-from ...host_verification_diagnostic import publish_host_verification_failure
 from ...jobs import (
     WORKTREE_MATERIALIZED_KEY,
     _writer_publication_matches_refresh,
@@ -611,24 +616,10 @@ BRANCH_WORKTREE_OWNER_PENDING_DELAY_S = 0.1
 #: lives in ROUTES).
 PRE_PR_TEST_TIMEOUT_S = 1800
 
-#: Vetted pre-PR test command (BuildTestJob argv must never carry
-#: issue-derived strings).
-PRE_PR_TEST_ARGV: tuple[str, ...] = ("uv", "run", "pytest", "tests", "-q", "--tb=short")
-
-#: Hephaestus owns a canonical local entry point for every source check that
-#: can run before a PR exists.  Keep this fixed in trusted queue code: issue
+#: The fixed pre-PR test and required-check commands come from the canonical
+#: library spec source. A stage must not build its own pytest argv: issue
 #: content and programmatic generic-test overrides must not weaken the gate.
-HEPHAESTUS_REQUIRED_CHECK_ARGV: tuple[str, ...] = (
-    "bash",
-    "scripts/run_ci_local.sh",
-    "all",
-    "--rebuild",
-)
-
-
-#: The required suite runs CI's formerly parallel jobs serially on a local
-#: host, so it needs a wider bound than one generic pytest invocation.
-HEPHAESTUS_REQUIRED_CHECK_TIMEOUT_S = 7200
+#: HEPHAESTUS_REQUIRED_CHECK_TIMEOUT_S is imported from the same source.
 
 
 def _pre_pr_runner_handoff_reason(result: JobResult) -> str | None:
