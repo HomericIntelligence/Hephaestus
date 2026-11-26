@@ -34,6 +34,8 @@ from hephaestus.agents.catalog import (
     AGENT_CAPABILITIES,
     DEFAULT_EFFORT_SENTINEL,
     HARNESS_RECORDS,
+    AgentCapabilities as AgentCapabilities,
+    AgentCapability as AgentCapability,
     EffortRequiresModelError,
     Harness,
     UnsupportedAgentError,
