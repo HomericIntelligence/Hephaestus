@@ -2887,6 +2887,8 @@ def _seed_oversized_plan(github: FakeStageGitHub, issue: int) -> None:
     plan = "## Oversized plan\n\n" + ("A large decision paragraph.\n" * 2_000)
     _seed_canonical_plan(github, issue, plan)
 
+
+class TestFinalizedPlanAdmission:
     """A durable Athena finalized plan is admitted without plan comments (#3665)."""
 
     @staticmethod
