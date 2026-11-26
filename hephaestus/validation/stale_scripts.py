@@ -1,11 +1,15 @@
 """Detect scripts in ``scripts/`` with no usage references.
 
-A script is considered potentially stale if an exact reference to its
-scripts-relative path or Python module does not appear in any of:
+A script is considered potentially stale if no exact command operand or
+Python import names its scripts-relative path in any of:
 
 - GitHub Actions workflows and repository configuration
 - root documentation and ``docs/``
 - package source, tests, and other scripts (cross-references)
+
+A command operand is a scripts-relative path invoked by python, python3, bash,
+sh, source, the dot command, or sbatch. Imports are resolved from the Python
+AST. Comments and string literals are not scanned as code.
 
 ``scripts/README.md`` is deliberately excluded. Its complete inventory is a
 documentation invariant, not evidence that an operator or automation invokes
@@ -28,8 +32,11 @@ Exit codes:
 
 from __future__ import annotations
 
+import ast
+import io
 import re
 import sys
+import tokenize
 from pathlib import Path
 
 from hephaestus.cli.localization import text
@@ -127,44 +134,223 @@ def get_reference_targets(repo_root: Path) -> list[Path]:
     return sorted({target for target in targets if target not in non_usage_documents})
 
 
-def _script_referenced_by_name(script_path: str, targets: list[Path], own_path: Path) -> bool:
-    """Return True if *script_path* appears in at least one target file (not itself).
+# Command names whose exact scripts-relative operand counts as usage evidence.
+# python3 precedes python so the longer name is tried first.
+_COMMAND_NAMES: tuple[str, ...] = ("python3", "python", "bash", "sh", "source", ".", "sbatch")
+
+# Token types that hold prose rather than executable code in a Python file.
+_NON_CODE_TOKENS: frozenset[int] = frozenset(
+    token_type
+    for token_type in (
+        tokenize.COMMENT,
+        tokenize.STRING,
+        getattr(tokenize, "FSTRING_MIDDLE", None),
+    )
+    if token_type is not None
+)
+
+# A hash marks a comment only at the start of a line or after whitespace.
+_LINE_COMMENT = re.compile(r"(?<!\S)#.*")
+
+
+def _blank_python_prose(source: str) -> str:
+    """Return *source* with Python comments and string literals blanked.
+
+    Blanking keeps line and column positions. A command that sits in a comment,
+    docstring, or string literal is then invisible to the command scanner.
 
     Args:
-        script_path: Path relative to ``scripts/`` to search for.
+        source: Python source text.
+
+    Returns:
+        Source text with non-code token characters replaced by spaces.
+
+    """
+    rows = [list(line) for line in source.splitlines(keepends=True)]
+    try:
+        tokens = tokenize.generate_tokens(io.StringIO(source).readline)
+        for token in tokens:
+            if token.type not in _NON_CODE_TOKENS:
+                continue
+            start_row, start_col = token.start
+            end_row, end_col = token.end
+            for row_index in range(start_row - 1, end_row):
+                if row_index >= len(rows):
+                    break
+                first = start_col if row_index == start_row - 1 else 0
+                last = end_col if row_index == end_row - 1 else len(rows[row_index])
+                for col in range(first, min(last, len(rows[row_index]))):
+                    if rows[row_index][col] != "\n":
+                        rows[row_index][col] = " "
+    except (IndentationError, SyntaxError, tokenize.TokenError):
+        return ""
+    return "".join("".join(row) for row in rows)
+
+
+def _scannable_text(path: Path, raw: str) -> str:
+    """Return text that holds only code-like command mentions.
+
+    Python files lose comments and string literals. Other files lose line
+    comments, and joined continuations place one logical command on one line.
+
+    Args:
+        path: Path of the target file.
+        raw: Raw text of the target file.
+
+    Returns:
+        Text to scan for command references.
+
+    """
+    if path.suffix == ".py":
+        return _blank_python_prose(raw)
+    without_comments = "\n".join(_LINE_COMMENT.sub("", line) for line in raw.splitlines())
+    return without_comments.replace("\\\n", " ")
+
+
+def _script_referenced_by_command(script_path: str, targets: list[Path], own_path: Path) -> bool:
+    """Return True if a logical command invokes the exact scripts-relative path.
+
+    The command names are python, python3, bash, sh, source, the dot command,
+    and sbatch. The operand must carry the ``scripts/`` root and may start with
+    ``./``. A direct ``./scripts/...`` path also counts. Comments and string
+    literals are not scanned as commands.
+
+    Args:
+        script_path: POSIX path of the script relative to ``scripts/``.
         targets: Files to search through.
         own_path: Resolved path of the script itself (excluded from search).
 
     Returns:
-        True if an external reference exists.
+        True if an exact command operand exists in a target file.
 
     """
-    reference = re.compile(r"(?<![A-Za-z0-9_.-])" + re.escape(script_path) + r"(?![A-Za-z0-9_.-])")
+    operand = r"(?:\./)?scripts/" + re.escape(script_path)
+    commands = "|".join(re.escape(name) for name in _COMMAND_NAMES)
+    invoked = re.compile(r"(?<![\w./-])(?:" + commands + r")[ \t]+" + operand + r"(?![\w./-])")
+    direct = re.compile(r"(?<![\w./-])\./scripts/" + re.escape(script_path) + r"(?![\w./-])")
+
     for target in targets:
         if target.resolve() == own_path:
             continue
         try:
-            content = target.read_text(encoding="utf-8", errors="ignore")
+            raw = target.read_text(encoding="utf-8", errors="ignore")
         except OSError:
             continue
-        if reference.search(content):
+        text = _scannable_text(target, raw)
+        if invoked.search(text) or direct.search(text):
             return True
     return False
 
 
-def _script_referenced_by_import(
+def _module_to_script_path(module: str, scripts_dir: Path) -> str | None:
+    """Map a dotted module name to its scripts-relative Python path.
+
+    Args:
+        module: Dotted module name.
+        scripts_dir: Path to the ``scripts/`` directory.
+
+    Returns:
+        POSIX path relative to ``scripts/``, or None if *module* is outside it.
+
+    """
+    prefix = scripts_dir.name + "."
+    if not module.startswith(prefix):
+        return None
+    tail = module[len(prefix) :]
+    if not tail:
+        return None
+    return tail.replace(".", "/") + ".py"
+
+
+def _relative_import_matches(node: ast.ImportFrom, stem: str) -> bool:
+    """Return True if a level-one relative import names the sibling stem.
+
+    Args:
+        node: ImportFrom node with level one.
+        stem: Stem of the script under test.
+
+    Returns:
+        True if the relative import names the stem.
+
+    """
+    return node.module == stem or (
+        node.module is None and any(alias.name == stem for alias in node.names)
+    )
+
+
+def _plain_import_matches(
+    node: ast.Import,
+    script_path: str,
+    scripts_dir: Path,
+    stem: str,
+    sibling: bool,
+) -> bool:
+    """Return True if an import statement resolves to the script.
+
+    Args:
+        node: Import node to inspect.
+        script_path: POSIX path of the script relative to ``scripts/``.
+        scripts_dir: Path to the ``scripts/`` directory.
+        stem: Stem of the script under test.
+        sibling: True if the target file sits beside the script.
+
+    Returns:
+        True if the import resolves to the script.
+
+    """
+    return any(
+        _module_to_script_path(alias.name, scripts_dir) == script_path
+        or (sibling and alias.name == stem)
+        for alias in node.names
+    )
+
+
+def _from_import_matches(
+    node: ast.ImportFrom,
+    script_path: str,
+    scripts_dir: Path,
+    stem: str,
+    sibling: bool,
+) -> bool:
+    """Return True if a from-import statement resolves to the script.
+
+    Args:
+        node: ImportFrom node to inspect.
+        script_path: POSIX path of the script relative to ``scripts/``.
+        scripts_dir: Path to the ``scripts/`` directory.
+        stem: Stem of the script under test.
+        sibling: True if the target file sits beside the script.
+
+    Returns:
+        True if the import resolves to the script.
+
+    """
+    if node.level == 1 and sibling and _relative_import_matches(node, stem):
+        return True
+    if node.level or node.module is None:
+        return False
+    if _module_to_script_path(node.module, scripts_dir) == script_path:
+        return True
+    if any(
+        _module_to_script_path(f"{node.module}.{alias.name}", scripts_dir) == script_path
+        for alias in node.names
+    ):
+        return True
+    return sibling and node.module == stem
+
+
+def _script_referenced_by_python_import(
     script_path: str,
     scripts_dir: Path,
     targets: list[Path],
     own_path: Path,
 ) -> bool:
-    """Return True if an exact import or path reference names this script.
+    """Return True if an AST import node resolves to the exact Python script.
 
-    A Python script is matched by its full dotted module path
-    (``scripts.shell.tool``), by ``from scripts.shell import tool``, or by a
-    bare sibling import from a file in the same directory. Path forms that use
-    the scripts-relative path without a suffix are also matched. A basename
-    shared with a script in another directory does not create a false match.
+    The three dotted spellings are ``import scripts.shell.tool``,
+    ``from scripts.shell import tool``, and
+    ``from scripts.shell.tool import run``. A bare or relative sibling import
+    from a file in the same directory also counts.
 
     Args:
         script_path: POSIX path of the script relative to ``scripts/``.
@@ -173,72 +359,34 @@ def _script_referenced_by_import(
         own_path: Resolved path of the script itself (excluded from search).
 
     Returns:
-        True if an exact import or path reference exists.
+        True if an exact import resolves to the script.
 
     """
-    module_prefix = scripts_dir.name
-    stem: str | None = None
-    patterns: list[re.Pattern[str]] = []
-
-    if script_path.endswith(".py"):
-        parts = script_path[: -len(".py")].split("/")
-        stem = parts[-1]
-        module = ".".join((module_prefix, *parts))
-        parent = ".".join((module_prefix, *parts[:-1]))
-        patterns.append(re.compile(r"(?<![\w.-])(?:from|import)\s+" + re.escape(module) + r"\b"))
-        patterns.append(
-            re.compile(
-                r"(?<![\w.-])from\s+"
-                + re.escape(parent)
-                + r"\s+import\s+"
-                + re.escape(stem)
-                + r"\b"
-            )
-        )
-
-    name = Path(script_path).name
-    slash_path = script_path[: -len(Path(script_path).suffix)] if "." in name else script_path
-    if "/" in slash_path:
-        path_pattern = re.compile(
-            r"(?<![\w./-])(?:"
-            + re.escape(module_prefix)
-            + r"/)?"
-            + re.escape(slash_path)
-            + r"(?![\w.-])"
-        )
-    else:
-        path_pattern = re.compile(
-            r"(?<![\w./-])"
-            + re.escape(module_prefix)
-            + r"/"
-            + re.escape(slash_path)
-            + r"(?![\w.-])"
-        )
-    patterns.append(path_pattern)
-
-    sibling_pattern: re.Pattern[str] | None = None
-    if stem is not None:
-        sibling_pattern = re.compile(
-            r"^\s*(?:import|from)\s+" + re.escape(stem) + r"\b", re.MULTILINE
-        )
-
+    stem = Path(script_path).stem
     script_parent = (scripts_dir / script_path).parent.resolve()
+
     for target in targets:
-        resolved = target.resolve()
-        if resolved == own_path:
+        if target.suffix != ".py" or target.resolve() == own_path:
             continue
         try:
-            content = target.read_text(encoding="utf-8", errors="ignore")
+            raw = target.read_text(encoding="utf-8", errors="ignore")
         except OSError:
             continue
-        if any(pattern.search(content) for pattern in patterns):
-            return True
-        if (
-            sibling_pattern is not None
-            and resolved.parent == script_parent
-            and sibling_pattern.search(content)
-        ):
-            return True
+        try:
+            tree = ast.parse(raw)
+        except (SyntaxError, ValueError):
+            continue
+        sibling = target.parent.resolve() == script_parent
+
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import) and _plain_import_matches(
+                node, script_path, scripts_dir, stem, sibling
+            ):
+                return True
+            if isinstance(node, ast.ImportFrom) and _from_import_matches(
+                node, script_path, scripts_dir, stem, sibling
+            ):
+                return True
     return False
 
 
@@ -275,9 +423,9 @@ def find_stale_scripts(
         if exclude_pattern and exclude_pattern in script_path:
             continue
         own_path = (scripts_dir / script_path).resolve()
-        referenced = _script_referenced_by_name(
+        referenced = _script_referenced_by_command(
             script_path, targets, own_path
-        ) or _script_referenced_by_import(script_path, scripts_dir, targets, own_path)
+        ) or _script_referenced_by_python_import(script_path, scripts_dir, targets, own_path)
         if not referenced:
             stale.append(script_path)
 
