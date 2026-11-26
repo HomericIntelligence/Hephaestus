@@ -5,6 +5,7 @@ import logging
 import signal
 import time
 from contextlib import suppress
+from datetime import UTC, datetime
 from pathlib import Path
 
 import hephaestus.automation.pipeline.coordinator_observability as _observability
@@ -55,6 +56,18 @@ _BREAKER_STATE_LABELS = frozenset({"closed", "open", "half_open"})
 _ALERT_NAME_LABELS = frozenset(
     {"circuit_breaker_open", "queue_depth_exceeds", "queue_saturated", "pipeline_stalled"}
 )
+
+#: Bounded item signal that names a retry cause from the closed RetryCause set.
+_TIMING_RETRY_CAUSE_KEY = "_timing_retry_cause"
+
+
+def _bounded_retry_cause(item: ct.WorkItem) -> work_item_mod.RetryCause:
+    """Return a closed retry cause from a bounded work-item signal."""
+    signal = item.payload.get(_TIMING_RETRY_CAUSE_KEY)
+    try:
+        return work_item_mod.RetryCause(signal)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return work_item_mod.RetryCause.NONE
 
 
 class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
@@ -152,6 +165,32 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
     def _record_event(self, event: str, *fields: ct.Any) -> None:
         """Append an event to memory and, when configured, to JSONL on disk."""
         _observability.record_event(self, event, *fields, now_fn=self._wall_time, logger=logger)
+
+    def _observe_timing(
+        self,
+        item: ct.WorkItem,
+        *,
+        activity: work_item_mod.PhaseActivity = work_item_mod.PhaseActivity.ACTIVE,
+        retry_cause: work_item_mod.RetryCause | None = None,
+    ) -> work_item_mod.TimingReceipt:
+        """Update one item's single timing receipt without changing routing.
+
+        Consecutive observations tile time: a new window starts where the
+        previous receipt ended. The receipt is the only timing state retained.
+        """
+        ended = datetime.fromtimestamp(self._wall_time(), UTC)
+        previous = item.timing_receipt
+        started = (
+            datetime.fromisoformat(previous.end.replace("Z", "+00:00"))
+            if previous is not None
+            else ended
+        )
+        return item.record_timing(
+            started=started,
+            ended=ended,
+            activity=activity,
+            retry_cause=(retry_cause if retry_cause is not None else _bounded_retry_cause(item)),
+        )
 
     def _observability_snapshot(self) -> dict[str, ct.Any]:
         """Read the coordinator lifecycle values that observability exposes."""
@@ -510,6 +549,16 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
         if item.result is None or item.payload.get("_summary_recorded", False):
             return
         item.payload["_summary_recorded"] = True
+        self._observe_timing(item, activity=work_item_mod.PhaseActivity.ACTIVE)
+        summary = work_item_mod.sanitized_terminal_summary(
+            item, source_revision=self.config.source_revision
+        )
+        receipt = item.timing_receipt
+        self._record_event(
+            "terminal_timing_summary",
+            summary,
+            receipt.to_dict() if receipt is not None else {},
+        )
         self._terminal_summary.record(item)
         self._seen_item_ids.discard(id(item))
 
@@ -722,6 +771,11 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
             # steps that wait out a long timer must not accumulate toward
             # the stall budget.
             item.payload[ct._WATCHDOG_STALL_NET_KEY] = max(0.0, parked - max(0.0, delay_s))
+        self._observe_timing(
+            item,
+            activity=work_item_mod.PhaseActivity.WAITING,
+            retry_cause=work_item_mod.RetryCause.EXTERNAL_WAIT,
+        )
         item.add_history_event(item.stage, item.state, note=f"timer-parked {delay_s:.1f}s")
         self._record_event("timer_park", item.stage.value, self._item_key(item), delay_s)
 
@@ -952,6 +1006,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
         never kills the loop.
         """
         self._progress = True
+        self._observe_timing(item, activity=work_item_mod.PhaseActivity.ACTIVE)
         stage = self.stages[item.stage]
         ctx = self._ctx_for(item)
         try:
@@ -996,6 +1051,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
                             ct.StageOutcome(Disposition.ADVANCE, f"[dry-run] would {descr}"),
                         )
                         return
+                    self._observe_timing(item, activity=work_item_mod.PhaseActivity.WAITING)
                     self._submit(item, result)
                     return
                 self._route(item, result)
