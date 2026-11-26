@@ -239,7 +239,7 @@ class TestCoordinatorTimingHooks:
 
     def test_observe_timing_tiles_windows_without_new_state(self) -> None:
         clock = [1_000.0]
-        host = cast(Any, object.__new__(CoordinatorRuntime))
+        host = cast(Any, object.__new__(cast(Any, CoordinatorRuntime)))
         host._wall_time = lambda: clock[0]
         item = WorkItem(repo="org/repo", kind=ItemKind.ISSUE, issue=1)
         item.attempts["plan"] = 2
@@ -282,7 +282,7 @@ class TestCoordinatorTimingHooks:
         item.result = None
         item.payload["_prompt"] = "do not retain this"
         item.payload["_private_path"] = "/private/path"
-        host = cast(Any, object.__new__(CoordinatorRuntime))
+        host = cast(Any, object.__new__(cast(Any, CoordinatorRuntime)))
         host.config = config
         host.event_log = []
         host._event_log_disabled = False
