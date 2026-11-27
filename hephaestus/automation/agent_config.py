@@ -39,8 +39,8 @@ from hephaestus.agents.invocation_config import (
     DEFAULT_GIT_MESSAGE_AGENT_TIMEOUT,
     DEFAULT_THROUGHPUT_TIMEOUT,
     _checkout_identity,  # noqa: F401 - compatibility re-export for existing importers
-    _registered_worktree_roots,  # noqa: F401 - compatibility re-export for existing importers
-    _repo_scoped_git_env,  # noqa: F401 - compatibility re-export for existing importers
+    _registered_worktree_roots as _registered_worktree_roots,
+    _repo_scoped_git_env as _repo_scoped_git_env,
     _resolve_model,
     agent_default_timeout,
     fallback_model,
