@@ -21,7 +21,6 @@ from hephaestus.automation.source_worktree import (
     SourceWorkspaceManager,
     SourceWorkspacePreparationError,
 )
-from hephaestus.automation.worktree_manager import WorktreeManager
 from hephaestus.git.git_utils import (
     delete_local_branch_if_unchanged,
     delete_reserved_branch_if_unchanged,
@@ -33,6 +32,7 @@ from hephaestus.git.runtime import (
     operation_deadline,
     operation_file_lock,
 )
+from hephaestus.git.worktree_manager import WorktreeManager
 from hephaestus.utils.helpers import get_repo_root
 from hephaestus.utils.worktree_identity import (
     SOURCE_WORKTREE_LANES,

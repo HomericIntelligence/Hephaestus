@@ -70,7 +70,7 @@ from hephaestus.automation.state_labels import (
     STATE_PLAN_NO_GO,
     STATE_SKIP,
 )
-from hephaestus.automation.worktree_manager import BRANCH_WORKTREE_OWNED
+from hephaestus.git.worktree_manager import BRANCH_WORKTREE_OWNED
 from tests.unit.automation.pipeline.conftest import FakeWorkerPool
 from tests.unit.automation.pipeline.stages.conftest import (
     FakeSourceWorkspaceManager,

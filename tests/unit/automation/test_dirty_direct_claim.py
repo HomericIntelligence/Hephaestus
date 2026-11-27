@@ -1229,7 +1229,7 @@ def test_probe_claim_classifies_a_foreign_registered_writer_path_not_applicable(
 
     from hephaestus.automation.pipeline.jobs import GitJob
     from hephaestus.automation.pipeline.worker_pool import WorkerPool
-    from hephaestus.automation.worktree_manager import WorktreeManager
+    from hephaestus.git.worktree_manager import WorktreeManager
 
     (tmp_path / "foreign").mkdir()
     foreign, _, _ = _repository(tmp_path / "foreign", origin_repository="other/project")

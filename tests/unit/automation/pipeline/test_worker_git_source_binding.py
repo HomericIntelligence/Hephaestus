@@ -11,11 +11,11 @@ from unittest.mock import Mock
 import pytest
 
 from hephaestus.agents.workspace import SourceLane
-from hephaestus.automation import worktree_manager
 from hephaestus.automation.pipeline.git_jobs import GitJob
 from hephaestus.automation.pipeline.job_results import JobResult
 from hephaestus.automation.pipeline.worker_pool import WorkerPool
 from hephaestus.automation.source_worktree import SourceWorkspaceManager
+from hephaestus.git import worktree_manager
 from hephaestus.git.git_utils import run
 from hephaestus.utils.file_lock import LockUnavailableError, file_lock
 from tests.unit.automation.test_source_worktree import _git, _repository

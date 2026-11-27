@@ -60,7 +60,7 @@ def _registered_git_fixture(root: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
     """Adapt only the unsupported listing protocol from actual registration facts."""
     import subprocess
 
-    from hephaestus.automation import worktree_manager
+    from hephaestus.git import worktree_manager
     from hephaestus.git.git_utils import run
     from tests.unit.automation.test_source_worktree import _git
 
@@ -527,7 +527,6 @@ def test_worker_retains_real_rebase_result_before_capability_failure(
     from types import SimpleNamespace
     from unittest.mock import Mock
 
-    from hephaestus.automation import worktree_manager
     from hephaestus.automation.pipeline import worker_pool
     from hephaestus.automation.pipeline.coordinator_types import PipelineConfig
     from hephaestus.automation.pipeline.host_capabilities import (
@@ -547,7 +546,7 @@ def test_worker_retains_real_rebase_result_before_capability_failure(
     )
     from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
     from hephaestus.automation.pipeline.worker_pool import WorkerPool
-    from hephaestus.git import git_utils
+    from hephaestus.git import git_utils, worktree_manager
     from hephaestus.git.git_utils import run
     from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
     from tests.unit.automation.test_source_worktree import _git
@@ -1932,13 +1931,12 @@ def _automatic_local_worker_case(
     from types import SimpleNamespace
     from unittest.mock import Mock
 
-    from hephaestus.automation import worktree_manager
     from hephaestus.automation.pipeline import worker_pool
     from hephaestus.automation.pipeline.host_capabilities import WorkerCapabilities
     from hephaestus.automation.pipeline.jobs import JobResult
     from hephaestus.automation.pipeline.rebase_policy import RebaseValidationPolicy
     from hephaestus.automation.pipeline.worker_pool import WorkerPool
-    from hephaestus.git import git_utils
+    from hephaestus.git import git_utils, worktree_manager
     from tests.unit.automation.test_source_worktree import _git
 
     nonce = "e" * 32

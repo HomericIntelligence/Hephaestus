@@ -54,12 +54,11 @@ MOVERS = frozenset(
 # moved into the library (issue #3512, W2 slice 2). The ``worktree_manager`` ->
 # ``git_utils`` pair retired when ``git_utils`` moved into the library (issue
 # #3512, W2 slice 3). The ``worktree_manager`` -> ``repo_intake`` pair retired
-# when ``repo_intake`` moved into the library (issue #3512, W2 slice 4).
-INTERNAL_ALLOWED = frozenset(
-    {
-        ("source_worktree", "worktree_manager"),
-    }
-)
+# when ``repo_intake`` moved into the library (issue #3512, W2 slice 4). The
+# ``source_worktree`` -> ``worktree_manager`` pair retired when ``worktree_manager``
+# moved into the library (issue #3512, W2 slice 5). No internal mover-to-mover
+# edges remain in the product layer.
+INTERNAL_ALLOWED = frozenset()
 
 _LIB_ROOT = Path(hephaestus.__file__).parent
 _AUTOMATION_ROOT = _LIB_ROOT / "automation"

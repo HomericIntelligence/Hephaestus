@@ -137,15 +137,6 @@ from hephaestus.automation.source_worktree import (
     SourceWorkspaceRecoveryKind,
 )
 from hephaestus.automation.verified_runner import build_verified_runner_argv
-from hephaestus.automation.worktree_manager import (
-    BRANCH_WORKTREE_OWNED,
-    BranchWorktreeOwnedError,
-    DirectScopeStaleStateError,
-    ImplementationWriterAuthority,
-    WorktreeCreationReceiptError,
-    WorktreeManager,
-    consume_implementation_writer_authority,
-)
 from hephaestus.config.child_environments import (
     build_git_child_env,
     build_nested_host_verification_env,
@@ -155,6 +146,15 @@ from hephaestus.git.commit_runtime import CommitIssueMetadata
 from hephaestus.git.repo_intake import RepoIntakeError, RepoIntakeManager
 from hephaestus.git.runtime import operation_file_lock
 from hephaestus.git.snapshot import _terminate_bounded_process_tree
+from hephaestus.git.worktree_manager import (
+    BRANCH_WORKTREE_OWNED,
+    BranchWorktreeOwnedError,
+    DirectScopeStaleStateError,
+    ImplementationWriterAuthority,
+    WorktreeCreationReceiptError,
+    WorktreeManager,
+    consume_implementation_writer_authority,
+)
 from hephaestus.git.writer import ImplementationWriterHandoff
 from hephaestus.prompts import PromptCatalog
 from hephaestus.resilience import CircuitBreakerOpenError, get_circuit_breaker
@@ -498,7 +498,7 @@ def _configure_writer_creation_failure(
     private: str,
 ) -> None:
     """Configure one creation boundary without increasing the test flow."""
-    from hephaestus.automation.worktree_manager import RemoteGitRefreshError
+    from hephaestus.git.worktree_manager import RemoteGitRefreshError
 
     if boundary == "remote_refresh":
         manager.create_worktree.side_effect = RemoteGitRefreshError(private)

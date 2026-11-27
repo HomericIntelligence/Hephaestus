@@ -29,7 +29,6 @@ from hephaestus.automation.event_log_retention import event_log_lifecycle
 from hephaestus.automation.models import DEFAULT_STATE_DIR
 from hephaestus.automation.pipeline.coordinator_observability import record_event
 from hephaestus.automation.pipeline.repository_lock import RepositoryOperationLock
-from hephaestus.automation.worktree_manager import WorktreeManager
 from hephaestus.git import runtime as git_runtime
 from hephaestus.git.repo_intake import (
     RepoIntakeError,
@@ -37,6 +36,7 @@ from hephaestus.git.repo_intake import (
     RepoIntakeReceipt,
 )
 from hephaestus.git.snapshot import _controlled_git_env
+from hephaestus.git.worktree_manager import WorktreeManager
 from hephaestus.utils.file_lock import file_lock
 
 
