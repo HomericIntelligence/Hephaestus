@@ -20,7 +20,7 @@ from hephaestus.automation.pipeline.git_jobs import GitJob
 from hephaestus.automation.pipeline.queues import CompletionQueue
 from hephaestus.automation.pipeline.worker_pool import WorkerPool
 from hephaestus.automation.source_worktree import SourceWorkspaceManager
-from hephaestus.automation.worktree_manager import WorktreeManager
+from hephaestus.git.worktree_manager import WorktreeManager
 from hephaestus.utils.file_lock import file_lock
 from tests.unit.automation.test_source_worktree import _repository
 

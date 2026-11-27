@@ -317,18 +317,6 @@ from hephaestus.automation.verified_runner import (
     bind_verified_runner_git_executable,
     build_verified_runner_argv,
 )
-from hephaestus.automation.worktree_manager import (
-    ADOPTED_HEAD_TRANSPORT_FAILED,
-    ADOPTED_HEAD_VALIDATION_FAILED,
-    BRANCH_WORKTREE_OWNED,
-    STALE_PREDICATE_CHECKOUT_PIN,
-    BranchWorktreeOwnedError,
-    DirectScopeStaleStateError,
-    ImplementationWriterAuthority,
-    RemoteGitRefreshError,
-    WorktreeCreationReceiptError,
-    WorktreeManager,
-)
 from hephaestus.config.child_environments import (
     build_git_child_env,
     build_git_signing_env,
@@ -364,6 +352,18 @@ from hephaestus.git.snapshot import (
     _secure_dir_fd_supported as _secure_dir_fd_supported,
     _trusted_git_executable as _trusted_git_executable,
     _valid_dirty_content_snapshot as _valid_dirty_content_snapshot,
+)
+from hephaestus.git.worktree_manager import (
+    ADOPTED_HEAD_TRANSPORT_FAILED,
+    ADOPTED_HEAD_VALIDATION_FAILED,
+    BRANCH_WORKTREE_OWNED,
+    STALE_PREDICATE_CHECKOUT_PIN,
+    BranchWorktreeOwnedError,
+    DirectScopeStaleStateError,
+    ImplementationWriterAuthority,
+    RemoteGitRefreshError,
+    WorktreeCreationReceiptError,
+    WorktreeManager,
 )
 from hephaestus.git.writer import ImplementationWriterHandoff
 from hephaestus.io.utils import write_secure

@@ -121,7 +121,6 @@ from hephaestus.automation.test_summary import (
     last_pytest_summary_line,
     summary_reports_no_executed_test,
 )
-from hephaestus.automation.worktree_manager import ADOPTED_HEAD_FAILURES, BRANCH_WORKTREE_OWNED
 from hephaestus.git.commit_policy import (
     normalize_strict_conventional_title as normalize_strict_conventional_title,
 )
@@ -131,6 +130,7 @@ from hephaestus.git.verification import (
     PRE_PR_TEST_ARGV as PRE_PR_TEST_ARGV,
     publish_host_verification_failure as publish_host_verification_failure,
 )
+from hephaestus.git.worktree_manager import ADOPTED_HEAD_FAILURES, BRANCH_WORKTREE_OWNED
 from hephaestus.prompts import PromptCatalog
 from hephaestus.prompts.fencing import fence_content
 from hephaestus.utils.git import _is_full_digest

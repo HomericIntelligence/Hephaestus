@@ -24,7 +24,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from hephaestus.agents.workspace import SourceLane, WorkspaceBinding
-from hephaestus.automation import source_worktree, worktree_manager
+from hephaestus.automation import source_worktree
 from hephaestus.automation.pipeline.coordinator_types import PipelineConfig
 from hephaestus.automation.pipeline.git_cleanup import run_cleanup_job
 from hephaestus.automation.pipeline.git_jobs import GitJob
@@ -47,13 +47,13 @@ from hephaestus.automation.source_worktree import (
     _git as _source_worktree_git,
     _PreparationDeadline,
 )
-from hephaestus.automation.worktree_manager import (
+from hephaestus.config.child_environments import build_git_child_env
+from hephaestus.git import worktree_manager, writer as implementation_writer
+from hephaestus.git.worktree_manager import (
     ImplementationWriterAuthority,
     WorktreeCreationReceiptError,
     WorktreeManager,
 )
-from hephaestus.config.child_environments import build_git_child_env
-from hephaestus.git import writer as implementation_writer
 from hephaestus.utils.file_lock import LockUnavailableError, file_lock
 
 

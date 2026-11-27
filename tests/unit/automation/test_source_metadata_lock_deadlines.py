@@ -19,8 +19,8 @@ from hephaestus.automation.source_worktree import (
     SourceWorkspacePreparationError,
     _PreparationDeadline,
 )
-from hephaestus.automation.worktree_manager import WorktreeManager
 from hephaestus.git import runtime as git_runtime
+from hephaestus.git.worktree_manager import WorktreeManager
 from hephaestus.utils.file_lock import LockUnavailableError, file_lock
 
 

@@ -15,15 +15,14 @@ from typing import Any
 import pytest
 
 from hephaestus.agents.workspace import SourceLane
-from hephaestus.automation import worktree_manager
 from hephaestus.automation.source_worktree import (
     SourceWorkspaceError,
     SourceWorkspaceManager,
     _PreparationDeadline,
 )
-from hephaestus.automation.worktree_manager import WorktreeManager
 from hephaestus.config.child_environments import build_git_child_env
-from hephaestus.git import runtime as git_runtime
+from hephaestus.git import runtime as git_runtime, worktree_manager
+from hephaestus.git.worktree_manager import WorktreeManager
 
 
 def _git(repo: Path, *args: str) -> str:

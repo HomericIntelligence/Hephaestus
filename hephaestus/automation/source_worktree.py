@@ -28,11 +28,6 @@ from hephaestus.agents.workspace import (
     WorkspaceBindingError,
     validate_workspace_binding,
 )
-from hephaestus.automation.worktree_manager import (
-    ImplementationWriterAuthority,
-    WorktreeManager,
-    consume_implementation_writer_authority,
-)
 from hephaestus.config.child_environments import build_git_signing_env
 from hephaestus.git.commit_paths import parse_porcelain_status
 from hephaestus.git.runtime import (
@@ -44,6 +39,11 @@ from hephaestus.git.runtime import (
 from hephaestus.git.snapshot import (
     _dirty_worktree_content_snapshot,
     _dirty_worktree_snapshot_evidence,
+)
+from hephaestus.git.worktree_manager import (
+    ImplementationWriterAuthority,
+    WorktreeManager,
+    consume_implementation_writer_authority,
 )
 from hephaestus.git.writer import (
     ImplementationWriterHandoff,

@@ -10,9 +10,9 @@ from unittest.mock import MagicMock, Mock, patch
 import pytest
 
 from hephaestus.agents.workspace import SourceLane
-from hephaestus.automation import worktree_manager as worktree_manager_module
 from hephaestus.automation.source_worktree import SourceWorkspaceManager
-from hephaestus.automation.worktree_manager import (
+from hephaestus.git import worktree_manager as worktree_manager_module
+from hephaestus.git.worktree_manager import (
     BranchWorktreeOwnedError,
     DirectScopeStaleStateError,
     RemoteGitRefreshError,
@@ -237,7 +237,7 @@ class TestWorktreeManager:
         with (
             patch.object(manager, "_worktree_holding_branch", return_value=None),
             patch(
-                "hephaestus.automation.worktree_manager.operation_file_lock",
+                "hephaestus.git.worktree_manager.operation_file_lock",
                 side_effect=fake_file_lock,
             ),
         ):
@@ -344,7 +344,7 @@ class TestWorktreeManager:
                 },
             ),
             patch(
-                "hephaestus.automation.worktree_manager.is_clean_working_tree",
+                "hephaestus.git.worktree_manager.is_clean_working_tree",
                 return_value=writer_state == "clean",
             ) as clean,
             pytest.raises(BranchWorktreeOwnedError) as raised,
@@ -589,7 +589,7 @@ class TestWorktreeManager:
         # absent locally), worktree add. Second creation returns early.
         assert worktree_mocks.run.call_count == 4
 
-    @patch("hephaestus.automation.worktree_manager.shutil.rmtree")
+    @patch("hephaestus.git.worktree_manager.shutil.rmtree")
     def test_create_worktree_removes_stale_directory(
         self, mock_rmtree: Any, worktree_mocks: Any, tmp_path: Any
     ) -> None:
@@ -773,7 +773,7 @@ class TestWorktreeManager:
         with (
             patch.object(manager, "_registered_worktree_at_path", return_value=None),
             patch.object(manager, "_worktree_holding_branch", return_value=None),
-            patch("hephaestus.automation.worktree_manager.run", side_effect=branch_lookup),
+            patch("hephaestus.git.worktree_manager.run", side_effect=branch_lookup),
             patch.object(manager, "_add_worktree_for_branch") as add,
             pytest.raises(RuntimeError, match="unowned"),
             _real_handoff(tmp_path, 32) as handoff,
@@ -808,7 +808,7 @@ class TestWorktreeManager:
         with (
             patch.object(manager, "_registered_worktree_at_path", return_value=None),
             patch.object(manager, "_worktree_holding_branch", return_value=None),
-            patch("hephaestus.automation.worktree_manager.run", side_effect=branch_lookup),
+            patch("hephaestus.git.worktree_manager.run", side_effect=branch_lookup),
             patch.object(manager, "_add_worktree_for_branch") as add,
             patch.object(manager, "_mint_writer_authority"),
             _real_handoff(tmp_path, 33) as handoff,
@@ -851,7 +851,7 @@ class TestWorktreeManager:
         with (
             patch.object(manager, "_registered_worktree_at_path", return_value=None),
             patch.object(manager, "_worktree_holding_branch", return_value=None),
-            patch("hephaestus.automation.worktree_manager.run", side_effect=branch_lookup),
+            patch("hephaestus.git.worktree_manager.run", side_effect=branch_lookup),
             patch.object(manager, "_add_worktree_for_branch") as add,
             pytest.raises(WorktreeCreationReceiptError, match="reservation changed"),
             _real_handoff(tmp_path, 33) as handoff,
@@ -877,7 +877,7 @@ class TestWorktreeManager:
         writer.mkdir(parents=True)
 
         with patch(
-            "hephaestus.automation.worktree_manager.run",
+            "hephaestus.git.worktree_manager.run",
             side_effect=[Mock(stdout="33-auto\n"), Mock(stdout="a" * 40 + "\n")],
         ):
             authority = manager._mint_writer_authority(
@@ -901,7 +901,7 @@ class TestWorktreeManager:
         second_manager = WorktreeManager(base_dir=writer.parent)
 
         with patch(
-            "hephaestus.automation.worktree_manager.run",
+            "hephaestus.git.worktree_manager.run",
             side_effect=[
                 Mock(stdout="33-auto\n"),
                 Mock(stdout="a" * 40 + "\n"),
@@ -949,7 +949,7 @@ class TestWorktreeManager:
 
         with (
             patch(
-                "hephaestus.automation.worktree_manager.run",
+                "hephaestus.git.worktree_manager.run",
                 side_effect=[Mock(stdout=""), Mock(stdout="b" * 40 + "\n")],
             ) as run_mock,
             patch.object(manager, "_remove_worktree_path_forcefully") as remove,
@@ -998,7 +998,7 @@ class TestWorktreeManager:
 
         with (
             patch(
-                "hephaestus.automation.worktree_manager.run",
+                "hephaestus.git.worktree_manager.run",
                 side_effect=[Mock(stdout="35-adopted\n"), Mock(stdout=observed_head + "\n")],
             ),
             pytest.raises(WorktreeCreationReceiptError, match="head changed"),
@@ -1043,7 +1043,7 @@ class TestWorktreeManager:
                 stdout=(f"{remote_head}\trefs/heads/35-auto\n" if remote_head else ""),
             )
 
-        with patch("hephaestus.automation.worktree_manager.run", side_effect=fake_run) as run_mock:
+        with patch("hephaestus.git.worktree_manager.run", side_effect=fake_run) as run_mock:
             assert (
                 manager._implementation_writer_branch_exists(
                     "35-auto",
@@ -1081,7 +1081,7 @@ class TestWorktreeManager:
 
         with (
             patch(
-                "hephaestus.automation.worktree_manager.run",
+                "hephaestus.git.worktree_manager.run",
                 side_effect=[
                     Mock(stdout=""),
                     Mock(stdout=expected_head + "\n"),
@@ -1092,7 +1092,7 @@ class TestWorktreeManager:
             patch.object(manager, "_worktree_holding_branch", return_value=None),
             patch.object(manager, "_registered_worktree_at_path", return_value=None),
             patch(
-                "hephaestus.automation.worktree_manager.is_clean_working_tree",
+                "hephaestus.git.worktree_manager.is_clean_working_tree",
                 return_value=True,
             ),
             patch.object(manager, "_remove_worktree_path_forcefully") as remove,
@@ -1147,7 +1147,7 @@ class TestWorktreeManager:
         )
         with (
             patch(
-                "hephaestus.automation.worktree_manager.run",
+                "hephaestus.git.worktree_manager.run",
                 side_effect=[
                     Mock(stdout=""),
                     Mock(stdout=expected_head + "\n"),
@@ -1168,7 +1168,7 @@ class TestWorktreeManager:
                 return_value={"path": str(writer), "branch": "refs/heads/36-adopted"},
             ),
             patch(
-                "hephaestus.automation.worktree_manager.is_clean_working_tree",
+                "hephaestus.git.worktree_manager.is_clean_working_tree",
                 return_value=True,
             ),
             patch.object(
@@ -1207,7 +1207,7 @@ class TestWorktreeManager:
             patch.object(manager, "_registered_worktree_at_path", return_value=None),
             patch.object(manager, "_worktree_holding_branch", return_value=None),
             patch(
-                "hephaestus.automation.worktree_manager.run",
+                "hephaestus.git.worktree_manager.run",
                 side_effect=subprocess.TimeoutExpired(["git", "show-ref"], 1),
             ),
             pytest.raises(WorktreeCreationReceiptError, match="cannot safely verify"),
@@ -1220,7 +1220,7 @@ class TestWorktreeManager:
                 implementation_writer_handoff=handoff,
             )
 
-    @patch("hephaestus.automation.worktree_manager.is_clean_working_tree", return_value=False)
+    @patch("hephaestus.git.worktree_manager.is_clean_working_tree", return_value=False)
     def test_create_worktree_reuses_registered_dirty_existing_path(
         self, mock_clean: Any, worktree_mocks: Any, tmp_path: Any
     ) -> None:
@@ -1400,7 +1400,7 @@ class TestWorktreeManager:
         with pytest.raises(RuntimeError, match="Failed to create worktree"):
             manager.create_worktree(123, "123-feature")
 
-    @patch("hephaestus.automation.worktree_manager.is_clean_working_tree", return_value=True)
+    @patch("hephaestus.git.worktree_manager.is_clean_working_tree", return_value=True)
     def test_remove_worktree_success(
         self, mock_clean: Any, worktree_mocks: Any, tmp_path: Any
     ) -> None:
@@ -1424,7 +1424,7 @@ class TestWorktreeManager:
         call_args = worktree_mocks.run.call_args[0][0]
         assert call_args[0:3] == ["git", "worktree", "remove"]
 
-    @patch("hephaestus.automation.worktree_manager.is_clean_working_tree", return_value=True)
+    @patch("hephaestus.git.worktree_manager.is_clean_working_tree", return_value=True)
     def test_remove_worktree_force(
         self, mock_clean: Any, worktree_mocks: Any, tmp_path: Any
     ) -> None:
@@ -1441,7 +1441,7 @@ class TestWorktreeManager:
         call_args = worktree_mocks.run.call_args[0][0]
         assert "--force" in call_args
 
-    @patch("hephaestus.automation.worktree_manager.is_clean_working_tree", return_value=True)
+    @patch("hephaestus.git.worktree_manager.is_clean_working_tree", return_value=True)
     def test_remove_worktree_threads_timeout(
         self, mock_clean: Any, worktree_mocks: Any, tmp_path: Any
     ) -> None:
@@ -1472,7 +1472,7 @@ class TestWorktreeManager:
         # so no git calls fire.
         assert worktree_mocks.run.call_count == 0
 
-    @patch("hephaestus.automation.worktree_manager.is_clean_working_tree", return_value=True)
+    @patch("hephaestus.git.worktree_manager.is_clean_working_tree", return_value=True)
     def test_remove_worktree_failure(
         self, mock_clean: Any, worktree_mocks: Any, tmp_path: Any
     ) -> None:
@@ -1489,7 +1489,7 @@ class TestWorktreeManager:
         with pytest.raises(RuntimeError, match="Failed to remove worktree"):
             manager.remove_worktree(123)
 
-    @patch("hephaestus.automation.worktree_manager.is_clean_working_tree", return_value=False)
+    @patch("hephaestus.git.worktree_manager.is_clean_working_tree", return_value=False)
     def test_remove_worktree_dirty_raises(
         self, mock_clean: Any, worktree_mocks: Any, tmp_path: Any
     ) -> None:
@@ -1514,7 +1514,7 @@ class TestWorktreeManager:
         ]
         assert remove_calls == []
 
-    @patch("hephaestus.automation.worktree_manager.is_clean_working_tree", return_value=False)
+    @patch("hephaestus.git.worktree_manager.is_clean_working_tree", return_value=False)
     def test_cleanup_all_preserves_dirty_worktree(
         self, mock_clean: Any, worktree_mocks: Any, tmp_path: Any
     ) -> None:
@@ -1543,7 +1543,7 @@ class TestWorktreeManager:
         assert manager.get_worktree(123) == worktree_path
         assert manager.get_worktree(999) is None
 
-    @patch("hephaestus.automation.worktree_manager.is_clean_working_tree", return_value=True)
+    @patch("hephaestus.git.worktree_manager.is_clean_working_tree", return_value=True)
     def test_cleanup_all(self, mock_clean: Any, worktree_mocks: Any, tmp_path: Any) -> None:
         """Test cleaning up all worktrees."""
         worktree_mocks.repo_root.return_value = tmp_path
@@ -1562,7 +1562,7 @@ class TestWorktreeManager:
         # Should call git worktree remove for each
         assert worktree_mocks.run.call_count >= 3
 
-    @patch("hephaestus.automation.worktree_manager.is_clean_working_tree", return_value=True)
+    @patch("hephaestus.git.worktree_manager.is_clean_working_tree", return_value=True)
     def test_cleanup_all_with_failures(
         self, mock_clean: Any, worktree_mocks: Any, tmp_path: Any
     ) -> None:
@@ -1584,7 +1584,7 @@ class TestWorktreeManager:
         # Should not crash
         manager.cleanup_all()
 
-    @patch("hephaestus.automation.worktree_manager.is_clean_working_tree", return_value=True)
+    @patch("hephaestus.git.worktree_manager.is_clean_working_tree", return_value=True)
     def test_remove_worktree_missing_dir_is_idempotent(
         self, mock_clean: Any, worktree_mocks: Any, tmp_path: Any
     ) -> None:
@@ -1614,7 +1614,7 @@ class TestWorktreeManager:
             for call in worktree_mocks.run.call_args_list
         )
 
-    @patch("hephaestus.automation.worktree_manager.is_clean_working_tree", return_value=True)
+    @patch("hephaestus.git.worktree_manager.is_clean_working_tree", return_value=True)
     def test_cleanup_all_dedups_aliased_paths(
         self, mock_clean: Any, worktree_mocks: Any, tmp_path: Any
     ) -> None:
@@ -1854,21 +1854,21 @@ class TestBaseBranchDetectionRaisesOnFailure:
     reads the property).
     """
 
-    @patch("hephaestus.automation.worktree_manager.get_repo_root")
+    @patch("hephaestus.git.worktree_manager.get_repo_root")
     def test_raises_when_no_candidates_exist(self, mock_get_root: Any, tmp_path: Any) -> None:
         """If symbolic-ref fails and neither origin/main nor origin/master exist, raise."""
         mock_get_root.return_value = tmp_path
 
         # All git calls fail: symbolic-ref, origin/main verify, origin/master verify
         with patch(
-            "hephaestus.automation.worktree_manager.run",
+            "hephaestus.git.worktree_manager.run",
             side_effect=subprocess.CalledProcessError(128, "git"),
         ):
             mgr = WorktreeManager()
             with pytest.raises(RuntimeError, match="Could not auto-detect the remote base branch"):
                 _ = mgr.base_branch
 
-    @patch("hephaestus.automation.worktree_manager.get_repo_root")
+    @patch("hephaestus.git.worktree_manager.get_repo_root")
     def test_no_longer_silently_defaults_to_origin_main(
         self, mock_get_root: Any, tmp_path: Any
     ) -> None:
@@ -1876,14 +1876,14 @@ class TestBaseBranchDetectionRaisesOnFailure:
         mock_get_root.return_value = tmp_path
 
         with patch(
-            "hephaestus.automation.worktree_manager.run",
+            "hephaestus.git.worktree_manager.run",
             side_effect=subprocess.CalledProcessError(128, "git"),
         ):
             mgr = WorktreeManager()
             with pytest.raises(RuntimeError):
                 _ = mgr.base_branch
 
-    @patch("hephaestus.automation.worktree_manager.get_repo_root")
+    @patch("hephaestus.git.worktree_manager.get_repo_root")
     def test_explicit_base_branch_bypasses_detection(
         self, mock_get_root: Any, tmp_path: Any
     ) -> None:
@@ -1892,14 +1892,14 @@ class TestBaseBranchDetectionRaisesOnFailure:
 
         # Even if git fails, passing base_branch= explicitly must succeed
         with patch(
-            "hephaestus.automation.worktree_manager.run",
+            "hephaestus.git.worktree_manager.run",
             side_effect=subprocess.CalledProcessError(128, "git"),
         ):
             mgr = WorktreeManager(base_branch="origin/custom")
 
         assert mgr.base_branch == "origin/custom"
 
-    @patch("hephaestus.automation.worktree_manager.get_repo_root")
+    @patch("hephaestus.git.worktree_manager.get_repo_root")
     def test_loop_trunk_githash_bypasses_remote_detection(
         self, mock_get_root: Any, tmp_path: Any
     ) -> None:
@@ -1907,14 +1907,14 @@ class TestBaseBranchDetectionRaisesOnFailure:
         mock_get_root.return_value = tmp_path
 
         with patch(
-            "hephaestus.automation.worktree_manager.run",
+            "hephaestus.git.worktree_manager.run",
             side_effect=AssertionError("remote detection should not run"),
         ):
             mgr = WorktreeManager(trunk_githash="330a7b1")
 
         assert mgr.base_branch == "330a7b1"
 
-    @patch("hephaestus.automation.worktree_manager.get_repo_root")
+    @patch("hephaestus.git.worktree_manager.get_repo_root")
     def test_explicit_base_branch_overrides_loop_trunk_githash(
         self, mock_get_root: Any, tmp_path: Any
     ) -> None:
@@ -1926,7 +1926,7 @@ class TestBaseBranchDetectionRaisesOnFailure:
 
         assert mgr.base_branch == "origin/custom"
 
-    @patch("hephaestus.automation.worktree_manager.get_repo_root")
+    @patch("hephaestus.git.worktree_manager.get_repo_root")
     def test_construction_succeeds_when_detection_would_fail(
         self, mock_get_root: Any, tmp_path: Any
     ) -> None:
@@ -1939,7 +1939,7 @@ class TestBaseBranchDetectionRaisesOnFailure:
         mock_get_root.return_value = tmp_path
 
         with patch(
-            "hephaestus.automation.worktree_manager.run",
+            "hephaestus.git.worktree_manager.run",
             side_effect=subprocess.CalledProcessError(128, "git"),
         ):
             # Should not raise — detection is deferred
@@ -2504,7 +2504,7 @@ class TestCreateWorktreeBranchCollision:
         worktree_path = manager.base_dir / "issue-1577"
 
         with (
-            caplog.at_level("WARNING", logger="hephaestus.automation.worktree_manager"),
+            caplog.at_level("WARNING", logger="hephaestus.git.worktree_manager"),
             patch.object(manager, "_worktree_holding_branch", return_value=None),
             patch.object(manager, "_local_branch_exists", return_value=local_branch_exists),
             patch.object(manager, "_remote_branch_exists", return_value=remote_branch_exists),
@@ -2629,7 +2629,7 @@ class TestCreateWorktreeBranchCollision:
         assert ["git", "worktree", "remove", "--force", str(worktree_path)] in argvs
         assert ["git", "worktree", "prune"] in argvs
 
-    @patch("hephaestus.automation.worktree_manager.shutil.rmtree")
+    @patch("hephaestus.git.worktree_manager.shutil.rmtree")
     def test_create_worktree_preserves_add_failure_when_direct_cleanup_fails(
         self, mock_rmtree: Any, worktree_mocks: Any, tmp_path: Any
     ) -> None:
@@ -2675,7 +2675,7 @@ class TestLocalBranchExists:
 
         with caplog.at_level(
             "WARNING",
-            logger="hephaestus.automation.worktree_manager",
+            logger="hephaestus.git.worktree_manager",
         ):
             result = manager._local_branch_exists("2143-auto", timeout=5)
 
