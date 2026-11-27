@@ -23,8 +23,8 @@ from hephaestus.automation.pipeline.stages.implementation.implementation import 
 )
 from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
 from hephaestus.automation.review_journal import PlanDiscoveryResult
-from hephaestus.automation.source_worktree import SourceWorkspaceManager
 from hephaestus.automation.state_labels import STATE_PLAN_GO
+from hephaestus.git.source_worktree import SourceWorkspaceManager
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
 from tests.unit.automation.pipeline.stages.test_stage_implementation import (
     _complete_plan_scope_read,

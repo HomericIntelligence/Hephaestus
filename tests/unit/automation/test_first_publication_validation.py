@@ -14,7 +14,7 @@ import pytest
 from hephaestus.automation.pipeline import worker_pool
 from hephaestus.automation.pipeline.git_jobs import FIRST_PUBLICATION_CHECK_ARGV, GitJob
 from hephaestus.automation.pipeline.worker_pool import WorkerPool
-from hephaestus.automation.source_worktree import _PreparationDeadline
+from hephaestus.git.source_worktree import _PreparationDeadline
 from tests.unit.automation.test_first_publication_store import _record
 
 

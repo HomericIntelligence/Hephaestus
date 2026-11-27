@@ -14,7 +14,7 @@ from hephaestus.agents.workspace import (
     WorkspaceKind,
     validate_workspace_binding,
 )
-from hephaestus.automation.source_worktree import (
+from hephaestus.git.source_worktree import (
     SourceWorkspaceManager,
     _PreparationDeadline,
 )

@@ -20,8 +20,8 @@ from hephaestus.automation.pipeline.host_capabilities import (
     WorkerCapabilities,
 )
 from hephaestus.automation.pipeline.job_results import JobResult
-from hephaestus.automation.source_worktree import SourceWorkspaceManager
 from hephaestus.git import git_utils, writer as implementation_writer
+from hephaestus.git.source_worktree import SourceWorkspaceManager
 from hephaestus.utils.file_lock import file_lock
 from tests.unit.automation.pipeline.conftest import FakeSigningProvider
 from tests.unit.automation.test_source_worktree import _git, _repository

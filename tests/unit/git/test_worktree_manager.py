@@ -43,10 +43,10 @@ def test_worktree_manager_exposes_its_public_contract() -> None:
 @pytest.mark.parametrize(
     ("caller", "name"),
     [
-        ("hephaestus.automation.source_worktree", "ImplementationWriterAuthority"),
-        ("hephaestus.automation.source_worktree", "WorktreeManager"),
+        ("hephaestus.git.source_worktree", "ImplementationWriterAuthority"),
+        ("hephaestus.git.source_worktree", "WorktreeManager"),
         (
-            "hephaestus.automation.source_worktree",
+            "hephaestus.git.source_worktree",
             "consume_implementation_writer_authority",
         ),
         ("hephaestus.automation.pipeline.git_cleanup", "WorktreeManager"),

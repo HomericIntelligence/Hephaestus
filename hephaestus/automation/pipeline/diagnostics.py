@@ -12,12 +12,12 @@ from __future__ import annotations
 import re
 from collections.abc import Callable
 
-from hephaestus.automation.source_worktree import SourceWorkspaceRecoveryKind
 from hephaestus.diagnostics import (
     redact_git_diagnostic,
     redact_private_key_blocks,
     redact_truncated_diagnostic_prefix,
 )
+from hephaestus.git.source_worktree import SourceWorkspaceRecoveryKind
 
 __all__ = [
     "_JOB_RESULT_ERROR_MAX",

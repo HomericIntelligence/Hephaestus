@@ -106,7 +106,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
         root = ct._effective_repo_root(self.config, repo)
         from hephaestus.automation.learning_journal import LearningJournalStore
         from hephaestus.automation.plan_review_session import PlanReviewSessionStore
-        from hephaestus.automation.source_worktree import SourceWorkspaceManager
+        from hephaestus.git.source_worktree import SourceWorkspaceManager
 
         def source_workspaces() -> SourceWorkspaceManager:
             if not (root / ".git").exists():

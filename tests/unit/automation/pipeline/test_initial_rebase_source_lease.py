@@ -23,7 +23,7 @@ from hephaestus.automation.pipeline.job_results import JobResult
 from hephaestus.automation.pipeline.jobs import BuildTestJob
 from hephaestus.automation.pipeline.worker_pool import WorkerPool
 from hephaestus.automation.rebase_recovery import PendingRebaseStore
-from hephaestus.automation.source_worktree import SourceWorkspaceError, SourceWorkspaceManager
+from hephaestus.git.source_worktree import SourceWorkspaceError, SourceWorkspaceManager
 from hephaestus.utils.file_lock import file_lock
 from tests.unit.automation.test_source_worktree import _git, _repository
 

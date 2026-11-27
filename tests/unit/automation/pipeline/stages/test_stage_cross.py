@@ -34,8 +34,8 @@ from hephaestus.automation.review_journal import (
     render_pending_review,
 )
 from hephaestus.automation.review_types import ReviewVerdict
-from hephaestus.automation.source_worktree import SourceWorkspaceReceipt
 from hephaestus.automation.state_labels import STATE_PLAN_GO
+from hephaestus.git.source_worktree import SourceWorkspaceReceipt
 from tests.unit.automation.pipeline.conftest import (
     FakeWorkerPool,
     claim_test_item,

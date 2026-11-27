@@ -6,7 +6,7 @@ from hephaestus.agents.execution_policy import (
 )
 from hephaestus.agents.workspace import SourceLane
 from hephaestus.automation.prompts.pr_review import build_bounded_pr_review_analysis_prompt
-from hephaestus.automation.source_worktree import SourceWorkspaceError
+from hephaestus.git.source_worktree import SourceWorkspaceError
 from hephaestus.git.verification import (
     EMPTY_HOST_VERIFICATION_BOOTSTRAP_JSON as EMPTY_HOST_VERIFICATION_BOOTSTRAP_JSON,
     EMPTY_HOST_VERIFICATIONS_JSON as EMPTY_HOST_VERIFICATIONS_JSON,

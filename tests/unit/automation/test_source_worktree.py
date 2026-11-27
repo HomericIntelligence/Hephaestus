@@ -24,7 +24,6 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from hephaestus.agents.workspace import SourceLane, WorkspaceBinding
-from hephaestus.automation import source_worktree
 from hephaestus.automation.pipeline.coordinator_types import PipelineConfig
 from hephaestus.automation.pipeline.git_cleanup import run_cleanup_job
 from hephaestus.automation.pipeline.git_jobs import GitJob
@@ -38,7 +37,9 @@ from hephaestus.automation.pipeline.stages import (
 )
 from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
 from hephaestus.automation.pipeline.worker_pool import WorkerPool
-from hephaestus.automation.source_worktree import (
+from hephaestus.config.child_environments import build_git_child_env
+from hephaestus.git import source_worktree, worktree_manager, writer as implementation_writer
+from hephaestus.git.source_worktree import (
     SourceWorkspaceError,
     SourceWorkspaceManager,
     SourceWorkspacePreparationCause,
@@ -47,8 +48,6 @@ from hephaestus.automation.source_worktree import (
     _git as _source_worktree_git,
     _PreparationDeadline,
 )
-from hephaestus.config.child_environments import build_git_child_env
-from hephaestus.git import worktree_manager, writer as implementation_writer
 from hephaestus.git.worktree_manager import (
     ImplementationWriterAuthority,
     WorktreeCreationReceiptError,
@@ -2872,7 +2871,7 @@ def test_claim_implementation_writer_restart_cannot_adopt_unconsumed_authority(
 
         with (
             patch(
-                "hephaestus.automation.source_worktree.consume_implementation_writer_authority",
+                "hephaestus.git.source_worktree.consume_implementation_writer_authority",
                 side_effect=RuntimeError("worker stopped"),
             ),
             pytest.raises(SourceWorkspaceError, match="authority is invalid"),
@@ -3049,7 +3048,7 @@ def test_claim_implementation_writer_warns_and_keeps_a_dirty_writer(
     worktree_manager = WorktreeManager(repo_root=repo, base_dir=manager.base_dir)
     dirty_file = None
 
-    with caplog.at_level("WARNING", logger="hephaestus.automation.source_worktree"):
+    with caplog.at_level("WARNING", logger="hephaestus.git.source_worktree"):
         with manager.implementation_writer_handoff(9) as handoff:
             writer = worktree_manager.create_worktree(
                 9,

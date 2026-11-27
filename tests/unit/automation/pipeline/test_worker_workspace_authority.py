@@ -12,7 +12,7 @@ import pytest
 from hephaestus.agents.workspace import WorkspaceBinding
 from hephaestus.automation.pipeline import athena_skill_jobs, worker_pool
 from hephaestus.automation.pipeline.athena_skill_jobs import AthenaSkillJob, AthenaSkillRequest
-from hephaestus.automation.source_worktree import SourceWorkspacePreparationError
+from hephaestus.git.source_worktree import SourceWorkspacePreparationError
 
 
 def test_host_skill_rejects_unbound_workspace(tmp_path: Path) -> None:

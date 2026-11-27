@@ -30,8 +30,8 @@ from hephaestus.automation.pipeline.routing import Disposition, StageName, Stage
 from hephaestus.automation.pipeline.stage_base import Stage
 from hephaestus.automation.pipeline.work_item import ItemKind, ItemResult, LearningIntent, WorkItem
 from hephaestus.automation.review_journal import render_current_plan
-from hephaestus.automation.source_worktree import SourceWorkspaceManager
 from hephaestus.automation.state_labels import STATE_PLAN_GO
+from hephaestus.git.source_worktree import SourceWorkspaceManager
 from hephaestus.utils import subprocess_registry
 from hephaestus.utils.helpers import run_subprocess
 from tests.unit.automation.pipeline.conftest import (

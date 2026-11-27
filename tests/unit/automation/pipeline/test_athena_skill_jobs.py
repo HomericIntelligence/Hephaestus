@@ -23,7 +23,7 @@ from hephaestus.automation.pipeline.jobs import JobHandle
 from hephaestus.automation.pipeline.queues import CompletionQueue
 from hephaestus.automation.pipeline.routing import StageName
 from hephaestus.automation.pipeline.worker_pool import WorkerPool
-from hephaestus.automation.source_worktree import SourceWorkspaceManager
+from hephaestus.git.source_worktree import SourceWorkspaceManager
 from tests.unit.automation.test_source_worktree import _repository
 
 

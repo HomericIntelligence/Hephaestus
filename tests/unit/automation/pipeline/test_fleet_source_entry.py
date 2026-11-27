@@ -17,7 +17,7 @@ from hephaestus.automation.pipeline.jobs import AgentJob, JobHandle
 from hephaestus.automation.pipeline.routing import StageName
 from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
 from hephaestus.automation.rebase_recovery import PendingRebaseStore
-from hephaestus.automation.source_worktree import _PreparationDeadline
+from hephaestus.git.source_worktree import _PreparationDeadline
 from hephaestus.utils.file_lock import LockUnavailableError, file_lock
 from tests.unit.automation.pipeline.test_fleet_execution import _fleet_coordinator, _git
 

@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from hephaestus.agents.workspace import SourceLane
-from hephaestus.automation.source_worktree import SourceWorkspaceError, SourceWorkspaceManager
+from hephaestus.git.source_worktree import SourceWorkspaceError, SourceWorkspaceManager
 from tests.unit.automation.test_source_worktree import _repository
 
 

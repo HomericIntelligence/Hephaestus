@@ -12,7 +12,7 @@ from hephaestus.automation.pipeline.athena_skill_jobs import AthenaSkillJob
 from hephaestus.automation.pipeline.jobs import AgentJob
 from hephaestus.automation.pipeline.stages import JobRequest
 from hephaestus.automation.pipeline.stages.implementation import implementation
-from hephaestus.automation.source_worktree import SourceWorkspaceManager
+from hephaestus.git.source_worktree import SourceWorkspaceManager
 from tests.unit.automation.test_source_worktree import _repository
 
 

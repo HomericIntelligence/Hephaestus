@@ -38,7 +38,7 @@ from hephaestus.automation.issue_waves import (
     WaveLease,
 )
 from hephaestus.automation.pipeline.work_item import ItemResult, PreservedWorktree
-from hephaestus.automation.source_worktree import (
+from hephaestus.git.source_worktree import (
     SourceWorkspaceError,
     SourceWorkspaceManager,
     SourceWorkspaceTerminalReference,

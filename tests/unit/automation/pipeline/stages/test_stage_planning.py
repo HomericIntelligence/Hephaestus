@@ -55,12 +55,6 @@ from hephaestus.automation.review_journal import (
     render_current_plan,
     render_current_review,
 )
-from hephaestus.automation.source_worktree import (
-    SourceWorkspaceError,
-    SourceWorkspaceManager,
-    SourceWorkspacePreparationCause,
-    SourceWorkspacePreparationError,
-)
 from hephaestus.automation.state_labels import (
     STATE_IMPLEMENTATION_GO,
     STATE_IMPLEMENTATION_NO_GO,
@@ -68,6 +62,12 @@ from hephaestus.automation.state_labels import (
     STATE_PLAN_GO,
     STATE_PLAN_NO_GO,
     STATE_SKIP,
+)
+from hephaestus.git.source_worktree import (
+    SourceWorkspaceError,
+    SourceWorkspaceManager,
+    SourceWorkspacePreparationCause,
+    SourceWorkspacePreparationError,
 )
 from hephaestus.prompts import PromptCatalog
 from tests.unit.automation.pipeline.stages.conftest import (

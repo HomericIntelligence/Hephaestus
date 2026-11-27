@@ -19,7 +19,7 @@ from hephaestus.automation.pipeline.athena_skill_jobs import (
 )
 from hephaestus.automation.pipeline.auxiliary_worker_pool import AuxiliaryWorkerPool
 from hephaestus.automation.pipeline.job_results import JobHandle, JobResult
-from hephaestus.automation.source_worktree import (
+from hephaestus.git.source_worktree import (
     SourceWorkspaceManager,
     SourceWorkspacePreparationCause,
     SourceWorkspacePreparationError,

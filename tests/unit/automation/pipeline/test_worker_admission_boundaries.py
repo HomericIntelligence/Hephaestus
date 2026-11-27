@@ -15,8 +15,8 @@ from hephaestus.agents import claude_invoke
 from hephaestus.agents.workspace import SourceLane, WorkspaceBinding
 from hephaestus.automation.pipeline import worker_pool
 from hephaestus.automation.pipeline.jobs import AgentJob
-from hephaestus.automation.source_worktree import SourceWorkspaceError, SourceWorkspaceManager
 from hephaestus.git import runtime as git_runtime, snapshot as worktree_snapshot
+from hephaestus.git.source_worktree import SourceWorkspaceError, SourceWorkspaceManager
 from tests.unit.automation.test_source_worktree import _repository
 
 

@@ -10,7 +10,7 @@ import pytest
 from hephaestus.agents.workspace import SourceLane, WorkspaceBindingError
 from hephaestus.automation.pipeline.git_jobs import GitJob
 from hephaestus.automation.pipeline.worker_pool import WorkerPool
-from hephaestus.automation.source_worktree import (
+from hephaestus.git.source_worktree import (
     SourceWorkspaceManager,
     SourceWorkspacePreparationCause,
     SourceWorkspacePreparationError,

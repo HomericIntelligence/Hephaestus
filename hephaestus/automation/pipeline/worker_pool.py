@@ -298,21 +298,6 @@ from hephaestus.automation.review_journal import (
     parse_plan_review_state,
     plan_fingerprint,
 )
-from hephaestus.automation.source_worktree import (
-    FleetAttemptFence,
-    SourceWorkspaceCreationError,
-    SourceWorkspaceCreationFailure,
-    SourceWorkspaceError,
-    SourceWorkspaceManager,
-    SourceWorkspacePreparationCause,
-    SourceWorkspacePreparationError,
-    SourceWorkspaceReceipt,
-    SourceWorkspaceRecovery,
-    _PreparationDeadline,
-    _terminal_json_object,
-    _terminal_read_bytes,
-    normalize_source_workspace_creation_failure,
-)
 from hephaestus.automation.verified_runner import (
     bind_verified_runner_git_executable,
     build_verified_runner_argv,
@@ -352,6 +337,21 @@ from hephaestus.git.snapshot import (
     _secure_dir_fd_supported as _secure_dir_fd_supported,
     _trusted_git_executable as _trusted_git_executable,
     _valid_dirty_content_snapshot as _valid_dirty_content_snapshot,
+)
+from hephaestus.git.source_worktree import (
+    FleetAttemptFence,
+    SourceWorkspaceCreationError,
+    SourceWorkspaceCreationFailure,
+    SourceWorkspaceError,
+    SourceWorkspaceManager,
+    SourceWorkspacePreparationCause,
+    SourceWorkspacePreparationError,
+    SourceWorkspaceReceipt,
+    SourceWorkspaceRecovery,
+    _PreparationDeadline,
+    _terminal_json_object,
+    _terminal_read_bytes,
+    normalize_source_workspace_creation_failure,
 )
 from hephaestus.git.worktree_manager import (
     ADOPTED_HEAD_TRANSPORT_FAILED,

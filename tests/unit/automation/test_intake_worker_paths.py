@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from hephaestus.automation.source_worktree import SourceWorkspaceManager
 from hephaestus.git.repo_intake import RepoIntakeError
+from hephaestus.git.source_worktree import SourceWorkspaceManager
 from tests.unit.automation.test_repo_intake import _make_repository, _manager, _run_git
 
 

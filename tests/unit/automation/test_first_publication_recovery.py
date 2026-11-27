@@ -27,9 +27,9 @@ from hephaestus.automation.pipeline.stages.implementation import (
 )
 from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
 from hephaestus.automation.pipeline.worker_pool import WorkerPool, _RemoteGitAuthenticationError
-from hephaestus.automation.source_worktree import SourceWorkspaceManager
 from hephaestus.config.child_environments import build_git_child_env
 from hephaestus.git import git_utils
+from hephaestus.git.source_worktree import SourceWorkspaceManager
 from hephaestus.utils.helpers import run_subprocess
 from tests.unit.automation.pipeline.conftest import FakeSigningProvider
 from tests.unit.automation.pipeline.test_worker_pool import _git, _worker_repository
