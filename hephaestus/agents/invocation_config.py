@@ -97,16 +97,6 @@ _ALL_AGENTS = frozenset(
 # from inheriting the previous verdict. Planning and implementation resume
 # their stage sessions.
 _PER_ITERATION_REVIEWERS = frozenset({AGENT_PLAN_REVIEWER, AGENT_PR_REVIEWER})
-_GIT_REPO_ENV_KEYS = (
-    "GIT_DIR",
-    "GIT_WORK_TREE",
-    "GIT_INDEX_FILE",
-    "GIT_COMMON_DIR",
-    "GIT_OBJECT_DIRECTORY",
-    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-)
-
-
 def _repo_scoped_git_env() -> dict[str, str]:
     """Return environment for explicit ``git -C`` calls, ignoring outer repos."""
     return {"PATH": os.defpath}
