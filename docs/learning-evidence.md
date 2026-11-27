@@ -86,3 +86,7 @@ The journal retains the first error as `first_error` and the latest error as
 `error`. A failed validation leaves its candidate in the prepared worktree.
 A later attempt cannot delete an unpublished candidate worktree. Inspect and
 repair or archive that candidate before another delivery attempt.
+
+## Session-id-first learn (operator tool)
+
+`hephaestus-learn --session-id X --agent claude` resumes a session by id and runs one learn turn. The harness comes from the agent catalog and stays separate from the session role. Pi fails closed without an isolation adapter. A bare session id supplies no repository, issue, or working-directory binding, so durable delivery stays deferred with `learning_deferred:source_evidence_required`; the queue-owned admission predicate is unchanged.

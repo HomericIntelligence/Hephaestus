@@ -91,7 +91,7 @@ may change incompatibly in a minor release.
 
 ## Console-Script Stability Tiers
 
-The 60 console scripts registered in `[project.scripts]` are classified into one
+The 61 console scripts registered in `[project.scripts]` are classified into one
 of three tiers:
 
 The installed script inventory is `[project.scripts]` in `pyproject.toml`.
@@ -131,6 +131,7 @@ inventory or table before commit.
 | `hephaestus-fleet-sync` | Provisional | Fleet-wide repo sync helper |
 | `hephaestus-tidy` | Provisional | Local-branch rebase + cleanup helper |
 | `hephaestus-label-severity` | Provisional | Reconciles `severity:*` label from issue-form Severity answer |
+| `hephaestus-learn` | Provisional | Session-id-first learn resume; durable delivery stays queue-owned |
 | `hephaestus-prepare-worktree` | Provisional | Safe isolated-worktree creation helper for workflow skills |
 | `hephaestus-audit-worktrees` | Provisional | Read-only registered-worktree inventory helper for workflow skills |
 | `hephaestus-remove-worktree` | Provisional | Approved clean-worktree removal helper for workflow skills |
