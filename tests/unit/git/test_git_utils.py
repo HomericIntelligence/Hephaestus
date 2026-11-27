@@ -48,7 +48,7 @@ def test_product_caller_binds_the_relocated_module() -> None:
     """Verify the product-layer worker keeps the same module object."""
     import hephaestus.automation.pipeline.worker_pool as worker_pool
 
-    assert worker_pool.git_utils is git_utils
+    assert cast(Any, worker_pool).git_utils is git_utils
 
 
 def test_git_utils_does_not_import_the_product_layer() -> None:
