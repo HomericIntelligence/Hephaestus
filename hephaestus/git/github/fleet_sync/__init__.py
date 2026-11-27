@@ -2,26 +2,26 @@
 
 from __future__ import annotations
 
-from hephaestus.github.fleet_sync.cli import _build_parser, main
-from hephaestus.github.fleet_sync.config import (
+from hephaestus.git.github.fleet_sync.cli import _build_parser, main
+from hephaestus.git.github.fleet_sync.config import (
     DEFAULT_FLEET_CONFIG_FILENAME,
     _find_default_config,
     _load_fleet_config,
     resolve_fleet_config,
 )
-from hephaestus.github.fleet_sync.conflict_resolver import (
+from hephaestus.git.github.fleet_sync.conflict_resolver import (
     _run_conflict_agent,
     resolve_conflict_with_agent,
 )
-from hephaestus.github.fleet_sync.git_ops import (
+from hephaestus.git.github.fleet_sync.git_ops import (
     _git,
     add_pr_worktree,
     ensure_repo_clone,
     rebase_and_resign,
     remove_worktree,
 )
-from hephaestus.github.fleet_sync.gpg import get_resign_email, get_resign_exec
-from hephaestus.github.fleet_sync.models import (
+from hephaestus.git.github.fleet_sync.gpg import get_resign_email, get_resign_exec
+from hephaestus.git.github.fleet_sync.models import (
     ASCII_SYMBOLS,
     DEFAULT_FLEET_TIMEOUTS,
     UNICODE_SYMBOLS,
@@ -30,13 +30,13 @@ from hephaestus.github.fleet_sync.models import (
     PRStatus,
     Symbols,
 )
-from hephaestus.github.fleet_sync.pr_api import (
+from hephaestus.git.github.fleet_sync.pr_api import (
     _ci_state,
     _fetch_pr_ci_state,
     _gh,
     list_prs,
 )
-from hephaestus.github.fleet_sync.sync_coordinator import logger, process_repo
+from hephaestus.git.github.fleet_sync.sync_coordinator import logger, process_repo
 
 __all__ = [
     "ASCII_SYMBOLS",

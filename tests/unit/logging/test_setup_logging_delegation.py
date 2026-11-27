@@ -46,7 +46,7 @@ def test_cli_logging_helpers_delegate_to_shared_helper(
 
 def test_tidy_logging_delegates_to_shared_helper() -> None:
     """Tidy logging forwards the selected explicit format to the shared helper."""
-    module = import_module("hephaestus.github.tidy")
+    module = import_module("hephaestus.git.github.tidy")
 
     with patch.object(module, "configure_cli_logging", Mock()) as configure:
         module._configure_logging(verbose=False, log_format="json")
@@ -56,7 +56,7 @@ def test_tidy_logging_delegates_to_shared_helper() -> None:
 
 def test_fleet_sync_main_delegates_logging_to_shared_helper() -> None:
     """Fleet sync CLI uses stderr-safe shared logging setup."""
-    module = import_module("hephaestus.github.fleet_sync.cli")
+    module = import_module("hephaestus.git.github.fleet_sync.cli")
 
     with (
         patch.object(module, "configure_github_throttle_from_args") as throttle,

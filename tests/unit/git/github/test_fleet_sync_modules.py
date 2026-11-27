@@ -15,8 +15,8 @@ _MAX_FUNCTION_LINES = 100
 
 
 def test_fleet_sync_facade_preserves_public_imports() -> None:
-    """The old hephaestus.github.fleet_sync import surface stays available."""
-    module = importlib.import_module("hephaestus.github.fleet_sync")
+    """The old hephaestus.git.github.fleet_sync import surface stays available."""
+    module = importlib.import_module("hephaestus.git.github.fleet_sync")
 
     assert callable(module.main)
     assert callable(module.resolve_fleet_config)
@@ -36,7 +36,7 @@ def test_fleet_sync_is_split_into_focused_modules() -> None:
         "sync_coordinator",
         "cli",
     ):
-        assert importlib.import_module(f"hephaestus.github.fleet_sync.{name}") is not None
+        assert importlib.import_module(f"hephaestus.git.github.fleet_sync.{name}") is not None
 
 
 def test_fleet_sync_functions_stay_decomposed() -> None:

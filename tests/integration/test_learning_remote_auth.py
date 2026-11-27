@@ -68,7 +68,7 @@ def test_learning_probe_uses_trusted_helper(tmp_path: Path, admitted: bool, back
         with (
             patch.dict("os.environ", {"GH_TOKEN": "synthetic-token"}, clear=True),
             patch(
-                "hephaestus.github.remote_git.trusted_gh_executable",
+                "hephaestus.git.github.remote_git.trusted_gh_executable",
                 return_value=str(helper) if admitted else None,
             ),
             patch(

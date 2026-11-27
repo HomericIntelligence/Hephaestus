@@ -14,7 +14,7 @@ import sys
 import tomllib
 from pathlib import Path
 
-import hephaestus.github
+import hephaestus.git.github
 
 
 def _run(code: str) -> subprocess.CompletedProcess[str]:
@@ -27,15 +27,15 @@ def _run(code: str) -> subprocess.CompletedProcess[str]:
 
 def test_github_package_imports_cleanly() -> None:
     """Direct repro of the original circular-import failure."""
-    r = _run("import hephaestus.github")
-    assert r.returncode == 0, f"hephaestus.github import failed:\n{r.stderr}"
+    r = _run("import hephaestus.git.github")
+    assert r.returncode == 0, f"hephaestus.git.github import failed:\n{r.stderr}"
 
 
 def test_console_script_entry_points_resolve() -> None:
     """hephaestus-fleet-sync and hephaestus-tidy must still import cleanly."""
     r = _run(
-        "from hephaestus.github.fleet_sync import main as fs; "
-        "from hephaestus.github.tidy import main as td; "
+        "from hephaestus.git.github.fleet_sync import main as fs; "
+        "from hephaestus.git.github.tidy import main as td; "
         "assert callable(fs) and callable(td)"
     )
     assert r.returncode == 0, f"console-script entry-point import failed:\n{r.stderr}"
@@ -50,12 +50,12 @@ def test_removed_issue_guard_recovery_command_is_not_packaged() -> None:
 
 
 def test_github_package_does_not_import_automation() -> None:
-    """Structural invariant: hephaestus/github/ must not import from hephaestus.automation.
+    """Structural invariant: hephaestus/git/github/ must not import from hephaestus.automation.
 
     This enforces the one-way layering boundary.  Any violation here will also
     eventually become a circular-import at runtime.
     """
-    github_dir = Path(hephaestus.github.__file__).parent
+    github_dir = Path(hephaestus.git.github.__file__).parent
     offenders: list[str] = []
 
     for py in sorted(github_dir.rglob("*.py")):
@@ -72,6 +72,6 @@ def test_github_package_does_not_import_automation() -> None:
                         offenders.append(f"{py}:{node.lineno}  import {alias.name}")
 
     assert not offenders, (
-        "hephaestus.github → hephaestus.automation import edge detected "
+        "hephaestus.git.github → hephaestus.automation import edge detected "
         "(causes circular imports):\n" + "\n".join(offenders)
     )

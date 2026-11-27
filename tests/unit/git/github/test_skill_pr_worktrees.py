@@ -18,7 +18,7 @@ from typing import Any
 
 import pytest
 
-import hephaestus.github.skill_pr_worktrees as module
+import hephaestus.git.github.skill_pr_worktrees as module
 
 _BASE_REPOSITORY = "octo/example"
 _BASE_URL = f"https://github.com/{_BASE_REPOSITORY}.git"

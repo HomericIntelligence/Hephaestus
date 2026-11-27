@@ -17,7 +17,7 @@ from hephaestus.automation.mnemosyne_binding import (
     _origin_matches,
     default_mnemosyne_root,
 )
-from hephaestus.github.mnemosyne_repo import (
+from hephaestus.git.github.mnemosyne_repo import (
     MnemosyneResolutionError,
     MnemosyneTarget,
     MnemosyneTrustBasis,

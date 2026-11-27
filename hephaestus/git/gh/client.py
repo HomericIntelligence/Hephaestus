@@ -409,7 +409,7 @@ def require_gh_executable(executable: str) -> str:
     Only the default literal ``gh`` and an absolute path are accepted. Any
     other relative value is rejected before throttle or circuit-breaker work.
     An explicit path is caller-trusted: the caller must obtain it from
-    :func:`hephaestus.github.remote_git.trusted_gh_executable` or an
+    :func:`hephaestus.git.github.remote_git.trusted_gh_executable` or an
     equivalent host-owned resolver. This function does not authorize an
     arbitrary executable.
 

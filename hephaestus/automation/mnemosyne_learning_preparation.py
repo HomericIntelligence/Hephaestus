@@ -32,7 +32,7 @@ from hephaestus.automation.mnemosyne_validator_dependencies import (
 )
 from hephaestus.automation.pipeline.work_item import LearningIntent, LearningIntentKind
 from hephaestus.config.child_environments import build_git_child_env
-from hephaestus.github.remote_git import TrustedRemoteGit
+from hephaestus.git.github.remote_git import TrustedRemoteGit
 from hephaestus.io.utils import write_secure
 from hephaestus.utils.helpers import NETWORK_TIMEOUT, run_subprocess
 

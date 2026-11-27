@@ -1,4 +1,4 @@
-"""Tests for :mod:`hephaestus.github.severity_label` (#1210).
+"""Tests for :mod:`hephaestus.git.github.severity_label` (#1210).
 
 These run the SAME parser the auto-label-severity workflow runs, against
 sample GitHub-rendered issue bodies, so a body-rendering-format mismatch fails
@@ -13,7 +13,7 @@ from unittest import mock
 
 import pytest
 
-from hephaestus.github import severity_label as sl
+from hephaestus.git.github import severity_label as sl
 
 # A faithful sample of how GitHub renders an issue-form dropdown answer.
 RENDERED_BODY = """\

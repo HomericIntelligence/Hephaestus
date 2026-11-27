@@ -20,7 +20,7 @@ Exception hierarchy::
     └── ClaudeUsageCapError       (Claude per-period cap)
 
 Out of scope for ``gh_call``: ``tidy``'s interactive ``gh tidy`` Popen
-requires direct stdin/stdout access (it stays in ``hephaestus.github.tidy``
+requires direct stdin/stdout access (it stays in ``hephaestus.git.github.tidy``
 until W4), and ``rate_limit``'s reset probe calls
 ``run_subprocess(["gh", "api", "rate_limit"])`` directly (bypassing
 ``gh_call``) to avoid recursing back into ``gh_call`` while ``gh_call`` is

@@ -7,8 +7,8 @@ from unittest.mock import patch
 
 import pytest
 
-from hephaestus.github import mnemosyne_repo
-from hephaestus.github.mnemosyne_repo import (
+from hephaestus.git.github import mnemosyne_repo
+from hephaestus.git.github.mnemosyne_repo import (
     UPSTREAM_SLUG,
     CurrentRepositoryMetadata,
     MnemosyneResolutionError,

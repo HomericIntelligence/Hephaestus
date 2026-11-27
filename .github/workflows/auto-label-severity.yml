@@ -2,7 +2,7 @@ name: Auto-label severity
 
 # Reconciles the severity:* label from the issue forms' "Severity" answer so the
 # field feeds the documented planning/triage pipeline (#1210). Parsing lives in
-# the unit-tested hephaestus.github.severity_label module; this workflow only
+# the unit-tested hephaestus.git.github.severity_label module; this workflow only
 # binds event data to quoted arguments and standard input. The body is never
 # interpolated into the workflow shell source.
 
@@ -36,7 +36,7 @@ jobs:
           # Bound as step data, then piped to the CLI's explicit stdin seam.
           ISSUE_BODY: ${{ github.event.issue.body }}
         run: |
-          printf '%s' "$ISSUE_BODY" | uv run python -m hephaestus.github.severity_label \
+          printf '%s' "$ISSUE_BODY" | uv run python -m hephaestus.git.github.severity_label \
             --repo "$REPOSITORY" \
             --issue-number "$ISSUE_NUMBER" \
             --body-file -

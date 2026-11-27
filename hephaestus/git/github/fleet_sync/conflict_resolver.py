@@ -12,14 +12,14 @@ from typing import Any
 
 from hephaestus.agents.model_selection import parse_model_selection
 from hephaestus.agents.runtime import uses_direct_agent_runner
-from hephaestus.github.fleet_sync.git_ops import (
+from hephaestus.git.github.fleet_sync.git_ops import (
     _git,
     add_pr_worktree,
     ensure_repo_clone,
     remove_worktree,
 )
-from hephaestus.github.fleet_sync.gpg import get_resign_exec
-from hephaestus.github.fleet_sync.models import (
+from hephaestus.git.github.fleet_sync.gpg import get_resign_exec
+from hephaestus.git.github.fleet_sync.models import (
     DEFAULT_FLEET_TIMEOUTS,
     UNICODE_SYMBOLS,
     FleetTimeouts,

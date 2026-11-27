@@ -16,7 +16,7 @@ from packaging.version import InvalidVersion, Version
 from hephaestus.automation.athena_contract import AthenaContractReceipt
 from hephaestus.config.child_environments import build_git_child_env, build_remote_git_env
 from hephaestus.diagnostics import bounded_git_diagnostic
-from hephaestus.github.mnemosyne_repo import (
+from hephaestus.git.github.mnemosyne_repo import (
     UPSTREAM_OWNER,
     UPSTREAM_SLUG,
     MnemosyneResolutionError,
@@ -24,7 +24,7 @@ from hephaestus.github.mnemosyne_repo import (
     MnemosyneTrustBasis,
     resolve_mnemosyne_target,
 )
-from hephaestus.github.remote_git import (
+from hephaestus.git.github.remote_git import (
     trusted_gh_authenticated,
     trusted_gh_executable,
     trusted_remote_git_config,

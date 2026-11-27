@@ -6,16 +6,16 @@ import argparse
 from collections.abc import Callable
 from pathlib import Path
 
-from hephaestus.github.fleet_sync.conflict_resolver import resolve_conflict_with_agent
-from hephaestus.github.fleet_sync.git_ops import ensure_repo_clone, rebase_and_resign
-from hephaestus.github.fleet_sync.models import (
+from hephaestus.git.github.fleet_sync.conflict_resolver import resolve_conflict_with_agent
+from hephaestus.git.github.fleet_sync.git_ops import ensure_repo_clone, rebase_and_resign
+from hephaestus.git.github.fleet_sync.models import (
     UNICODE_SYMBOLS,
     FleetTimeouts,
     PRInfo,
     PRStatus,
     Symbols,
 )
-from hephaestus.github.fleet_sync.pr_api import list_prs
+from hephaestus.git.github.fleet_sync.pr_api import list_prs
 from hephaestus.logging.utils import get_logger
 
 logger = get_logger(__name__)

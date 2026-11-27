@@ -84,14 +84,14 @@ def add_max_workers_arg(
 
 def _parse_gh_extra_path_root(value: str) -> Path:
     """Validate an explicit root whose only admitted executable is ``bin/gh``."""
-    from hephaestus.github.remote_git import validate_gh_extra_path_root
+    from hephaestus.git.github.remote_git import validate_gh_extra_path_root
 
     return validate_gh_extra_path_root(value)
 
 
 def add_gh_extra_path_root_arg(parser: argparse.ArgumentParser) -> None:
     """Add the explicit, narrowly validated ``gh`` root argument to ``parser``."""
-    from hephaestus.github.remote_git import gh_extra_path_root_type
+    from hephaestus.git.github.remote_git import gh_extra_path_root_type
 
     parser.add_argument(
         "--gh-extra-path-root",

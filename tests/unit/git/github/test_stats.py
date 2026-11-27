@@ -1,4 +1,4 @@
-"""Tests for hephaestus.github.stats."""
+"""Tests for hephaestus.git.github.stats."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from hephaestus.github.stats import (
+from hephaestus.git.github.stats import (
     collect_stats,
     format_stats_table,
     get_commits_stats,
@@ -187,9 +187,9 @@ class TestCollectStats:
         prs = {"total": 2, "merged": 1, "open": 0, "closed": 1}
         commits = {"total": 3}
         with (
-            patch("hephaestus.github.stats.get_issues_stats", return_value=issues),
-            patch("hephaestus.github.stats.get_prs_stats", return_value=prs),
-            patch("hephaestus.github.stats.get_commits_stats", return_value=commits),
+            patch("hephaestus.git.github.stats.get_issues_stats", return_value=issues),
+            patch("hephaestus.git.github.stats.get_prs_stats", return_value=prs),
+            patch("hephaestus.git.github.stats.get_commits_stats", return_value=commits),
         ):
             result = collect_stats("2026-01-01", "2026-01-31", None, "owner/repo")
         assert "issues" in result
@@ -231,19 +231,19 @@ class TestMain:
     """Tests for main() CLI entry point."""
 
     def test_invalid_start_date(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        from hephaestus.github.stats import main
+        from hephaestus.git.github.stats import main
 
         monkeypatch.setattr("sys.argv", ["hephaestus-github-stats", "bad-date", "2026-01-31"])
         assert main() == 1
 
     def test_invalid_end_date(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        from hephaestus.github.stats import main
+        from hephaestus.git.github.stats import main
 
         monkeypatch.setattr("sys.argv", ["hephaestus-github-stats", "2026-01-01", "not-a-date"])
         assert main() == 1
 
     def test_valid_dates_run(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        from hephaestus.github.stats import main
+        from hephaestus.git.github.stats import main
 
         monkeypatch.setattr(
             "sys.argv",
@@ -254,7 +254,7 @@ class TestMain:
             "prs": {"total": 1, "merged": 1, "open": 0, "closed": 0},
             "commits": {"total": 5},
         }
-        with patch("hephaestus.github.stats.collect_stats", return_value=mock_stats):
+        with patch("hephaestus.git.github.stats.collect_stats", return_value=mock_stats):
             result = main()
         assert result == 0
 
@@ -263,7 +263,7 @@ class TestMain:
     ) -> None:
         import json
 
-        from hephaestus.github.stats import main
+        from hephaestus.git.github.stats import main
 
         monkeypatch.setattr("sys.argv", ["hephaestus-github-stats", "bad", "2026-01-31", "--json"])
         assert main() == 1
@@ -276,7 +276,7 @@ class TestMain:
     ) -> None:
         import json
 
-        from hephaestus.github.stats import main
+        from hephaestus.git.github.stats import main
 
         monkeypatch.setattr("sys.argv", ["hephaestus-github-stats", "2026-01-01", "bad", "--json"])
         assert main() == 1
@@ -289,7 +289,7 @@ class TestMain:
     ) -> None:
         import json
 
-        from hephaestus.github.stats import main
+        from hephaestus.git.github.stats import main
 
         monkeypatch.setattr(
             "sys.argv",
@@ -307,7 +307,7 @@ class TestMain:
             "prs": {"total": 1, "merged": 1, "open": 0, "closed": 0},
             "commits": {"total": 5},
         }
-        with patch("hephaestus.github.stats.collect_stats", return_value=mock_stats):
+        with patch("hephaestus.git.github.stats.collect_stats", return_value=mock_stats):
             assert main() == 0
         payload = json.loads(capsys.readouterr().out)
         assert payload["repo"] == "owner/repo"
@@ -319,7 +319,7 @@ class TestMain:
         """When --repo not given, get_current_repo() is invoked."""
         import json
 
-        from hephaestus.github.stats import main
+        from hephaestus.git.github.stats import main
 
         monkeypatch.setattr(
             "sys.argv",
@@ -327,10 +327,10 @@ class TestMain:
         )
         with (
             patch(
-                "hephaestus.github.stats.get_current_repo", return_value="owner/auto"
+                "hephaestus.git.github.stats.get_current_repo", return_value="owner/auto"
             ) as mock_repo,
             patch(
-                "hephaestus.github.stats.collect_stats",
+                "hephaestus.git.github.stats.collect_stats",
                 return_value={
                     "issues": {"total": 0, "open": 0, "closed": 0},
                     "prs": {"total": 0, "merged": 0, "open": 0, "closed": 0},

@@ -243,7 +243,7 @@ APPROVED_ENV_VARS: tuple[EnvVarSpec, ...] = (
     _workflow(
         "GITHUB_REPOSITORY",
         "Workflow repository identity",
-        "hephaestus.github.severity_label.main",
+        "hephaestus.git.github.severity_label.main",
     ),
     _workflow(
         "GITHUB_STEP_SUMMARY",
@@ -258,11 +258,15 @@ APPROVED_ENV_VARS: tuple[EnvVarSpec, ...] = (
         "scripts.check_license_compatibility.main",
         sensitivity="private",
     ),
-    _workflow("ISSUE_NUMBER", "Workflow issue identifier", "hephaestus.github.severity_label.main"),
+    _workflow(
+        "ISSUE_NUMBER",
+        "Workflow issue identifier",
+        "hephaestus.git.github.severity_label.main",
+    ),
     _workflow(
         "ISSUE_BODY",
         "Untrusted workflow issue body",
-        "hephaestus.github.severity_label.main",
+        "hephaestus.git.github.severity_label.main",
         sensitivity="private",
     ),
     _parent(
