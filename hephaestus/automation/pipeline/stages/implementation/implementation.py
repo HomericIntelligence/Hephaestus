@@ -122,7 +122,9 @@ from hephaestus.automation.test_summary import (
     summary_reports_no_executed_test,
 )
 from hephaestus.automation.worktree_manager import ADOPTED_HEAD_FAILURES, BRANCH_WORKTREE_OWNED
-from hephaestus.git.commit_policy import normalize_strict_conventional_title
+from hephaestus.git.commit_policy import (
+    normalize_strict_conventional_title as normalize_strict_conventional_title,
+)
 from hephaestus.git.verification import (
     HEPHAESTUS_REQUIRED_CHECK_ARGV as HEPHAESTUS_REQUIRED_CHECK_ARGV,
     HEPHAESTUS_REQUIRED_CHECK_TIMEOUT_S as HEPHAESTUS_REQUIRED_CHECK_TIMEOUT_S,
