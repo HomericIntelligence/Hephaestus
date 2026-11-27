@@ -16,7 +16,6 @@ from pathlib import Path
 from typing import Any
 
 from hephaestus.agents.workspace import SourceLane
-from hephaestus.automation.repo_intake import RepoIntakeError, checkout_intake_worker_base
 from hephaestus.automation.source_worktree import (
     SourceWorkspaceError,
     SourceWorkspaceManager,
@@ -28,6 +27,7 @@ from hephaestus.git.git_utils import (
     delete_reserved_branch_if_unchanged,
     run,
 )
+from hephaestus.git.repo_intake import RepoIntakeError, checkout_intake_worker_base
 from hephaestus.git.runtime import (
     current_operation_shutdown,
     operation_deadline,

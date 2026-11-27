@@ -29,13 +29,13 @@ from hephaestus.automation.event_log_retention import event_log_lifecycle
 from hephaestus.automation.models import DEFAULT_STATE_DIR
 from hephaestus.automation.pipeline.coordinator_observability import record_event
 from hephaestus.automation.pipeline.repository_lock import RepositoryOperationLock
-from hephaestus.automation.repo_intake import (
+from hephaestus.automation.worktree_manager import WorktreeManager
+from hephaestus.git import runtime as git_runtime
+from hephaestus.git.repo_intake import (
     RepoIntakeError,
     RepoIntakeManager,
     RepoIntakeReceipt,
 )
-from hephaestus.automation.worktree_manager import WorktreeManager
-from hephaestus.git import runtime as git_runtime
 from hephaestus.git.snapshot import _controlled_git_env
 from hephaestus.utils.file_lock import file_lock
 
@@ -135,9 +135,7 @@ def test_prepare_rejects_a_common_lock_that_changed_after_admission(
     foreign = tmp_path / "foreign-git"
     foreign.mkdir()
     selected = foreign / admitted.name
-    monkeypatch.setattr(
-        "hephaestus.automation.repo_intake.git_metadata_lock_path", lambda _root: selected
-    )
+    monkeypatch.setattr("hephaestus.git.repo_intake.git_metadata_lock_path", lambda _root: selected)
 
     with pytest.raises(RepoIntakeError, match="changed before preparation"):
         manager.prepare(admitted_metadata_lock=admitted)
@@ -1443,7 +1441,7 @@ import uuid
 from pathlib import Path
 
 from hephaestus.git.runtime import operation_deadline
-from hephaestus.automation.repo_intake import RepoIntakeManager
+from hephaestus.git.repo_intake import RepoIntakeManager
 from hephaestus.git.snapshot import _controlled_git_env
 
 caller = Path(sys.argv[1])
@@ -1629,7 +1627,7 @@ import uuid
 from pathlib import Path
 
 from hephaestus.git.runtime import operation_deadline
-from hephaestus.automation.repo_intake import RepoIntakeManager
+from hephaestus.git.repo_intake import RepoIntakeManager
 from hephaestus.git.snapshot import _controlled_git_env
 
 caller = Path(sys.argv[1])
@@ -1770,7 +1768,7 @@ import sys
 import uuid
 from pathlib import Path
 
-from hephaestus.automation.repo_intake import RepoIntakeManager
+from hephaestus.git.repo_intake import RepoIntakeManager
 from hephaestus.git.snapshot import _controlled_git_env
 
 caller = Path(sys.argv[1])
@@ -2005,7 +2003,7 @@ def test_owner_lock_blocks_a_second_process_before_preparation(tmp_path: Path) -
 import sys
 from pathlib import Path
 from hephaestus.git import git_utils
-from hephaestus.automation.repo_intake import RepoIntakeManager
+from hephaestus.git.repo_intake import RepoIntakeManager
 from hephaestus.git.snapshot import _controlled_git_env
 
 manager = RepoIntakeManager(
@@ -2060,7 +2058,7 @@ def test_owner_lock_uses_a_stable_launch_directory_path(tmp_path: Path) -> None:
 
 def test_intake_launch_in_use_error_stays_exported_for_callers() -> None:
     """The legacy in-use error remains an importable intake failure."""
-    from hephaestus.automation.repo_intake import RepoIntakeInUseError
+    from hephaestus.git.repo_intake import RepoIntakeInUseError
 
     assert issubclass(RepoIntakeInUseError, RepoIntakeError)
 
@@ -2080,7 +2078,7 @@ def test_intake_lock_interruption_preserves_shutdown_signal(
             del args
 
     monkeypatch.setattr(
-        "hephaestus.automation.repo_intake.operation_file_lock",
+        "hephaestus.git.repo_intake.operation_file_lock",
         lambda *_args, **_kwargs: _InterruptedLock(),
     )
 
@@ -2154,7 +2152,7 @@ def test_prepare_accepts_a_common_directory_owned_by_another_user(
     """
     caller, remote = _make_repository(tmp_path)
     manager = _manager(caller, remote)
-    monkeypatch.setattr("hephaestus.automation.repo_intake.os.geteuid", lambda: 0)
+    monkeypatch.setattr("hephaestus.git.repo_intake.os.geteuid", lambda: 0)
 
     receipt = manager.prepare()
 

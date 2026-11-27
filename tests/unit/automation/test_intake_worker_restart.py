@@ -5,9 +5,9 @@ from pathlib import Path
 import pytest
 
 from hephaestus.agents.workspace import SourceLane
-from hephaestus.automation.repo_intake import RepoIntakeError
 from hephaestus.automation.source_worktree import SourceWorkspaceManager
 from hephaestus.automation.worktree_manager import WorktreeManager
+from hephaestus.git.repo_intake import RepoIntakeError
 from tests.unit.automation.test_repo_intake import _make_repository, _manager, _run_git
 
 
@@ -101,7 +101,7 @@ def test_intake_fixture_does_not_use_the_hook_index(
 )
 def test_intake_worker_host_path_authority(tmp_path: Path, case: str) -> None:
     """Only the verified item path and Git identity supply worker authority."""
-    from hephaestus.automation.repo_intake import repository_worker_path_is_valid
+    from hephaestus.git.repo_intake import repository_worker_path_is_valid
 
     caller, remote = _make_repository(tmp_path)
     intake = _manager(caller, remote).prepare()
@@ -142,7 +142,7 @@ def test_intake_worker_host_path_authority(tmp_path: Path, case: str) -> None:
 @pytest.mark.precommit
 def test_intake_worker_host_path_requires_its_registration(tmp_path: Path) -> None:
     """Nested paths must not bypass missing intake ownership evidence."""
-    from hephaestus.automation.repo_intake import repository_worker_path_is_valid
+    from hephaestus.git.repo_intake import repository_worker_path_is_valid
 
     caller, remote = _make_repository(tmp_path)
     intake = _manager(caller, remote).prepare()

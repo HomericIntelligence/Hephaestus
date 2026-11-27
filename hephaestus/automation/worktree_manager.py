@@ -297,7 +297,7 @@ class WorktreeManager:
     @staticmethod
     def default_base_dir(repo_root: Path, *, repository: str | None = None) -> Path:
         """Keep receipt-bound intake workers outside the intake checkout."""
-        from hephaestus.automation.repo_intake import intake_worker_base
+        from hephaestus.git.repo_intake import intake_worker_base
 
         root = repo_root.resolve()
         if (root / ".git").exists():

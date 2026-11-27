@@ -15,8 +15,8 @@ from hephaestus.automation.pipeline import git_cleanup
 from hephaestus.automation.pipeline.git_cleanup import run_cleanup_job
 from hephaestus.automation.pipeline.job_results import JobResult
 from hephaestus.automation.pipeline.jobs import GitJob
-from hephaestus.automation.repo_intake import RepoIntakeError
 from hephaestus.automation.worktree_manager import WorktreeManager
+from hephaestus.git.repo_intake import RepoIntakeError
 
 
 def _remove_job(repo_root: Path, worktree: Path) -> GitJob:

@@ -49,7 +49,7 @@ from hephaestus.automation.issue_waves import (
     WaveLease,
 )
 from hephaestus.automation.learning_journal import LearningJournalStore
-from hephaestus.automation.repo_intake import RepoIntakeError, RepoIntakeReceipt
+from hephaestus.git.repo_intake import RepoIntakeError, RepoIntakeReceipt
 
 from ...direct_scope_keys import (
     DIRECT_SCOPE_BASE_SHA_KEY,
