@@ -17,7 +17,7 @@ Hephaestus is the shared utilities and tooling library for the HomericIntelligen
 - **hephaestus.datasets** — Dataset downloading utilities
 - **hephaestus.discovery** — Discovery of agents, skills, and code blocks
 - **hephaestus.forensics** — Coredump capture and gdb post-mortem runner
-- **hephaestus.github** — GitHub automation (PR merging, fleet sync, tidy, stats, rate limit)
+- **hephaestus.git.github** — GitHub automation (PR merging, fleet sync, tidy, stats, rate limit)
 - **hephaestus.io** — File I/O utilities (read, write, safe_write, load/save data)
 - **hephaestus.logging** — Enhanced logging (ContextLogger, setup_logging)
 - **hephaestus.markdown** — Markdown linting, link fixing, anchor validation

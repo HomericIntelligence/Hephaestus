@@ -83,7 +83,7 @@ may change incompatibly in a minor release.
 | `hephaestus.datasets` | Downloader URLs and on-disk layout are not contracted |
 | `hephaestus.discovery` | Discovery rules for agents/skills still evolving |
 | `hephaestus.forensics` | Coredump/gdb helpers depend on host platform conventions |
-| `hephaestus.github` | GitHub utilities have provisional APIs; queue merge ownership remains in the automation product |
+| `hephaestus.git.github` | GitHub utilities have provisional APIs; queue merge ownership remains in the automation product |
 | `hephaestus.markdown` | Linting/fixing rules track evolving markdown conventions |
 | `hephaestus.nats` | NATS subscriber surface is provisional pending real-world use |
 | `hephaestus.resilience` | Retry and circuit-breaker interfaces remain provisional; queue operation budgets are separate |

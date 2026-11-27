@@ -772,7 +772,7 @@ pre-commit run --all-files
 - `hephaestus/system/` - System information collection
 - `hephaestus/fleet/` - Fleet contained runtime, build controller, and worker entry points
 - `hephaestus/git/` - Git-family library subpackage (`config_safety`, `commit_paths`, `commit_policy`, `commit_runtime`, `git_utils`, `remote_git`, `repo_intake`, `runtime`, `snapshot`, `source_worktree`, `worktree_manager`, `writer`, `gh/`, `github/`, `verification/`)
-- `hephaestus/github/` - GitHub automation (PR merging)
+- `hephaestus/git/github/` - GitHub automation (PR merging)
 - `tests/unit/` - Unit test suite. It mirrors the hephaestus/ subpackages.
   `SANCTIONED_EXTRA_TEST_DIRS` in `hephaestus/validation/test_layout.py` names
   the extra test directories that have no source counterpart.

@@ -287,8 +287,8 @@ assumes a POSIX-like development environment. Specifically:
 - **`echo`, `false`, `ls`** on `PATH` — used by
   `tests/unit/utils/test_general_utils.py::TestRunSubprocess` to exercise the
   `run_subprocess()` wrapper end-to-end.
-- **`git`** on `PATH` — used by `tests/unit/github/test_tidy.py` and
-  `tests/unit/github/test_fleet_sync.py` to create a throwaway repository inside
+- **`git`** on `PATH` — used by `tests/unit/git/github/test_tidy.py` and
+  `tests/unit/git/github/test_fleet_sync.py` to create a throwaway repository inside
   `tmp_path` with `git init -q` and `git commit --no-gpg-sign`. Each test sets
   the author and committer identity with a local `git config user.name` and
   `git config user.email`, so the tests do not depend on the contributor's

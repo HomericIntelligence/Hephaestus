@@ -8,7 +8,7 @@
 
 Epic #3504 groups the Git-facing modules into one library subpackage. Today
 `hephaestus/git/` holds `__init__.py` and `gh/` only (#3513, merged). The
-planned moves put the git-lifecycle modules (#3512), the `hephaestus/github/`
+planned moves put the git-lifecycle modules (#3512), the `hephaestus/git/github/`
 tree (#3514), the pipeline GitHub tiers (#3515), and host verification
 (#3517) under it. ADR-0001 now names `git` in the library-layer list, so the
 subpackage needs a recorded home decision.
@@ -26,7 +26,7 @@ subpackage needs a recorded home decision.
 
 ## Alternatives considered
 
-- Keep `hephaestus/github/` as a top-level library peer. Rejected: the
+- Keep `hephaestus/git/github/` as a top-level library peer. Rejected: the
   Git-family modules then stay split across two roots, and the library-layer
   list does not name one home for them.
 - Extract a separate distribution. Rejected: it repeats the ADR-0001
@@ -35,7 +35,7 @@ subpackage needs a recorded home decision.
 
 ## Consequences
 
-- `hephaestus/github/` disappears in #3514 without a compatibility shim.
+- `hephaestus/git/github/` disappears in #3514 without a compatibility shim.
   Documents that name it follow in the gated documentation follow-up for
   #3525.
 - Each move issue carries its own import, test, and document edits.

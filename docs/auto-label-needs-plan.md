@@ -42,7 +42,7 @@ The issue forms
 - **Severity** — a constrained dropdown (`critical` / `major` / `minor` /
   `nitpick`). On issue open/edit,
   [`auto-label-severity.yml`](../.github/workflows/auto-label-severity.yml) runs
-  `hephaestus.github.severity_label`, which parses the rendered answer and
+  `hephaestus.git.github.severity_label`, which parses the rendered answer and
   **reconciles** the issue's `severity:*` label (removing any stale one). Only
   the server-controlled issue number and a fixed label string reach the API.
 - **Parent Epic** — an optional `#NNN` reference for the Epic-and-children
