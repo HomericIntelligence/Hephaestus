@@ -20,7 +20,7 @@ from unittest.mock import Mock
 import pytest
 
 from hephaestus.agents.workspace import SourceLane
-from hephaestus.automation import git_utils, rebase_recovery
+from hephaestus.automation import rebase_recovery
 from hephaestus.automation.direct_review_recovery import _write_receipt
 from hephaestus.automation.pipeline import worker_pool
 from hephaestus.automation.pipeline.git_jobs import GitJob
@@ -35,6 +35,7 @@ from hephaestus.automation.pipeline.stages import JobRequest
 from hephaestus.automation.pipeline.worker_pool import WorkerPool
 from hephaestus.automation.rebase_recovery import PendingRebaseStore
 from hephaestus.automation.source_worktree import SourceWorkspaceManager, _PreparationDeadline
+from hephaestus.git import git_utils
 from tests.unit.automation.test_rebase_recovery import (
     _abort_worker_case,
     _normal_publication_job,

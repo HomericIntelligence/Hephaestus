@@ -10,7 +10,6 @@ from unittest.mock import Mock
 import pytest
 
 from hephaestus.agents.workspace import SourceLane
-from hephaestus.automation import git_utils
 from hephaestus.automation.pipeline import worker_pool
 from hephaestus.automation.pipeline.git_jobs import GitJob
 from hephaestus.automation.pipeline.host_capabilities import (
@@ -18,6 +17,7 @@ from hephaestus.automation.pipeline.host_capabilities import (
     HostCapabilityReceipt,
 )
 from hephaestus.automation.pipeline.stages import JobRequest
+from hephaestus.git import git_utils
 from tests.unit.automation.test_rebase_recovery import (
     _abort_worker_case,
     _publication_validation_seams,

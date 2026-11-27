@@ -5323,7 +5323,7 @@ def test_run_cleans_up_intakes_after_shutdown_and_reporting(
     with (
         patch.object(worker_pool_module, "_trusted_gh_executable", return_value="gh"),
         patch.object(worker_pool_module, "_trusted_remote_git_config", return_value=()),
-        patch("hephaestus.automation.git_utils.run", side_effect=run_intake_git),
+        patch("hephaestus.git.git_utils.run", side_effect=run_intake_git),
     ):
         intake_result = main._git_prepare_intake(intake_job)
     assert intake_result.ok

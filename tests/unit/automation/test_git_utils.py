@@ -12,8 +12,9 @@ from unittest.mock import Mock, patch
 import pytest
 
 import hephaestus.git.runtime as git_runtime
-from hephaestus.automation import git_utils
-from hephaestus.automation.git_utils import (
+from hephaestus.git import git_utils
+from hephaestus.git.commit_runtime import CommitIssueMetadata
+from hephaestus.git.git_utils import (
     BranchPublicationError,
     BranchPublicationRemoteHeadChangedError,
     BranchPublicationRemoteHeadUnchangedError,
@@ -36,7 +37,6 @@ from hephaestus.automation.git_utils import (
     safe_git_fetch,
     sync_worktree_to_remote_branch,
 )
-from hephaestus.git.commit_runtime import CommitIssueMetadata
 
 
 @pytest.mark.parametrize(
@@ -109,7 +109,7 @@ class TestCommitIfChanges:
         """A cold Git utility import does not load PR or GitHub modules."""
         code = r"""
 import sys
-import hephaestus.automation.git_utils
+import hephaestus.git.git_utils
 
 for module in sys.modules:
     if module == "hephaestus.automation.pr_manager" or module.startswith(
@@ -121,7 +121,7 @@ for module in sys.modules:
 
         assert result.returncode == 0, result.stderr + result.stdout
 
-    @patch("hephaestus.automation.git_utils._commit_changes")
+    @patch("hephaestus.git.git_utils._commit_changes")
     def test_dirty_tree_commits_with_selected_agent(
         self, mock_commit: Any, git_utils_mocks: Any, tmp_path: Path
     ) -> None:
@@ -142,7 +142,7 @@ for module in sys.modules:
             git_message_timeout=1200,
         )
 
-    @patch("hephaestus.automation.git_utils._commit_changes")
+    @patch("hephaestus.git.git_utils._commit_changes")
     def test_dirty_tree_returns_the_requested_commit_receipt(
         self, mock_commit: Any, git_utils_mocks: Any, tmp_path: Path
     ) -> None:
@@ -173,7 +173,7 @@ for module in sys.modules:
             git_message_timeout=1200,
         )
 
-    @patch("hephaestus.automation.git_utils._commit_changes")
+    @patch("hephaestus.git.git_utils._commit_changes")
     def test_inspected_manifest_bypasses_live_status_and_forwards_exact_paths(
         self, mock_commit: Any, git_utils_mocks: Any, tmp_path: Path
     ) -> None:
@@ -209,7 +209,7 @@ for module in sys.modules:
             disable_hooks=True,
         )
 
-    @patch("hephaestus.automation.git_utils._commit_changes")
+    @patch("hephaestus.git.git_utils._commit_changes")
     def test_live_status_and_commit_helper_share_the_git_environment(
         self, mock_commit: Any, git_utils_mocks: Any, tmp_path: Path
     ) -> None:
@@ -243,7 +243,7 @@ for module in sys.modules:
             git_env=git_env,
         )
 
-    @patch("hephaestus.automation.git_utils._commit_changes")
+    @patch("hephaestus.git.git_utils._commit_changes")
     def test_dirty_tree_threads_timeout_to_commit_helper(
         self, mock_commit: Any, git_utils_mocks: Any, tmp_path: Path
     ) -> None:
@@ -268,7 +268,7 @@ for module in sys.modules:
             git_message_timeout=1200,
         )
 
-    @patch("hephaestus.automation.git_utils._commit_changes")
+    @patch("hephaestus.git.git_utils._commit_changes")
     def test_dirty_tree_threads_configured_agent_model_to_commit_helper(
         self, mock_commit: Any, git_utils_mocks: Any, tmp_path: Path
     ) -> None:
@@ -295,7 +295,7 @@ for module in sys.modules:
             git_message_timeout=1200,
         )
 
-    @patch("hephaestus.automation.git_utils._commit_changes")
+    @patch("hephaestus.git.git_utils._commit_changes")
     def test_dirty_tree_threads_pi_directory_to_commit_helper(
         self, mock_commit: Any, git_utils_mocks: Any, tmp_path: Path
     ) -> None:
@@ -323,7 +323,7 @@ for module in sys.modules:
             pi_dir=pi_dir,
         )
 
-    @patch("hephaestus.automation.git_utils._commit_changes")
+    @patch("hephaestus.git.git_utils._commit_changes")
     def test_dirty_tree_forwards_allowed_paths(
         self, mock_commit: Any, git_utils_mocks: Any, tmp_path: Path
     ) -> None:
@@ -348,7 +348,7 @@ for module in sys.modules:
             git_message_timeout=1200,
         )
 
-    @patch("hephaestus.automation.git_utils._commit_changes")
+    @patch("hephaestus.git.git_utils._commit_changes")
     def test_clean_tree_returns_false_without_commit(
         self, mock_commit: Any, git_utils_mocks: Any, tmp_path: Path
     ) -> None:
@@ -358,7 +358,7 @@ for module in sys.modules:
 
         mock_commit.assert_not_called()
 
-    @patch("hephaestus.automation.git_utils._commit_changes")
+    @patch("hephaestus.git.git_utils._commit_changes")
     def test_clean_tree_does_not_request_signing_environment(
         self, mock_commit: Any, git_utils_mocks: Any, tmp_path: Path
     ) -> None:
@@ -380,7 +380,7 @@ for module in sys.modules:
         signing_factory.assert_not_called()
         mock_commit.assert_not_called()
 
-    @patch("hephaestus.automation.git_utils._commit_changes")
+    @patch("hephaestus.git.git_utils._commit_changes")
     def test_dirty_tree_resolves_signing_environment_before_commit(
         self, mock_commit: Any, git_utils_mocks: Any, tmp_path: Path
     ) -> None:
@@ -410,7 +410,7 @@ for module in sys.modules:
             signing_env=signing_env,
         )
 
-    @patch("hephaestus.automation.git_utils._commit_changes")
+    @patch("hephaestus.git.git_utils._commit_changes")
     def test_commit_runtime_error_returns_false(
         self, mock_commit: Any, git_utils_mocks: Any, tmp_path: Path
     ) -> None:
@@ -419,7 +419,7 @@ for module in sys.modules:
 
         assert commit_if_changes(123, tmp_path, "claude", issue_title="Test issue") is False
 
-    @patch("hephaestus.automation.git_utils._commit_changes")
+    @patch("hephaestus.git.git_utils._commit_changes")
     def test_dirty_tree_rejects_missing_issue_metadata_before_commit(
         self, mock_commit: Any, git_utils_mocks: Any, tmp_path: Path
     ) -> None:
@@ -1458,8 +1458,8 @@ def test_pinned_rebase_does_not_fetch_again(tmp_path: Path) -> None:
     """Replay the captured commit without a second remote fetch."""
     base = "b" * 40
     with (
-        patch("hephaestus.automation.git_utils.run") as run,
-        patch("hephaestus.automation.git_utils._remove_untracked_files_tracked_by_ref"),
+        patch("hephaestus.git.git_utils.run") as run,
+        patch("hephaestus.git.git_utils._remove_untracked_files_tracked_by_ref"),
     ):
         assert rebase_worktree_onto(tmp_path, base_sha=base)
     assert len(run.call_args_list) == 1
@@ -1472,14 +1472,14 @@ def test_pinned_rebase_failure_without_conflicts_is_not_agent_work(tmp_path: Pat
     failure = subprocess.CalledProcessError(1, ["git", "rebase"])
     with (
         patch(
-            "hephaestus.automation.git_utils.run",
+            "hephaestus.git.git_utils.run",
             side_effect=[
                 failure,
                 Mock(stdout="", returncode=0),
                 Mock(returncode=0),
             ],
         ) as run,
-        patch("hephaestus.automation.git_utils._remove_untracked_files_tracked_by_ref"),
+        patch("hephaestus.git.git_utils._remove_untracked_files_tracked_by_ref"),
         pytest.raises(subprocess.CalledProcessError),
     ):
         rebase_worktree_onto(tmp_path, base_sha="b" * 40)

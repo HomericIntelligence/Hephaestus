@@ -11,7 +11,7 @@ import time
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Literal
 
-import hephaestus.automation.git_utils as git_utils
+import hephaestus.git.git_utils as git_utils
 from hephaestus.agents.runtime import AgentExecutionError
 from hephaestus.automation.pipeline.diagnostics import (
     _JOB_RESULT_ERROR_MAX as _ERR_MAX,

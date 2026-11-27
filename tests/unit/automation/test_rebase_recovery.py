@@ -61,7 +61,7 @@ def _registered_git_fixture(root: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
     import subprocess
 
     from hephaestus.automation import worktree_manager
-    from hephaestus.automation.git_utils import run
+    from hephaestus.git.git_utils import run
     from tests.unit.automation.test_source_worktree import _git
 
     def registered_listing(argv: list[str], **kwargs: Any) -> Any:
@@ -151,7 +151,6 @@ def test_known_conflict_keeps_one_intent_through_admitted_continuation(
     from types import SimpleNamespace
     from unittest.mock import Mock
 
-    from hephaestus.automation import git_utils
     from hephaestus.automation.pipeline import worker_pool
     from hephaestus.automation.pipeline.coordinator_types import PipelineConfig
     from hephaestus.automation.pipeline.host_capabilities import (
@@ -170,6 +169,7 @@ def test_known_conflict_keeps_one_intent_through_admitted_continuation(
     )
     from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
     from hephaestus.automation.pipeline.worker_pool import WorkerPool
+    from hephaestus.git import git_utils
     from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
     from tests.unit.automation.test_source_worktree import _git
 
@@ -527,8 +527,7 @@ def test_worker_retains_real_rebase_result_before_capability_failure(
     from types import SimpleNamespace
     from unittest.mock import Mock
 
-    from hephaestus.automation import git_utils, worktree_manager
-    from hephaestus.automation.git_utils import run
+    from hephaestus.automation import worktree_manager
     from hephaestus.automation.pipeline import worker_pool
     from hephaestus.automation.pipeline.coordinator_types import PipelineConfig
     from hephaestus.automation.pipeline.host_capabilities import (
@@ -548,6 +547,8 @@ def test_worker_retains_real_rebase_result_before_capability_failure(
     )
     from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
     from hephaestus.automation.pipeline.worker_pool import WorkerPool
+    from hephaestus.git import git_utils
+    from hephaestus.git.git_utils import run
     from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
     from tests.unit.automation.test_source_worktree import _git
 
@@ -800,7 +801,6 @@ def _assert_fresh_resume(
     import time
     from unittest.mock import Mock
 
-    from hephaestus.automation import git_utils
     from hephaestus.automation.pipeline.host_capabilities import (
         QUOTA_AVAILABLE_TOKEN,
         CapabilityReceiptTarget,
@@ -811,6 +811,7 @@ def _assert_fresh_resume(
     from hephaestus.automation.pipeline.rebase_policy import RebaseValidationPolicy
     from hephaestus.automation.pipeline.stages import JobRequest
     from hephaestus.automation.pipeline.worker_pool import WorkerPool
+    from hephaestus.git import git_utils
     from tests.unit.automation.test_source_worktree import _git
 
     root = binding.reusable_root
@@ -976,9 +977,9 @@ def test_recovery_fast_forward_requires_exact_graph_proof(
     import time
     from unittest.mock import Mock
 
-    from hephaestus.automation import git_utils
     from hephaestus.automation.pipeline.jobs import JobResult
     from hephaestus.automation.pipeline.worker_pool import WorkerPool
+    from hephaestus.git import git_utils
     from tests.unit.automation.test_source_worktree import _git
 
     root, original, base = _repository(tmp_path, origin_repository="acme/repository")
@@ -1085,12 +1086,12 @@ def _abort_worker_case(
     from types import SimpleNamespace
     from unittest.mock import Mock
 
-    from hephaestus.automation import git_utils
     from hephaestus.automation.pipeline import worker_pool
     from hephaestus.automation.pipeline.host_capabilities import WorkerCapabilities
     from hephaestus.automation.pipeline.jobs import JobResult
     from hephaestus.automation.pipeline.rebase_policy import RebaseValidationPolicy
     from hephaestus.automation.pipeline.worker_pool import WorkerPool
+    from hephaestus.git import git_utils
     from tests.unit.automation.test_source_worktree import _git
 
     prior_umask = os.umask(0o022)
@@ -1399,7 +1400,6 @@ def test_worker_terminal_abort_allows_only_a_fresh_exact_base_attempt(
     from types import SimpleNamespace
     from unittest.mock import Mock
 
-    from hephaestus.automation import git_utils
     from hephaestus.automation.pipeline.coordinator_types import PipelineConfig
     from hephaestus.automation.pipeline.host_capabilities import WorkerCapabilities
     from hephaestus.automation.pipeline.jobs import AgentJob, JobResult
@@ -1413,6 +1413,7 @@ def test_worker_terminal_abort_allows_only_a_fresh_exact_base_attempt(
     )
     from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
     from hephaestus.automation.pipeline.worker_pool import WorkerPool
+    from hephaestus.git import git_utils
     from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
 
     with _abort_worker_case(tmp_path, monkeypatch, fallback=False, fault="clean") as case:
@@ -1651,7 +1652,6 @@ def _restart_publication_checks(
     import queue
     from unittest.mock import Mock
 
-    from hephaestus.automation import git_utils
     from hephaestus.automation.pipeline.host_capabilities import (
         QUOTA_AVAILABLE_TOKEN,
         HostCapabilityReceipt,
@@ -1660,6 +1660,7 @@ def _restart_publication_checks(
     from hephaestus.automation.pipeline.jobs import JobResult
     from hephaestus.automation.pipeline.rebase_policy import RebaseValidationPolicy
     from hephaestus.automation.pipeline.worker_pool import WorkerPool
+    from hephaestus.git import git_utils
 
     seen: list[str] = []
     remote_reads: list[str] = []
@@ -1761,8 +1762,8 @@ def test_uncertain_publication_restart_revalidates_the_final_boundary(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str, outcome: str
 ) -> None:
     """Recover real retained operations without replay or cached publication authority."""
-    from hephaestus.automation import git_utils
     from hephaestus.automation.pipeline.stages import JobRequest
+    from hephaestus.git import git_utils
 
     with _abort_worker_case(
         tmp_path,
@@ -1931,12 +1932,13 @@ def _automatic_local_worker_case(
     from types import SimpleNamespace
     from unittest.mock import Mock
 
-    from hephaestus.automation import git_utils, worktree_manager
+    from hephaestus.automation import worktree_manager
     from hephaestus.automation.pipeline import worker_pool
     from hephaestus.automation.pipeline.host_capabilities import WorkerCapabilities
     from hephaestus.automation.pipeline.jobs import JobResult
     from hephaestus.automation.pipeline.rebase_policy import RebaseValidationPolicy
     from hephaestus.automation.pipeline.worker_pool import WorkerPool
+    from hephaestus.git import git_utils
     from tests.unit.automation.test_source_worktree import _git
 
     nonce = "e" * 32
@@ -2328,9 +2330,9 @@ def _assert_reserved_quota_restart(
     case: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """Retry the actual reserved operation through fresh stage and worker owners."""
-    from hephaestus.automation import git_utils
     from hephaestus.automation.pipeline.direct_scope_keys import DIRECT_SCOPE_RESERVATION_KEY
     from hephaestus.automation.pipeline.stages import JobRequest
+    from hephaestus.git import git_utils
 
     case.pool.shutdown()
     del case.pool
@@ -2454,7 +2456,7 @@ def _reserved_first_publication(
     """Use the real initial or continued owner before the controlled remote write."""
     from types import SimpleNamespace
 
-    from hephaestus.automation import git_utils
+    from hephaestus.git import git_utils
 
     checks = _publication_validation_seams(case, operation, monkeypatch)
     continuations: list[str] = []
@@ -2559,7 +2561,7 @@ def test_reserved_uncertain_publication_restart_preserves_original_authority(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str, outcome: str
 ) -> None:
     """Reconcile only an actual publication intent after fresh source discovery and checks."""
-    from hephaestus.automation import git_utils
+    from hephaestus.git import git_utils
 
     with _automatic_local_worker_case(
         tmp_path, monkeypatch, conflict=operation == "continued", reserved=True
@@ -2678,7 +2680,7 @@ def test_reserved_fresh_admission_rejects_changed_authority_before_execution(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scenario: str
 ) -> None:
     """Keep explicit invalid authority distinct from an absent optional lease field."""
-    from hephaestus.automation import git_utils
+    from hephaestus.git import git_utils
 
     with _automatic_local_worker_case(tmp_path, monkeypatch, conflict=False, reserved=True) as case:
         first = (
@@ -2769,7 +2771,7 @@ def test_reserved_restart_rejects_drift_after_fresh_validation(
     """Reject changed evidence at the final boundary without another mutation or publication."""
     from unittest.mock import Mock
 
-    from hephaestus.automation import git_utils
+    from hephaestus.git import git_utils
 
     with _automatic_local_worker_case(tmp_path, monkeypatch, conflict=False, reserved=True) as case:
         first = _reserved_first_publication(case, "initial", True, monkeypatch)
@@ -2817,7 +2819,7 @@ def test_reserved_resume_preserves_source_failure_on_unchanged_b(
     """Keep real source validation failures distinct from changed admission evidence."""
     from unittest.mock import Mock
 
-    from hephaestus.automation import git_utils
+    from hephaestus.git import git_utils
     from tests.unit.automation.test_source_worktree import _git
 
     with _automatic_local_worker_case(tmp_path, monkeypatch, conflict=False, reserved=True) as case:
@@ -2939,7 +2941,7 @@ def test_reserved_prepublication_persistence_failure_retains_actual_state(
     """Inspect actual durable state after a one-shot fault and retry with fresh owners."""
     from unittest.mock import Mock
 
-    from hephaestus.automation import git_utils
+    from hephaestus.git import git_utils
 
     with _automatic_local_worker_case(tmp_path, monkeypatch, conflict=False, reserved=True) as case:
         checks = _publication_validation_seams(case, "initial", monkeypatch)
@@ -2986,7 +2988,7 @@ def _reserved_postpublication_restart(
     """Reconcile actual remote B or use verified completed-start evidence without replay."""
     from unittest.mock import Mock
 
-    from hephaestus.automation import git_utils
+    from hephaestus.git import git_utils
 
     case.pool.shutdown()
     del case.pool
@@ -3031,7 +3033,7 @@ def test_reserved_postpublication_persistence_failure_recovers_without_repush(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outcome: str
 ) -> None:
     """Preserve physical state after successful publication and a failed persistence boundary."""
-    from hephaestus.automation import git_utils
+    from hephaestus.git import git_utils
 
     with _automatic_local_worker_case(tmp_path, monkeypatch, conflict=False, reserved=True) as case:
         checks = _publication_validation_seams(case, "initial", monkeypatch)
@@ -3409,12 +3411,12 @@ def _publication_validation_seams(
     """Control external execution while retaining real source and receipt checks."""
     import subprocess
 
-    from hephaestus.automation import git_utils
     from hephaestus.automation.pipeline.host_capabilities import (
         QUOTA_AVAILABLE_TOKEN,
         HostCapabilityReceipt,
     )
     from hephaestus.automation.pipeline.jobs import JobResult
+    from hephaestus.git import git_utils
     from tests.unit.automation.test_source_worktree import _git
 
     seen: list[str] = []
@@ -3498,7 +3500,7 @@ def test_normal_rebase_publication_is_durable_before_the_external_write(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str, outcome: str
 ) -> None:
     """Normal publication must read back intent before push and complete only after success."""
-    from hephaestus.automation import git_utils
+    from hephaestus.git import git_utils
     from tests.unit.automation.test_source_worktree import _git
 
     with _abort_worker_case(

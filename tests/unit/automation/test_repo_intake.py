@@ -2004,7 +2004,7 @@ def test_owner_lock_blocks_a_second_process_before_preparation(tmp_path: Path) -
     child = """
 import sys
 from pathlib import Path
-from hephaestus.automation import git_utils
+from hephaestus.git import git_utils
 from hephaestus.automation.repo_intake import RepoIntakeManager
 from hephaestus.git.snapshot import _controlled_git_env
 

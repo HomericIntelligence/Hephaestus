@@ -12,12 +12,12 @@ from typing import Any
 import pytest
 
 from hephaestus.agents.workspace import SourceLane
-from hephaestus.automation import git_utils
 from hephaestus.automation.pipeline.git_jobs import GitJob
 from hephaestus.automation.pipeline.host_capabilities import SigningConfigurationError
 from hephaestus.automation.pipeline.job_results import JobResult
 from hephaestus.automation.pipeline.worker_pool import WorkerPool
 from hephaestus.automation.source_worktree import SourceWorkspaceManager
+from hephaestus.git import git_utils
 from tests.unit.automation.pipeline.conftest import FakeSigningProvider
 from tests.unit.automation.pipeline.test_worker_pool import _git
 from tests.unit.automation.test_first_publication_process import _pool, _publication_job

@@ -11,7 +11,7 @@ from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
 
-import hephaestus.automation.git_utils as git_utils
+import hephaestus.git.git_utils as git_utils
 from hephaestus.automation.pipeline.git_jobs import (
     DIRTY_SNAPSHOT_CHANGED_FILE_MAX,
     DIRTY_SNAPSHOT_CONTENT_MAX_BYTES,

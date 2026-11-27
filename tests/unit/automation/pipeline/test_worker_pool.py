@@ -49,7 +49,7 @@ from hephaestus.agents.pi_plugins import InventoryResult, PiPreflightResult
 from hephaestus.agents.pi_session import create_pi_binding
 from hephaestus.agents.runtime import AgentExecutionError, AgentRunResult
 from hephaestus.agents.workspace import DirtySourceOperation, SourceLane, WorkspaceBinding
-from hephaestus.automation import git_utils, subprocess_registry
+from hephaestus.automation import subprocess_registry
 from hephaestus.automation._review_utils import build_automation_parser
 from hephaestus.automation.agent_config import (
     AGENT_IMPLEMENTER,
@@ -151,6 +151,7 @@ from hephaestus.config.child_environments import (
     build_git_child_env,
     build_nested_host_verification_env,
 )
+from hephaestus.git import git_utils
 from hephaestus.git.commit_runtime import CommitIssueMetadata
 from hephaestus.git.runtime import operation_file_lock
 from hephaestus.git.snapshot import _terminate_bounded_process_tree
@@ -12691,7 +12692,7 @@ class TestGitOps:
         )
         with (
             patch(
-                "hephaestus.automation.git_utils.rebase_worktree_onto",
+                "hephaestus.git.git_utils.rebase_worktree_onto",
                 return_value=False,
             ) as rebase,
             patch.object(FakeSigningProvider, "environment", return_value={}),
@@ -16018,10 +16019,10 @@ class TestGitOps:
         with (
             patch.object(pool, "_writer_tracking_head", return_value=binding.revision),
             patch(
-                "hephaestus.automation.git_utils.commit_if_changes",
+                "hephaestus.git.git_utils.commit_if_changes",
                 side_effect=partial(_commit_publication_change, tmp_path),
             ) as mock_commit,
-            patch("hephaestus.automation.git_utils.push_branch") as mock_push,
+            patch("hephaestus.git.git_utils.push_branch") as mock_push,
             patch.object(
                 pool,
                 "_authenticated_remote_git_configuration",
@@ -16286,10 +16287,10 @@ class TestGitOps:
                 return_value=signing_env,
             ) as controlled_signing,
             patch(
-                "hephaestus.automation.git_utils._commit_changes",
+                "hephaestus.git.git_utils._commit_changes",
                 side_effect=partial(_commit_publication_change, tmp_path),
             ) as commit,
-            patch("hephaestus.automation.git_utils.push_branch") as push,
+            patch("hephaestus.git.git_utils.push_branch") as push,
             patch.object(
                 pool,
                 "_authenticated_remote_git_configuration",
@@ -16459,14 +16460,14 @@ class TestGitOps:
         with (
             patch.object(pool, "_authenticated_remote_git_configuration", return_value=({}, ())),
             patch(
-                "hephaestus.automation.git_utils.run",
+                "hephaestus.git.git_utils.run",
                 return_value=MagicMock(stdout=" M pending.py\\n"),
             ),
             patch(
                 "tests.unit.automation.pipeline.conftest.FakeSigningProvider.environment",
                 side_effect=SigningConfigurationError(signing_failure.error or ""),
             ),
-            patch("hephaestus.automation.git_utils._commit_changes") as commit,
+            patch("hephaestus.git.git_utils._commit_changes") as commit,
         ):
             pool.submit(job, StageName.PR_REVIEW)
             _, result = completion_q.get(timeout=10)
@@ -16506,14 +16507,14 @@ class TestGitOps:
         )
         with (
             patch.object(pool, "_authenticated_remote_git_configuration", return_value=({}, ())),
-            patch("hephaestus.automation.git_utils.commit_if_changes", return_value=True),
+            patch("hephaestus.git.git_utils.commit_if_changes", return_value=True),
             patch(
-                "hephaestus.automation.git_utils.run",
+                "hephaestus.git.git_utils.run",
                 return_value=subprocess.CompletedProcess(
                     [], 0, stdout="hephaestus/agents/runtime.py\n"
                 ),
             ) as diff,
-            patch("hephaestus.automation.git_utils.push_branch") as push,
+            patch("hephaestus.git.git_utils.push_branch") as push,
         ):
             pool.submit(job, StageName.PR_REVIEW)
             _, result = completion_q.get(timeout=10)
@@ -16576,9 +16577,9 @@ class TestGitOps:
         )
         with (
             patch.object(pool, "_authenticated_remote_git_configuration", return_value=({}, ())),
-            patch("hephaestus.automation.git_utils.commit_if_changes", return_value=True),
-            patch("hephaestus.automation.git_utils.run") as diff,
-            patch("hephaestus.automation.git_utils.push_branch") as push,
+            patch("hephaestus.git.git_utils.commit_if_changes", return_value=True),
+            patch("hephaestus.git.git_utils.run") as diff,
+            patch("hephaestus.git.git_utils.push_branch") as push,
         ):
             pool.submit(job, StageName.PR_REVIEW)
             _, result = completion_q.get(timeout=10)
@@ -16616,11 +16617,11 @@ class TestGitOps:
         )
         with (
             patch(
-                "hephaestus.automation.git_utils.commit_if_changes",
+                "hephaestus.git.git_utils.commit_if_changes",
                 side_effect=partial(_commit_publication_change, tmp_path),
             ),
-            patch("hephaestus.automation.git_utils.push_branch_if_remote_matches") as strict_push,
-            patch("hephaestus.automation.git_utils.push_branch") as normal_push,
+            patch("hephaestus.git.git_utils.push_branch_if_remote_matches") as strict_push,
+            patch("hephaestus.git.git_utils.push_branch") as normal_push,
             patch.object(pool, "_authenticated_remote_git_configuration", return_value=({}, ())),
             patch.object(
                 pool,
@@ -16733,10 +16734,10 @@ class TestGitOps:
             },
         )
         with (
-            patch("hephaestus.automation.git_utils.commit_if_changes", return_value=False),
-            patch("hephaestus.automation.git_utils.has_unpushed_commits", return_value=False),
-            patch("hephaestus.automation.git_utils.delete_reserved_branch_if_unchanged") as release,
-            patch("hephaestus.automation.git_utils.push_branch") as normal_push,
+            patch("hephaestus.git.git_utils.commit_if_changes", return_value=False),
+            patch("hephaestus.git.git_utils.has_unpushed_commits", return_value=False),
+            patch("hephaestus.git.git_utils.delete_reserved_branch_if_unchanged") as release,
+            patch("hephaestus.git.git_utils.push_branch") as normal_push,
             patch.object(pool, "_authenticated_remote_git_configuration", return_value=({}, ())),
         ):
             pool.submit(job, StageName.IMPLEMENTATION)
@@ -16792,9 +16793,9 @@ class TestGitOps:
             },
         )
         with (
-            patch("hephaestus.automation.git_utils.commit_if_changes", return_value=False),
-            patch("hephaestus.automation.git_utils.delete_reserved_branch_if_unchanged") as release,
-            patch("hephaestus.automation.git_utils.push_branch") as normal_push,
+            patch("hephaestus.git.git_utils.commit_if_changes", return_value=False),
+            patch("hephaestus.git.git_utils.delete_reserved_branch_if_unchanged") as release,
+            patch("hephaestus.git.git_utils.push_branch") as normal_push,
             patch.object(pool, "_authenticated_remote_git_configuration", return_value=({}, ())),
         ):
             pool.submit(job, StageName.IMPLEMENTATION)
@@ -16886,10 +16887,10 @@ class TestGitOps:
 
         with (
             patch.object(pool, "_authenticated_remote_git_configuration", return_value=({}, ())),
-            patch("hephaestus.automation.git_utils.commit_if_changes", side_effect=commit),
-            patch("hephaestus.automation.git_utils.push_branch_if_remote_matches") as push,
+            patch("hephaestus.git.git_utils.commit_if_changes", side_effect=commit),
+            patch("hephaestus.git.git_utils.push_branch_if_remote_matches") as push,
             patch(
-                "hephaestus.automation.git_utils.delete_reserved_branch_if_unchanged",
+                "hephaestus.git.git_utils.delete_reserved_branch_if_unchanged",
                 side_effect=release,
             ) as delete,
             patch.object(pool, "_read_remote_branch_head", side_effect=remote_head) as remote_read,
@@ -16956,9 +16957,9 @@ class TestGitOps:
         )
         with (
             patch.object(pool, "_authenticated_remote_git_configuration", return_value=({}, ())),
-            patch("hephaestus.automation.git_utils.commit_if_changes", return_value=False),
-            patch("hephaestus.automation.git_utils.push_branch") as mock_push,
-            patch("hephaestus.automation.git_utils.has_unpushed_commits", return_value=False),
+            patch("hephaestus.git.git_utils.commit_if_changes", return_value=False),
+            patch("hephaestus.git.git_utils.push_branch") as mock_push,
+            patch("hephaestus.git.git_utils.has_unpushed_commits", return_value=False),
         ):
             pool.submit(job, StageName.PR_REVIEW)
             _, result = completion_q.get(timeout=10)
@@ -17002,11 +17003,9 @@ class TestGitOps:
         )
         with (
             patch.object(pool, "_writer_tracking_head", return_value=base),
-            patch("hephaestus.automation.git_utils.commit_if_changes", return_value=False),
-            patch(
-                "hephaestus.automation.git_utils.has_unpushed_commits", return_value=True
-            ) as mock_ahead,
-            patch("hephaestus.automation.git_utils.push_branch") as mock_push,
+            patch("hephaestus.git.git_utils.commit_if_changes", return_value=False),
+            patch("hephaestus.git.git_utils.has_unpushed_commits", return_value=True) as mock_ahead,
+            patch("hephaestus.git.git_utils.push_branch") as mock_push,
             patch.object(pool, "_authenticated_remote_git_configuration", return_value=({}, ())),
         ):
             pool.submit(job, StageName.PR_REVIEW)
@@ -17058,9 +17057,9 @@ class TestGitOps:
         )
         with (
             patch.object(pool, "_authenticated_remote_git_configuration", return_value=({}, ())),
-            patch("hephaestus.automation.git_utils.commit_if_changes", return_value=False),
-            patch("hephaestus.automation.git_utils.has_unpushed_commits", return_value=True),
-            patch("hephaestus.automation.git_utils.push_branch") as mock_push,
+            patch("hephaestus.git.git_utils.commit_if_changes", return_value=False),
+            patch("hephaestus.git.git_utils.has_unpushed_commits", return_value=True),
+            patch("hephaestus.git.git_utils.push_branch") as mock_push,
         ):
             pool.submit(job, StageName.PR_REVIEW)
             _, result = completion_q.get(timeout=10)
@@ -17095,7 +17094,7 @@ class TestGitOps:
         )
         with (
             patch.object(pool, "_authenticated_remote_git_configuration", return_value=({}, ())),
-            patch("hephaestus.automation.git_utils.commit_if_changes") as commit,
+            patch("hephaestus.git.git_utils.commit_if_changes") as commit,
         ):
             pool.submit(job, StageName.PR_REVIEW)
             _, result = completion_q.get(timeout=10)
@@ -17125,8 +17124,8 @@ class TestGitOps:
             },
         )
         with (
-            patch("hephaestus.automation.git_utils.commit_if_changes") as mock_commit,
-            patch("hephaestus.automation.git_utils.push_branch") as mock_push,
+            patch("hephaestus.git.git_utils.commit_if_changes") as mock_commit,
+            patch("hephaestus.git.git_utils.push_branch") as mock_push,
         ):
             pool.submit(job, StageName.PR_REVIEW)
             _, result = completion_q.get(timeout=10)
@@ -17151,7 +17150,7 @@ class TestGitOps:
             timeout_s=120,
             kwargs={"repo": "owner/name", "dest": "/tmp/dest"},
         )
-        with patch("hephaestus.automation.git_utils.run") as mock_run:
+        with patch("hephaestus.git.git_utils.run") as mock_run:
             pool.submit(job, StageName.REPO)
             _, result = completion_q.get(timeout=10)
 
@@ -17182,7 +17181,7 @@ class TestGitOps:
             timeout_s=120,
             kwargs={"repo": "owner/name", "dest": str(dest)},
         )
-        with patch("hephaestus.automation.git_utils.run", side_effect=fake_run):
+        with patch("hephaestus.git.git_utils.run", side_effect=fake_run):
             pool.submit(job, StageName.REPO)
             _, result = completion_q.get(timeout=10)
 
@@ -17218,7 +17217,7 @@ class TestGitOps:
             real_fchmod(descriptor, mode)
 
         with (
-            patch("hephaestus.automation.git_utils.run", side_effect=fake_run),
+            patch("hephaestus.git.git_utils.run", side_effect=fake_run),
             patch("hephaestus.automation.pipeline.worker_pool.os.fchmod", side_effect=fake_fchmod),
         ):
             pool.submit(job, StageName.REPO)
@@ -17246,7 +17245,7 @@ class TestGitOps:
         )
         with (
             patch.object(pool, "_authenticated_remote_git_configuration", return_value=({}, ())),
-            patch("hephaestus.automation.git_utils.run") as mock_run,
+            patch("hephaestus.git.git_utils.run") as mock_run,
         ):
             mock_run.side_effect = [
                 subprocess.CompletedProcess([], 0, stdout=""),
@@ -17438,7 +17437,7 @@ class TestGitOps:
         checkout = tmp_path / "checkout"
         checkout.mkdir()
         with (
-            patch("hephaestus.automation.git_utils.run") as mock_run,
+            patch("hephaestus.git.git_utils.run") as mock_run,
             patch(f"{_WP}._trusted_gh_executable", return_value=None),
         ):
             mock_run.side_effect = [
@@ -17472,7 +17471,7 @@ class TestGitOps:
             timeout_s=120,
             kwargs={"repo": "owner/name", "dest": str(checkout)},
         )
-        with patch("hephaestus.automation.git_utils.run") as mock_run:
+        with patch("hephaestus.git.git_utils.run") as mock_run:
             mock_run.side_effect = [
                 subprocess.CompletedProcess([], 0, stdout="https://github.com/owner/name.git\n"),
                 subprocess.CompletedProcess([], 0, stdout="https://github.com/owner/name.git\n"),
@@ -17607,7 +17606,7 @@ class TestGitOps:
             timeout_s=120,
             kwargs={"repo": "owner/name", "dest": str(checkout)},
         )
-        with patch("hephaestus.automation.git_utils.run") as mock_run:
+        with patch("hephaestus.git.git_utils.run") as mock_run:
             mock_run.side_effect = [
                 subprocess.CompletedProcess([], 0, stdout="https://github.com/owner/name.git\n"),
                 subprocess.CompletedProcess([], 0, stdout="https://github.com/owner/name.git\n"),
@@ -17661,7 +17660,7 @@ class TestGitOps:
             timeout_s=120,
             kwargs={"repo": "owner/name", "dest": str(checkout)},
         )
-        with patch("hephaestus.automation.git_utils.run") as mock_run:
+        with patch("hephaestus.git.git_utils.run") as mock_run:
             mock_run.return_value = subprocess.CompletedProcess(
                 [], 0, stdout="https://github.com/other/project.git\n"
             )
@@ -17690,7 +17689,7 @@ class TestGitOps:
             timeout_s=120,
             kwargs={"repo": "owner/name", "dest": str(checkout)},
         )
-        with patch("hephaestus.automation.git_utils.run") as mock_run:
+        with patch("hephaestus.git.git_utils.run") as mock_run:
             mock_run.return_value = subprocess.CompletedProcess([], 0, stdout=f"{origin}\n")
             pool.submit(job, StageName.REPO)
             _, result = completion_q.get(timeout=10)
@@ -17715,7 +17714,7 @@ class TestGitOps:
             timeout_s=120,
             kwargs={"repo": "owner/name", "dest": str(checkout)},
         )
-        with patch("hephaestus.automation.git_utils.run") as mock_run:
+        with patch("hephaestus.git.git_utils.run") as mock_run:
             pool.submit(job, StageName.REPO)
             _, result = completion_q.get(timeout=10)
 
@@ -17738,7 +17737,7 @@ class TestGitOps:
             timeout_s=120,
             kwargs={"repo": "owner/name", "dest": str(checkout)},
         )
-        with patch("hephaestus.automation.git_utils.run") as mock_run:
+        with patch("hephaestus.git.git_utils.run") as mock_run:
             mock_run.return_value = subprocess.CompletedProcess(
                 [], 0, stdout="git://github.com/owner/name.git\n"
             )
@@ -17797,7 +17796,7 @@ class TestGitOps:
             timeout_s=120,
             kwargs={"repo": "owner/name", "dest": str(checkout)},
         )
-        with patch("hephaestus.automation.git_utils.run") as mock_run:
+        with patch("hephaestus.git.git_utils.run") as mock_run:
             mock_run.side_effect = [
                 subprocess.CompletedProcess([], 0, stdout="git@github.com:owner/name.git\n"),
                 subprocess.CompletedProcess([], 0, stdout="git@github.com:owner/name.git\n"),
@@ -17916,7 +17915,7 @@ class TestGitOps:
             timeout_s=120,
             kwargs={"repo": "owner/name", "dest": str(checkout)},
         )
-        with patch("hephaestus.automation.git_utils.run") as mock_run:
+        with patch("hephaestus.git.git_utils.run") as mock_run:
             mock_run.side_effect = [
                 subprocess.CompletedProcess(
                     [], 0, stdout="filter.payload.process\n/unsafe/filter\0"
@@ -18048,7 +18047,7 @@ class TestGitOps:
             assert command[4:] == ["--no-includes", "--null", "--list"]
             return actual_run(command, **kwargs)
 
-        with patch("hephaestus.automation.git_utils.run", side_effect=run_config_only) as mock_run:
+        with patch("hephaestus.git.git_utils.run", side_effect=run_config_only) as mock_run:
             pool.submit(job, StageName.REPO)
             _, result = completion_q.get(timeout=10)
 
@@ -18129,7 +18128,7 @@ class TestGitOps:
             ]
             return actual_run(command, **kwargs)
 
-        with patch("hephaestus.automation.git_utils.run", side_effect=run_preflight) as mock_run:
+        with patch("hephaestus.git.git_utils.run", side_effect=run_preflight) as mock_run:
             pool.submit(job, StageName.REPO)
             _, result = completion_q.get(timeout=10)
 
@@ -18152,7 +18151,7 @@ class TestGitOps:
             timeout_s=120,
             kwargs={"repo": "owner/name", "dest": str(checkout)},
         )
-        with patch("hephaestus.automation.git_utils.run") as mock_run:
+        with patch("hephaestus.git.git_utils.run") as mock_run:
             mock_run.return_value = subprocess.CompletedProcess(
                 [], 0, stdout="https://evilgithub.com/owner/name.git\n"
             )
@@ -18180,7 +18179,7 @@ class TestGitOps:
             timeout_s=120,
             kwargs={"repo": "owner/name", "dest": str(checkout)},
         )
-        with patch("hephaestus.automation.git_utils.run") as mock_run:
+        with patch("hephaestus.git.git_utils.run") as mock_run:
             mock_run.side_effect = [
                 subprocess.CompletedProcess([], 0, stdout="https://github.com/owner/name.git\n"),
                 subprocess.CompletedProcess([], 0, stdout="https://github.com/owner/name.git\n"),
@@ -18217,7 +18216,7 @@ class TestGitOps:
             timeout_s=120,
             kwargs={"repo": "owner/name", "dest": str(checkout)},
         )
-        with patch("hephaestus.automation.git_utils.run") as mock_run:
+        with patch("hephaestus.git.git_utils.run") as mock_run:
             mock_run.side_effect = [
                 subprocess.CompletedProcess([], 0, stdout="https://github.com/owner/name.git\n"),
                 subprocess.CompletedProcess([], 0, stdout="https://github.com/owner/name.git\n"),
@@ -18299,7 +18298,7 @@ class TestGitOps:
                     deadline_s=None,
                     wait_deadline_s=time.monotonic() + 30,
                 ),
-                patch("hephaestus.automation.git_utils.run") as mock_run,
+                patch("hephaestus.git.git_utils.run") as mock_run,
             ):
                 mock_run.side_effect = [
                     subprocess.CompletedProcess([], 0, stdout=""),
@@ -18384,7 +18383,7 @@ class TestGitOps:
             patch("hephaestus.git.runtime.time.monotonic", side_effect=lambda: clock[0]),
             patch(f"{_WP}._checkout_preflight_error", side_effect=preflight),
             patch(
-                "hephaestus.automation.git_utils.run",
+                "hephaestus.git.git_utils.run",
                 return_value=subprocess.CompletedProcess(
                     [], 0, stdout="https://github.com/owner/name.git\n"
                 ),
@@ -18413,7 +18412,7 @@ class TestGitOps:
             timeout_s=120,
             kwargs={"repo": "owner/name", "dest": str(checkout)},
         )
-        with patch("hephaestus.automation.git_utils.run") as mock_run:
+        with patch("hephaestus.git.git_utils.run") as mock_run:
             mock_run.side_effect = [
                 subprocess.CompletedProcess([], 0, stdout="https://github.com/owner/name.git\n"),
                 subprocess.CompletedProcess([], 0, stdout="https://github.com/owner/name.git\n"),
@@ -18452,7 +18451,7 @@ class TestGitOps:
             timeout_s=120,
             kwargs={"repo": "owner/name", "dest": str(checkout)},
         )
-        with patch("hephaestus.automation.git_utils.run") as mock_run:
+        with patch("hephaestus.git.git_utils.run") as mock_run:
             mock_run.side_effect = [
                 subprocess.CompletedProcess([], 0, stdout="https://github.com/owner/name.git\n"),
                 subprocess.CompletedProcess([], 0, stdout="https://github.com/owner/name.git\n"),
@@ -18487,7 +18486,7 @@ class TestGitOps:
             timeout_s=120,
             kwargs={"repo": "owner/name", "dest": str(checkout)},
         )
-        with patch("hephaestus.automation.git_utils.run") as mock_run:
+        with patch("hephaestus.git.git_utils.run") as mock_run:
             mock_run.side_effect = [
                 subprocess.CompletedProcess([], 0, stdout="https://github.com/owner/name.git\n"),
                 subprocess.CompletedProcess([], 0, stdout="https://github.com/owner/name.git\n"),
@@ -18521,7 +18520,7 @@ class TestGitOps:
             timeout_s=120,
             kwargs={"repo": "owner/name", "dest": str(checkout)},
         )
-        with patch("hephaestus.automation.git_utils.run") as mock_run:
+        with patch("hephaestus.git.git_utils.run") as mock_run:
             mock_run.side_effect = [
                 subprocess.CompletedProcess([], 0, stdout="https://github.com/owner/name.git\n"),
                 subprocess.CompletedProcess([], 0, stdout="https://github.com/owner/name.git\n"),
@@ -18555,7 +18554,7 @@ class TestGitOps:
     ) -> None:
         """Clone with empty repo/dest fails fast without shelling out."""
         job = GitJob(repo="test/repo", op="clone", timeout_s=60, kwargs=kwargs)
-        with patch("hephaestus.automation.git_utils.run") as mock_run:
+        with patch("hephaestus.git.git_utils.run") as mock_run:
             pool.submit(job, StageName.REPO)
             _, result = completion_q.get(timeout=10)
 
@@ -18577,7 +18576,7 @@ class TestGitOps:
             kwargs={"repo": "owner/name", "dest": "/tmp/dest"},
         )
         with patch(
-            "hephaestus.automation.git_utils.run",
+            "hephaestus.git.git_utils.run",
             side_effect=subprocess.TimeoutExpired(cmd=["gh"], timeout=1),
         ):
             pool.submit(job, StageName.REPO)
@@ -18605,7 +18604,7 @@ class TestGitOps:
             stderr="fatal: repository access denied",
         )
 
-        with patch("hephaestus.automation.git_utils.run", side_effect=exc):
+        with patch("hephaestus.git.git_utils.run", side_effect=exc):
             pool.submit(job, StageName.REPO)
             _, result = completion_q.get(timeout=10)
 
@@ -20917,7 +20916,7 @@ def test_sync_checkout_uses_explicit_gh_root_for_api_when_path_has_no_gh(
     expected_executable = str(executable.resolve())
     try:
         with (
-            patch("hephaestus.automation.git_utils.run") as mock_run,
+            patch("hephaestus.git.git_utils.run") as mock_run,
             patch.object(
                 pool, "_fast_forward_checkout", return_value=JobResult(ok=True)
             ) as fast_forward,

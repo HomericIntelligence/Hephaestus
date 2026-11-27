@@ -18,7 +18,6 @@ from unittest.mock import Mock
 import pytest
 
 from hephaestus.agents.workspace import SourceLane
-from hephaestus.automation import git_utils
 from hephaestus.automation.models import DEFAULT_STATE_DIR
 from hephaestus.automation.pipeline.git_jobs import GitJob
 from hephaestus.automation.pipeline.host_capabilities import (
@@ -36,6 +35,7 @@ from hephaestus.automation.pipeline.rebase_adr_policy import (
 )
 from hephaestus.automation.pipeline.worker_pool import WorkerPool
 from hephaestus.automation.source_worktree import SourceWorkspaceManager
+from hephaestus.git import git_utils
 from tests.unit.automation.pipeline.test_worker_git_source_binding import (
     _supply_registered_worktree_listing,
 )

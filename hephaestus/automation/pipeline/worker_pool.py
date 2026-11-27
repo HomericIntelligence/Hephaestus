@@ -42,7 +42,7 @@ from typing import Any, Literal, cast
 import hephaestus.agents.claude_invoke as claude_invoke
 import hephaestus.agents.codex_adapter_admission as codex_adapter_admission
 import hephaestus.agents.runtime as agent_runtime
-import hephaestus.automation.git_utils as git_utils
+import hephaestus.git.git_utils as git_utils
 import hephaestus.utils.subprocess_registry as subprocess_registry
 from hephaestus.agents.codex_isolation import (
     CodexIsolationError,

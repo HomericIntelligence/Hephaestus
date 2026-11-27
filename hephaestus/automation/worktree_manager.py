@@ -33,6 +33,13 @@ from pathlib import Path
 from typing import Any
 
 from hephaestus.config.child_environments import read_approved_parent_env
+from hephaestus.git.git_utils import (
+    _detached_rebase_branch_ref,
+    get_repo_root,
+    is_clean_working_tree,
+    issue_auto_impl_branch_name,
+    run,
+)
 from hephaestus.git.runtime import (
     current_operation_shutdown,
     git_metadata_lock_path,
@@ -44,14 +51,6 @@ from hephaestus.git.writer import ImplementationWriterHandoff
 from hephaestus.utils.git import _is_full_commit_sha
 from hephaestus.utils.helpers import run_subprocess
 from hephaestus.utils.worktree_identity import source_worktree_name
-
-from .git_utils import (
-    _detached_rebase_branch_ref,
-    get_repo_root,
-    is_clean_working_tree,
-    issue_auto_impl_branch_name,
-    run,
-)
 
 logger = logging.getLogger(__name__)
 

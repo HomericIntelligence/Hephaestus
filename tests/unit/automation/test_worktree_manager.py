@@ -2464,7 +2464,7 @@ class TestCreateWorktreeBranchCollision:
         assert add_calls
         assert add_calls[-1][-1] == "origin/main"
 
-    @patch("hephaestus.automation.git_utils.rebase_worktree_onto")
+    @patch("hephaestus.git.git_utils.rebase_worktree_onto")
     def test_refresh_base_preserves_existing_local_issue_branch(
         self, mock_rebase: Any, worktree_mocks: Any, tmp_path: Any
     ) -> None:
@@ -2486,7 +2486,7 @@ class TestCreateWorktreeBranchCollision:
         ("local_branch_exists", "remote_branch_exists"),
         [(True, False), (False, True)],
     )
-    @patch("hephaestus.automation.git_utils.rebase_worktree_onto")
+    @patch("hephaestus.git.git_utils.rebase_worktree_onto")
     def test_refresh_base_rebase_conflict_keeps_reused_issue_branch(
         self,
         mock_rebase: Any,
@@ -2534,7 +2534,7 @@ class TestCreateWorktreeBranchCollision:
             ]
         assert "proceeding with current branch head" not in caplog.text
 
-    @patch("hephaestus.automation.git_utils.rebase_worktree_onto")
+    @patch("hephaestus.git.git_utils.rebase_worktree_onto")
     def test_refresh_base_preserves_existing_remote_issue_branch(
         self, mock_rebase: Any, worktree_mocks: Any, tmp_path: Any
     ) -> None:

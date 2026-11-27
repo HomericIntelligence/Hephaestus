@@ -119,7 +119,7 @@ def test_direct_issue_sync_uses_explicit_gh_root_when_path_has_no_gh(
         )
         try:
             with (
-                patch("hephaestus.automation.git_utils.run") as mock_run,
+                patch("hephaestus.git.git_utils.run") as mock_run,
                 patch.object(
                     pool,
                     "_fast_forward_checkout",

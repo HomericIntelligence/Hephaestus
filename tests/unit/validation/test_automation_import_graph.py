@@ -384,7 +384,7 @@ def test_automation_runtime_import_graph_is_acyclic() -> None:
 def test_worker_commit_dependency_closure_excludes_github_product_modules() -> None:
     """The worker commit seam cannot reach GitHub or PR orchestration modules."""
     graph = _build_import_graph(_HEPHAESTUS_ROOT, prefix="hephaestus")
-    start = "hephaestus.automation.git_utils"
+    start = "hephaestus.git.git_utils"
     reachable: set[str] = set()
     pending = [start]
     while pending:

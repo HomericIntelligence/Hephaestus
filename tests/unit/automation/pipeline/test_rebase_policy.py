@@ -30,7 +30,7 @@ WP = "hephaestus.automation.pipeline.worker_pool"
 
 def _observe_fetched_base(case: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     """Check the captured base at the external Git mutation boundary."""
-    from hephaestus.automation import git_utils
+    from hephaestus.git import git_utils
 
     rebase = git_utils.rebase_worktree_onto
 
@@ -46,11 +46,11 @@ def real_policy_case(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, publish: bool, reason: str = "manual"
 ) -> Iterator[Any]:
     """Reuse real source ownership and retain only external execution substitutes."""
-    from hephaestus.automation import git_utils
     from hephaestus.automation.pipeline.github_jobs import (
         InspectRebaseConflictRequest,
         RebaseConflictInspected,
     )
+    from hephaestus.git import git_utils
 
     with _abort_worker_case(
         tmp_path,
