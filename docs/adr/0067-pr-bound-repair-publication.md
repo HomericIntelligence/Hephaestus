@@ -114,6 +114,6 @@ passes CI, because the contamination is correct-by-construction content.
   Recovery is explicit and revalidated, which trades one extra operator step
   for no unbounded push attempts.
 - The moved `remote_git` module keeps its public names through the
-  automation compatibility export. In-repository consumers and their test
+  library compatibility export. In-repository consumers and their test
   patches point at the library path; a revert of this ADR is one revert of
   the move.

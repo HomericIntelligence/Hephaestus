@@ -316,7 +316,7 @@ controller, and the worker entry points. It does not import
 `hephaestus.automation`. Fleet code that needs Git capture or deadline helpers
 imports `hephaestus.git`. The Git library also holds the relocated lifecycle
 modules: config safety, commit paths and policy, remote Git, runtime, snapshot,
-writer, and their source workspace manager.
+and writer.
 
 ---
 

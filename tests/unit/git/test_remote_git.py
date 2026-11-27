@@ -1,7 +1,7 @@
 """The Git package keeps the remote Git contract re-exported from the library.
 
 The behavior tests live with the owning module in
-``tests/unit/git/github/test_remote_git.py``. This module asserts the library
+``tests/unit/github/test_remote_git.py``. This module asserts the library
 binding keeps object identity for every re-exported name, so product-layer
 callers and monkeypatch targets stay valid.
 """
