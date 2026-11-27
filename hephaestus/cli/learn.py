@@ -157,7 +157,8 @@ def _run(args: list[str] | None) -> int:
     except AgentSessionLostError as exc:
         raise NotFoundError(str(exc)) from exc
 
-    print(output)
+    if not parsed.json:
+        print(output)
     state = delivery_fn(request)
     if state.state == "deferred":
         print(

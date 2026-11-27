@@ -184,6 +184,18 @@ def test_json_envelope_reports_deferred_delivery(
     assert json.loads(json.dumps(emit.call_args.kwargs))["agent"] == "claude"
 
 
+def test_json_stdout_is_one_parseable_object(
+    tmp_path: Path, no_evidence: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """--json keeps raw provider output off stdout so it stays machine-readable."""
+    result = main([*_args(tmp_path), "--json"])
+
+    out = capsys.readouterr().out
+    assert result == int(ExitCode.OK)
+    assert json.loads(out)["status"] == "ok"
+    assert "learn output" not in out
+
+
 def test_invalid_session_id_is_rejected_before_provider_call(tmp_path: Path) -> None:
     """An empty session id never reaches a provider."""
     with (
