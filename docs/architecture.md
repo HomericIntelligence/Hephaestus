@@ -314,7 +314,9 @@ therefore cannot import `hephaestus.automation`.
 are library members. `hephaestus/fleet/` holds the contained runtime, the build
 controller, and the worker entry points. It does not import
 `hephaestus.automation`. Fleet code that needs Git capture or deadline helpers
-imports `hephaestus.git`.
+imports `hephaestus.git`. The Git library also holds the relocated lifecycle
+modules: config safety, commit paths and policy, remote Git, runtime, snapshot,
+writer, and their source workspace manager.
 
 ---
 
@@ -2872,8 +2874,8 @@ Each collaborator owns an explicit responsibility:
 
 The automation entry modules own one-way dependencies. The Git-family
 collaborators move into the `hephaestus/git/` library subpackage under
-issues #3514 and #3517. The `pdoc` target list and this section follow the
-move in the same change.
+issues #3512, #3514, and #3517. The `pdoc` target list and this section follow
+the move in the same change.
 
 Each stage owns one package under `pipeline/stages/`. A stage module is
 `stages/<name>/<name>.py`, and the package `__init__` re-exports the stage
