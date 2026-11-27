@@ -4,6 +4,8 @@
 - Date: 2026-11-09
 - Tracks: #3504
 
+> Path names in this ADR are historical. The GitHub library tree now lives under `hephaestus/git/github/` after #3514.
+
 ## Context
 
 Epic #3504 groups the Git-facing modules into one library subpackage. Today
@@ -26,7 +28,7 @@ subpackage needs a recorded home decision.
 
 ## Alternatives considered
 
-- Keep `hephaestus/git/github/` as a top-level library peer. Rejected: the
+- Keep `hephaestus/github/` as a top-level library peer. Rejected: the
   Git-family modules then stay split across two roots, and the library-layer
   list does not name one home for them.
 - Extract a separate distribution. Rejected: it repeats the ADR-0001
@@ -35,7 +37,7 @@ subpackage needs a recorded home decision.
 
 ## Consequences
 
-- `hephaestus/git/github/` disappears in #3514 without a compatibility shim.
+- `hephaestus/github/` disappears in #3514 without a compatibility shim.
   Documents that name it follow in the gated documentation follow-up for
   #3525.
 - Each move issue carries its own import, test, and document edits.
