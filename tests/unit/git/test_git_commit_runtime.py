@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+from typing import Any, cast
 
 import pytest
 
@@ -33,7 +34,7 @@ def test_product_caller_binds_the_relocated_commit_changes() -> None:
     """Verify the product-layer helper keeps the same commit function object."""
     from hephaestus.automation import git_utils
 
-    assert git_utils._commit_changes is commit_runtime.commit_changes
+    assert cast(Any, git_utils)._commit_changes is commit_runtime.commit_changes
 
 
 def test_commit_runtime_does_not_import_the_product_layer() -> None:
