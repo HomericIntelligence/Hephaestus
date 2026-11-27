@@ -11,7 +11,7 @@
 # Git is built from a pinned kernel.org release into /usr/local. The pipeline's
 # checkout isolation sets GIT_CONFIG_GLOBAL=/dev/null, and the automation code
 # only trusts a real (non-symlink) Git binary under a trusted root. See issue
-# #2821 and hephaestus/automation/worktree_snapshot.py. The image holds this one
+# #2821 and hephaestus/git/snapshot.py. The image holds this one
 # Git only: every tool that needs Git, including the GitHub CLI, uses it.
 #
 # Build (OCI-compliant — works with both podman and docker):
