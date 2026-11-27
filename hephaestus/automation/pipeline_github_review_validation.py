@@ -30,6 +30,7 @@ from typing import Any, NoReturn, cast
 
 from hephaestus.agents.workspace import WorkspaceBinding
 from hephaestus.config.child_environments import build_gh_child_env
+from hephaestus.git.remote_git import trusted_gh_executable
 from hephaestus.git.snapshot import _controlled_git_env, _run_bounded_git_output
 from hephaestus.utils.helpers import SubprocessOutputLimitExceeded, run_subprocess
 
@@ -46,7 +47,6 @@ from .pipeline.repository_validation_profiles import (
     ValidationCIStep,
     require_repository_validation_profile,
 )
-from .remote_git import trusted_gh_executable
 
 logger = logging.getLogger(__name__)
 

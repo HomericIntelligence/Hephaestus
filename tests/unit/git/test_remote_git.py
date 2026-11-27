@@ -1,8 +1,8 @@
-"""Automation keeps the remote Git contract re-exported from the library.
+"""The Git package keeps the remote Git contract re-exported from the library.
 
 The behavior tests live with the owning module in
-``tests/unit/github/test_remote_git.py``. This module asserts the product
-layer keeps object identity for every re-exported name, so current automation
+``tests/unit/git/github/test_remote_git.py``. This module asserts the library
+binding keeps object identity for every re-exported name, so product-layer
 callers and monkeypatch targets stay valid.
 """
 
@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 import pytest
 
-import hephaestus.automation.remote_git as automation
+import hephaestus.git.remote_git as automation
 import hephaestus.github.remote_git as library
 
 _EXPORTED_NAMES = (

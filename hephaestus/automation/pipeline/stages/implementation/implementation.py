@@ -73,7 +73,6 @@ from hephaestus.automation.agent_config import (
     implementer_model,
     issue_auto_impl_branch_name,
 )
-from hephaestus.automation.commit_policy import normalize_strict_conventional_title
 from hephaestus.automation.pipeline.git_jobs import (
     FIRST_PUBLICATION_CHECK_ARGV,
     _strict_recovery_workspace,
@@ -123,6 +122,7 @@ from hephaestus.automation.test_summary import (
     summary_reports_no_executed_test,
 )
 from hephaestus.automation.worktree_manager import ADOPTED_HEAD_FAILURES, BRANCH_WORKTREE_OWNED
+from hephaestus.git.commit_policy import normalize_strict_conventional_title
 from hephaestus.git.verification import (
     HEPHAESTUS_REQUIRED_CHECK_ARGV as HEPHAESTUS_REQUIRED_CHECK_ARGV,
     HEPHAESTUS_REQUIRED_CHECK_TIMEOUT_S as HEPHAESTUS_REQUIRED_CHECK_TIMEOUT_S,

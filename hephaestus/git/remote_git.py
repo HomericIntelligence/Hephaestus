@@ -1,9 +1,9 @@
 """Compatibility exports for the trusted remote Git library module.
 
-The implementation moved to ``hephaestus.github.remote_git`` so the
-automation product layer keeps its one-way dependency on the library. These
-exports preserve object identity: ``hephaestus.automation.remote_git`` is the
-same function and class object as the library module.
+The implementation lives in ``hephaestus.github.remote_git`` so the library
+keeps one trusted definition. These exports preserve object identity:
+``hephaestus.git.remote_git`` holds the same function and class objects as
+the library module.
 """
 
 from __future__ import annotations
