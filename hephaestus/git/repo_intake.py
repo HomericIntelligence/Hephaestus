@@ -28,9 +28,9 @@ from hephaestus.git.config_safety import unsafe_local_git_config_key
 from hephaestus.git.constants import DEFAULT_STATE_DIR
 from hephaestus.git.runtime import (
     current_operation_shutdown,
-    git_metadata_lock_path,
+    git_metadata_lock_path as git_metadata_lock_path,
     operation_deadline,
-    operation_file_lock,
+    operation_file_lock as operation_file_lock,
     remaining_operation_timeout,
 )
 from hephaestus.io.utils import write_secure
