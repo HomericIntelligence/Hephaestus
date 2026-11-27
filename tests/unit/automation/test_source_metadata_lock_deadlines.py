@@ -14,12 +14,12 @@ from unittest.mock import patch
 import pytest
 
 from hephaestus.agents.workspace import SourceLane
-from hephaestus.automation.source_worktree import (
+from hephaestus.git import runtime as git_runtime
+from hephaestus.git.source_worktree import (
     SourceWorkspaceManager,
     SourceWorkspacePreparationError,
     _PreparationDeadline,
 )
-from hephaestus.git import runtime as git_runtime
 from hephaestus.git.worktree_manager import WorktreeManager
 from hephaestus.utils.file_lock import LockUnavailableError, file_lock
 

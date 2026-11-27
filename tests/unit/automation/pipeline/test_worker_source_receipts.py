@@ -14,7 +14,7 @@ from hephaestus.automation.pipeline import worker_pool
 from hephaestus.automation.pipeline.git_jobs import GitJob
 from hephaestus.automation.pipeline.job_results import JobResult
 from hephaestus.automation.pipeline.worker_pool import WorkerPool
-from hephaestus.automation.source_worktree import SourceWorkspaceManager
+from hephaestus.git.source_worktree import SourceWorkspaceManager
 from tests.unit.automation.test_rebase_recovery import (
     _registered_git_fixture,
     _source_registration_fixture,

@@ -71,8 +71,8 @@ from hephaestus.agents.runtime import (
 )
 from hephaestus.agents.workspace import SourceLane, WorkspaceBinding
 from hephaestus.automation.operation_deadlines import operation_deadline_after
-from hephaestus.automation.source_worktree import _PreparationDeadline
 from hephaestus.automation.state_labels import STATE_SKIP
+from hephaestus.git.source_worktree import _PreparationDeadline
 
 from .athena_skill_jobs import AthenaSkillJob, AthenaSkillRequest, AthenaSkillResult
 from .events import StageEvent

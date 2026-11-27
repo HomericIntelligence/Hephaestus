@@ -21,7 +21,7 @@ from hephaestus.automation.pipeline.host_capabilities import (
     CapabilityReceiptTarget,
     CapabilityRequestTarget,
 )
-from hephaestus.automation.source_worktree import _PreparationDeadline
+from hephaestus.git.source_worktree import _PreparationDeadline
 
 
 def _request(root: Path) -> CapabilityReceiptTarget:

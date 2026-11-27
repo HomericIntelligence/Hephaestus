@@ -14,9 +14,9 @@ from hephaestus.agents.workspace import SourceLane
 from hephaestus.automation.pipeline.git_jobs import GitJob
 from hephaestus.automation.pipeline.job_results import JobResult
 from hephaestus.automation.pipeline.worker_pool import WorkerPool
-from hephaestus.automation.source_worktree import SourceWorkspaceManager
 from hephaestus.git import worktree_manager
 from hephaestus.git.git_utils import run
+from hephaestus.git.source_worktree import SourceWorkspaceManager
 from hephaestus.utils.file_lock import LockUnavailableError, file_lock
 from tests.unit.automation.test_source_worktree import _git, _repository
 
@@ -198,7 +198,7 @@ def test_host_rebase_continuation_requires_the_paused_head(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, wrong_head: bool
 ) -> None:
     """A continuation lease must bind the active rebase and its exact head."""
-    from hephaestus.automation.source_worktree import SourceWorkspaceError
+    from hephaestus.git.source_worktree import SourceWorkspaceError
 
     root, first, second = _repository(tmp_path)
     manager = SourceWorkspaceManager(root, repository="example/project")

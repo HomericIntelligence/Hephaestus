@@ -115,7 +115,7 @@ from hephaestus.constants import AGENT_REVIEW_TIMEOUT, IMPLEMENTER_CHECKPOINT_IN
 from hephaestus.prompts import PromptCatalog as PromptCatalog
 
 if TYPE_CHECKING:
-    from hephaestus.automation.source_worktree import SourceWorkspaceManager
+    from hephaestus.git.source_worktree import SourceWorkspaceManager
 
 #: Warn when any stage.step() call exceeds this duration (seconds) — the
 #: stage protocol promises short (<~60s) main-thread steps. 15s proved too

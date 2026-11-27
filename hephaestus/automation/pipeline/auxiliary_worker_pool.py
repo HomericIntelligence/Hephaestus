@@ -11,7 +11,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import replace
 
 from hephaestus.automation.mnemosyne_delivery import valid_delivery_receipt
-from hephaestus.automation.source_worktree import _PreparationDeadline
+from hephaestus.git.source_worktree import _PreparationDeadline
 from hephaestus.utils import subprocess_registry
 
 from .athena_skill_jobs import (

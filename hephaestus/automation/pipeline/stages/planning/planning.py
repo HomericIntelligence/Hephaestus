@@ -95,7 +95,6 @@ from hephaestus.automation.review_journal import (
     journal_snapshot,
     render_current_plan,
 )
-from hephaestus.automation.source_worktree import SourceWorkspacePreparationError
 from hephaestus.automation.state_labels import (
     ALL_IMPLEMENTATION_STATE_LABELS,
     ALL_STATE_LABELS,
@@ -110,6 +109,7 @@ from hephaestus.automation.state_labels import (
     is_plan_go,
     is_skipped,
 )
+from hephaestus.git.source_worktree import SourceWorkspacePreparationError
 from hephaestus.prompts import PromptCatalog
 
 from ...diagnostics import bounded_pipeline_diagnostic

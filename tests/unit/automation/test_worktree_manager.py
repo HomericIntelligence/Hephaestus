@@ -10,8 +10,8 @@ from unittest.mock import MagicMock, Mock, patch
 import pytest
 
 from hephaestus.agents.workspace import SourceLane
-from hephaestus.automation.source_worktree import SourceWorkspaceManager
 from hephaestus.git import worktree_manager as worktree_manager_module
+from hephaestus.git.source_worktree import SourceWorkspaceManager
 from hephaestus.git.worktree_manager import (
     BranchWorktreeOwnedError,
     DirectScopeStaleStateError,

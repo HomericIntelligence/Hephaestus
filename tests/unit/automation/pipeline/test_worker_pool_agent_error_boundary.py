@@ -18,7 +18,7 @@ from hephaestus.agents.workspace import SourceLane
 from hephaestus.automation.pipeline.jobs import AgentJob
 from hephaestus.automation.pipeline.queues import CompletionQueue
 from hephaestus.automation.pipeline.worker_pool import WorkerPool, _agent_exception_result
-from hephaestus.automation.source_worktree import (
+from hephaestus.git.source_worktree import (
     SourceWorkspaceError,
     SourceWorkspaceManager,
     SourceWorkspacePreparationCause,

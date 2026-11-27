@@ -19,7 +19,7 @@ import pytest
 from hephaestus.agents.workspace import SourceLane, WorkspaceBinding
 from hephaestus.automation.pipeline import git_jobs
 from hephaestus.automation.pipeline.host_capabilities import CapabilityRequestTarget
-from hephaestus.automation.source_worktree import (
+from hephaestus.git.source_worktree import (
     SourceWorkspaceManager,
     SourceWorkspacePreparationCause,
     SourceWorkspacePreparationError,
@@ -79,7 +79,7 @@ def _source_registration_fixture(root: Path, monkeypatch: pytest.MonkeyPatch) ->
     """Adapt the source owner's exact listing from real registered worktree facts."""
     import subprocess
 
-    from hephaestus.automation import source_worktree
+    from hephaestus.git import source_worktree
 
     source_git = source_worktree._git
 

@@ -56,8 +56,9 @@ MOVERS = frozenset(
 # #3512, W2 slice 3). The ``worktree_manager`` -> ``repo_intake`` pair retired
 # when ``repo_intake`` moved into the library (issue #3512, W2 slice 4). The
 # ``source_worktree`` -> ``worktree_manager`` pair retired when ``worktree_manager``
-# moved into the library (issue #3512, W2 slice 5). No internal mover-to-mover
-# edges remain in the product layer.
+# moved into the library (issue #3512, W2 slice 5). ``source_worktree`` itself
+# moved into the library in W2 slice 6, so no mover source file remains in the
+# product layer. No internal mover-to-mover edges remain.
 INTERNAL_ALLOWED: frozenset[tuple[str, str]] = frozenset()
 
 _LIB_ROOT = Path(hephaestus.__file__).parent

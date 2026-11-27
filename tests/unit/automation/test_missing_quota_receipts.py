@@ -34,8 +34,8 @@ from hephaestus.automation.pipeline.rebase_adr_policy import (
     REBASE_STRUCTURAL_TEST_PATH,
 )
 from hephaestus.automation.pipeline.worker_pool import WorkerPool
-from hephaestus.automation.source_worktree import SourceWorkspaceManager
 from hephaestus.git import git_utils
+from hephaestus.git.source_worktree import SourceWorkspaceManager
 from tests.unit.automation.pipeline.test_worker_git_source_binding import (
     _supply_registered_worktree_listing,
 )

@@ -36,12 +36,12 @@ from hephaestus.automation.provider_transport_failures import (
     provider_transport_timeout_message,
 )
 from hephaestus.automation.review_journal import CommentJournalReadError
-from hephaestus.automation.source_worktree import (
+from hephaestus.git.gh.client import GitHubRateLimitError, GitHubUnavailableError
+from hephaestus.git.source_worktree import (
     SourceWorkspaceError,
     SourceWorkspacePreparationCause,
     SourceWorkspacePreparationError,
 )
-from hephaestus.git.gh.client import GitHubRateLimitError, GitHubUnavailableError
 from hephaestus.resilience import CircuitBreakerOpenError
 from hephaestus.resilience.subprocess_resilience import is_transient_subprocess_error
 

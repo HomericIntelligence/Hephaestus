@@ -22,9 +22,9 @@ from hephaestus.automation.pipeline.github_jobs import GitHubJob
 from hephaestus.automation.pipeline.stages import Continue, JobRequest
 from hephaestus.automation.pipeline.stages.implementation import ImplementationStage
 from hephaestus.automation.review_journal import PlanDiscoveryResult
-from hephaestus.automation.source_worktree import SourceWorkspaceManager
 from hephaestus.automation.state_labels import STATE_PLAN_GO
 from hephaestus.git import git_utils
+from hephaestus.git.source_worktree import SourceWorkspaceManager
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
 from tests.unit.automation.pipeline.stages.test_stage_implementation import (
     _complete_plan_scope_read,

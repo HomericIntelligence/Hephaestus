@@ -16,7 +16,7 @@ from hephaestus.automation import first_publication_recovery
 from hephaestus.automation.direct_review_recovery import _write_receipt
 from hephaestus.automation.first_publication_recovery import FirstPublicationStore
 from hephaestus.automation.pipeline.git_jobs import FirstPublicationRecord
-from hephaestus.automation.source_worktree import _PreparationDeadline
+from hephaestus.git.source_worktree import _PreparationDeadline
 
 
 def _record(root: Path) -> FirstPublicationRecord:

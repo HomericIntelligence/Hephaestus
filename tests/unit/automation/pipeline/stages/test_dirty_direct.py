@@ -96,7 +96,7 @@ def test_failed_dirty_probe_records_only_its_deterministic_path(
     from types import SimpleNamespace
 
     from hephaestus.agents.workspace import SourceLane
-    from hephaestus.automation.source_worktree import SourceWorkspaceManager
+    from hephaestus.git.source_worktree import SourceWorkspaceManager
     from tests.unit.automation.test_source_worktree import _repository
 
     repo, _, _ = _repository(tmp_path)

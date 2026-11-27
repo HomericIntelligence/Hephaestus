@@ -34,8 +34,8 @@ from hephaestus.automation.pipeline.rebase_policy import RebaseValidationPolicy
 from hephaestus.automation.pipeline.stages import JobRequest
 from hephaestus.automation.pipeline.worker_pool import WorkerPool
 from hephaestus.automation.rebase_recovery import PendingRebaseStore
-from hephaestus.automation.source_worktree import SourceWorkspaceManager, _PreparationDeadline
 from hephaestus.git import git_utils
+from hephaestus.git.source_worktree import SourceWorkspaceManager, _PreparationDeadline
 from tests.unit.automation.test_rebase_recovery import (
     _abort_worker_case,
     _normal_publication_job,

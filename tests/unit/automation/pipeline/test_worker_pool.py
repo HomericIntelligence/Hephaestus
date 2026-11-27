@@ -129,13 +129,6 @@ from hephaestus.automation.pipeline.worker_pool import (
     _verifier_owned_runtime_environment,
 )
 from hephaestus.automation.prompts.pr_review import PrReviewPromptSizeError
-from hephaestus.automation.source_worktree import (
-    SourceWorkspaceCreationError,
-    SourceWorkspaceError,
-    SourceWorkspaceManager,
-    SourceWorkspaceRecovery,
-    SourceWorkspaceRecoveryKind,
-)
 from hephaestus.automation.verified_runner import build_verified_runner_argv
 from hephaestus.config.child_environments import (
     build_git_child_env,
@@ -146,6 +139,13 @@ from hephaestus.git.commit_runtime import CommitIssueMetadata
 from hephaestus.git.repo_intake import RepoIntakeError, RepoIntakeManager
 from hephaestus.git.runtime import operation_file_lock
 from hephaestus.git.snapshot import _terminate_bounded_process_tree
+from hephaestus.git.source_worktree import (
+    SourceWorkspaceCreationError,
+    SourceWorkspaceError,
+    SourceWorkspaceManager,
+    SourceWorkspaceRecovery,
+    SourceWorkspaceRecoveryKind,
+)
 from hephaestus.git.worktree_manager import (
     BRANCH_WORKTREE_OWNED,
     BranchWorktreeOwnedError,
@@ -521,7 +521,7 @@ def _configure_writer_creation_failure(
     elif boundary == "post_create":
         clean.side_effect = RuntimeError(private)
     else:
-        from hephaestus.automation import source_worktree
+        from hephaestus.git import source_worktree
 
         categories = getattr(source_worktree, "SourceWorkspaceCreationFailure", None)
         assert categories is not None, "the closed creation-failure enum is required"
@@ -10124,7 +10124,7 @@ class TestGitOps:
                 return_value=({}, ("-c", "credential.helper=")),
             ),
             patch(
-                "hephaestus.automation.source_worktree.consume_implementation_writer_authority",
+                "hephaestus.git.source_worktree.consume_implementation_writer_authority",
                 side_effect=lambda *args, **kwargs: (
                     real_consume(*args, **kwargs),
                     object(),
@@ -21533,7 +21533,7 @@ def test_writer_terminal_wrapper_keeps_only_a_closed_creation_category(
     """Outer wrappers keep typed categories and reject arbitrary metadata."""
     from enum import StrEnum
 
-    from hephaestus.automation import source_worktree
+    from hephaestus.git import source_worktree
 
     categories = getattr(source_worktree, "SourceWorkspaceCreationFailure", None)
     assert categories is not None, "the closed creation-failure enum is required"
@@ -21750,7 +21750,7 @@ def _dirty_test_workspace(tmp_path: Path, enabled: bool) -> tuple[Path, Any, str
     if not enabled:
         return tmp_path, None, ""
     from hephaestus.agents.workspace import SourceLane
-    from hephaestus.automation.source_worktree import SourceWorkspaceManager
+    from hephaestus.git.source_worktree import SourceWorkspaceManager
     from tests.unit.agents.test_dirty_workspace import _claim
     from tests.unit.automation.test_source_worktree import _repository
 
@@ -23339,7 +23339,7 @@ def test_host_capability_probe_requires_current_review_lease(
         WorkerCapabilities,
     )
     from hephaestus.automation.pipeline.jobs import HostCapabilityJob
-    from hephaestus.automation.source_worktree import SourceWorkspaceManager
+    from hephaestus.git.source_worktree import SourceWorkspaceManager
     from hephaestus.utils.file_lock import LockUnavailableError, file_lock
     from tests.unit.automation.pipeline.test_worker_git_source_binding import (
         _supply_registered_worktree_listing,

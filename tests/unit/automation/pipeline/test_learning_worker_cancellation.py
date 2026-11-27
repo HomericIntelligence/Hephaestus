@@ -13,7 +13,6 @@ from typing import Any
 import pytest
 
 from hephaestus.agents.workspace import SourceLane
-from hephaestus.automation import source_worktree
 from hephaestus.automation.pipeline.athena_skill_jobs import (
     AthenaSkillExecutor,
     AthenaSkillJob,
@@ -33,7 +32,8 @@ from hephaestus.automation.pipeline.stage_results import Continue, JobRequest
 from hephaestus.automation.pipeline.stages.learning import CLAIM
 from hephaestus.automation.pipeline.work_item import ItemKind, LearningIntent, WorkItem
 from hephaestus.automation.pipeline.worker_pool import WorkerPool
-from hephaestus.automation.source_worktree import SourceWorkspaceManager
+from hephaestus.git import source_worktree
+from hephaestus.git.source_worktree import SourceWorkspaceManager
 from hephaestus.utils.file_lock import LockUnavailableError, file_lock
 from tests.unit.automation.pipeline.conftest import FakeWorkerPool, claim_test_item
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub

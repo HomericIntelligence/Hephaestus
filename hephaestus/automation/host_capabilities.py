@@ -30,8 +30,8 @@ from hephaestus.automation.pipeline.host_capabilities import (
     SigningConfigurationError,
 )
 from hephaestus.automation.pipeline.jobs import JobResult
-from hephaestus.automation.source_worktree import _PreparationDeadline
 from hephaestus.config.child_environments import read_approved_parent_env
+from hephaestus.git.source_worktree import _PreparationDeadline
 
 _DIAGNOSTIC_MAX = 4_000
 _RECEIPT_MAX = 65_536

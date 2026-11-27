@@ -13,13 +13,13 @@ from typing import Any
 import pytest
 
 from hephaestus.agents.workspace import SourceLane
-from hephaestus.automation import source_worktree
 from hephaestus.automation.pipeline import worker_pool
 from hephaestus.automation.pipeline.auxiliary_worker_pool import AuxiliaryWorkerPool
 from hephaestus.automation.pipeline.git_jobs import GitJob
 from hephaestus.automation.pipeline.queues import CompletionQueue
 from hephaestus.automation.pipeline.worker_pool import WorkerPool
-from hephaestus.automation.source_worktree import SourceWorkspaceManager
+from hephaestus.git import source_worktree
+from hephaestus.git.source_worktree import SourceWorkspaceManager
 from hephaestus.git.worktree_manager import WorktreeManager
 from hephaestus.utils.file_lock import file_lock
 from tests.unit.automation.test_source_worktree import _repository

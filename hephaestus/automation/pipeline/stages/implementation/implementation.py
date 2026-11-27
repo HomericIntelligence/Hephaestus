@@ -101,14 +101,6 @@ from hephaestus.automation.review_journal import (
     CommentJournalReadError,
     newest_plan_comment_identity,
 )
-from hephaestus.automation.source_worktree import (
-    SourceWorkspaceError,
-    SourceWorkspaceManager,
-    SourceWorkspaceReceipt,
-    SourceWorkspaceRecoveryKind,
-    SourceWorkspaceTerminalReference,
-    normalize_source_workspace_creation_failure,
-)
 from hephaestus.automation.state_labels import (
     STATE_BLOCKED,
     STATE_IMPLEMENTATION_GO,
@@ -123,6 +115,14 @@ from hephaestus.automation.test_summary import (
 )
 from hephaestus.git.commit_policy import (
     normalize_strict_conventional_title as normalize_strict_conventional_title,
+)
+from hephaestus.git.source_worktree import (
+    SourceWorkspaceError,
+    SourceWorkspaceManager,
+    SourceWorkspaceReceipt,
+    SourceWorkspaceRecoveryKind,
+    SourceWorkspaceTerminalReference,
+    normalize_source_workspace_creation_failure,
 )
 from hephaestus.git.verification import (
     HEPHAESTUS_REQUIRED_CHECK_ARGV as HEPHAESTUS_REQUIRED_CHECK_ARGV,

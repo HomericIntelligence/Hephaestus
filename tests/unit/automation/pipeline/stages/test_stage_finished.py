@@ -909,7 +909,7 @@ def test_ledger_reason_carries_the_named_uncommitted_work(
     make_ctx: Any,
 ) -> None:
     """The recorded reason names the work the stranded lane holds."""
-    from hephaestus.automation.source_worktree import (
+    from hephaestus.git.source_worktree import (
         SourceWorkspaceTerminalView,
         normalize_source_workspace_creation_failure,
     )
@@ -969,7 +969,7 @@ def test_terminal_wave_and_ledger_use_same_validated_result(
     category: object,
 ) -> None:
     """Both stores receive the result from the manager evidence check."""
-    from hephaestus.automation.source_worktree import (
+    from hephaestus.git.source_worktree import (
         SourceWorkspaceError,
         SourceWorkspaceTerminalView,
         normalize_source_workspace_creation_failure,
@@ -1047,7 +1047,7 @@ def test_terminal_evidence_restores_creation_failure_without_item_payload(
     make_ctx: Any,
 ) -> None:
     """Validated terminal evidence supplies a missing worker failure category."""
-    from hephaestus.automation.source_worktree import (
+    from hephaestus.git.source_worktree import (
         SourceWorkspaceCreationFailure,
         SourceWorkspaceTerminalView,
     )

@@ -20,7 +20,7 @@ from hephaestus.automation.pipeline.athena_skill_jobs import (
 )
 from hephaestus.automation.pipeline.jobs import AgentJob
 from hephaestus.automation.pipeline.queues import CompletionQueue
-from hephaestus.automation.source_worktree import SourceWorkspaceManager
+from hephaestus.git.source_worktree import SourceWorkspaceManager
 from hephaestus.git.worktree_manager import WorktreeManager
 from tests.unit.automation.test_source_worktree import _repository
 

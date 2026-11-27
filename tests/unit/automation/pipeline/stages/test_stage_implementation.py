@@ -62,7 +62,6 @@ from hephaestus.automation.pipeline.worker_pool import (
 from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
 from hephaestus.automation.prompts.implementation import get_rebase_conflict_prompt
 from hephaestus.automation.review_journal import PlanDiscoveryResult
-from hephaestus.automation.source_worktree import SourceWorkspaceReceipt
 from hephaestus.automation.state_labels import (
     STATE_BLOCKED,
     STATE_NEEDS_PLAN,
@@ -70,6 +69,7 @@ from hephaestus.automation.state_labels import (
     STATE_PLAN_NO_GO,
     STATE_SKIP,
 )
+from hephaestus.git.source_worktree import SourceWorkspaceReceipt
 from hephaestus.git.worktree_manager import BRANCH_WORKTREE_OWNED
 from tests.unit.automation.pipeline.conftest import FakeWorkerPool
 from tests.unit.automation.pipeline.stages.conftest import (

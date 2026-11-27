@@ -18,7 +18,7 @@ from hephaestus.automation.pipeline.job_results import JobResult
 from hephaestus.automation.pipeline.queues import CompletionQueue
 from hephaestus.automation.pipeline.worker_pool import WorkerPool
 from hephaestus.automation.rebase_recovery import PendingRebaseStore
-from hephaestus.automation.source_worktree import (
+from hephaestus.git.source_worktree import (
     SourceWorkspaceManager,
     SourceWorkspaceReceipt,
     _PreparationDeadline,

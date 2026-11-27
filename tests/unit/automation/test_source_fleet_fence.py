@@ -8,8 +8,8 @@ from unittest.mock import patch
 import pytest
 
 from hephaestus.agents.workspace import SourceLane
-from hephaestus.automation import source_worktree
-from hephaestus.automation.source_worktree import SourceWorkspaceError, SourceWorkspaceManager
+from hephaestus.git import source_worktree
+from hephaestus.git.source_worktree import SourceWorkspaceError, SourceWorkspaceManager
 from tests.unit.automation.pipeline.test_fleet_execution import _source
 
 

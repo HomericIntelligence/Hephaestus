@@ -21,8 +21,8 @@ from hephaestus.agents.runtime import requires_codex_implementation_isolation
 from hephaestus.agents.workspace import SourceLane, WorkspaceBinding, WorkspaceKind
 from hephaestus.automation.current_plan import CurrentPlanRead
 from hephaestus.automation.review_journal import PlanDiscoveryStatus
-from hephaestus.automation.source_worktree import FleetAttemptFence, SourceWorkspaceReceipt
 from hephaestus.fleet.job_results import MAX_ANSWER_BYTES, digest, encoded
+from hephaestus.git.source_worktree import FleetAttemptFence, SourceWorkspaceReceipt
 
 from .job_results import JobResult
 

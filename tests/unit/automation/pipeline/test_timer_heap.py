@@ -22,7 +22,7 @@ from hephaestus.automation.pipeline.routing import Disposition, StageName, Stage
 from hephaestus.automation.pipeline.stage_base import Stage
 from hephaestus.automation.pipeline.stages import JobRequest
 from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
-from hephaestus.automation.source_worktree import SourceWorkspaceManager
+from hephaestus.git.source_worktree import SourceWorkspaceManager
 from hephaestus.utils.file_lock import file_lock
 from tests.unit.automation.pipeline.conftest import (
     FakeWorkerPool,
