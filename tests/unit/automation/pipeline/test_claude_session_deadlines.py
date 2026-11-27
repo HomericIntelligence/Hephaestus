@@ -13,6 +13,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 
+from hephaestus.agents import claude_invoke, invocation_config
 from hephaestus.agents.execution_policy import (
     AgentOperation,
     AgentRole,
@@ -20,7 +21,7 @@ from hephaestus.agents.execution_policy import (
     SessionLifecycle,
 )
 from hephaestus.agents.workspace import WorkspaceBinding
-from hephaestus.automation import agent_config, claude_invoke
+from hephaestus.automation import agent_config
 from hephaestus.automation.pipeline import worker_pool
 from hephaestus.automation.pipeline.jobs import AgentJob
 from hephaestus.resilience.circuit_breaker import get_circuit_breaker, reset_all_circuit_breakers
@@ -89,7 +90,7 @@ def test_session_discovery_stops_before_provider_after_deadline_or_cancel(
             patch.object(worker_pool, "time", SimpleNamespace(monotonic=lambda: clock[0])),
             patch.object(worker_pool, "resolve_agent", return_value="claude"),
             patch.object(
-                agent_config,
+                invocation_config,
                 "subprocess",
                 SimpleNamespace(run=git_read, SubprocessError=subprocess.SubprocessError),
             ),
@@ -133,7 +134,7 @@ def test_session_discovery_uses_the_remaining_operation_time(
             patch.object(worker_pool, "time", SimpleNamespace(monotonic=lambda: clock[0])),
             patch.object(worker_pool, "resolve_agent", return_value="claude"),
             patch.object(
-                agent_config,
+                invocation_config,
                 "subprocess",
                 SimpleNamespace(run=git_read, SubprocessError=subprocess.SubprocessError),
             ),
@@ -176,7 +177,7 @@ def test_provider_launch_rechecks_the_operation_after_command_preparation(
             patch.object(worker_pool, "time", SimpleNamespace(monotonic=lambda: clock[0])),
             patch.object(worker_pool, "resolve_agent", return_value="claude"),
             patch.object(
-                agent_config,
+                invocation_config,
                 "subprocess",
                 SimpleNamespace(run=git_read, SubprocessError=subprocess.SubprocessError),
             ),
@@ -208,7 +209,7 @@ def test_manual_session_invocation_retains_independent_timeouts(
 
     with (
         patch.object(
-            agent_config,
+            invocation_config,
             "subprocess",
             SimpleNamespace(run=git_read, SubprocessError=subprocess.SubprocessError),
         ),
@@ -261,7 +262,7 @@ def test_provider_start_race_stops_and_reaps_the_child(
             patch.object(worker_pool, "time", SimpleNamespace(monotonic=lambda: clock[0])),
             patch.object(worker_pool, "resolve_agent", return_value="claude"),
             patch.object(
-                agent_config,
+                invocation_config,
                 "subprocess",
                 SimpleNamespace(run=git_read, SubprocessError=subprocess.SubprocessError),
             ),

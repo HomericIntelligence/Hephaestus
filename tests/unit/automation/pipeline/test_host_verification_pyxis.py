@@ -13,6 +13,10 @@ from types import SimpleNamespace
 
 import pytest
 
+from hephaestus.agents.pyxis_artifact_io import (
+    CrossNodePathBinding,
+    bind_cross_node_root,
+)
 from hephaestus.automation.pipeline.host_verification_pyxis import (
     PyxisImageValidationError,
     build_pyxis_environment,
@@ -20,10 +24,6 @@ from hephaestus.automation.pipeline.host_verification_pyxis import (
     stage_verified_pyxis_image,
     validate_pyxis_image,
     validate_pyxis_quota_root,
-)
-from hephaestus.automation.pyxis_artifact_io import (
-    CrossNodePathBinding,
-    bind_cross_node_root,
 )
 
 
@@ -144,7 +144,7 @@ def test_stage_verified_pyxis_image_rejects_root_substitution(
         return descriptor
 
     monkeypatch.setattr(
-        "hephaestus.automation.pyxis_artifact_io.os.open",
+        "hephaestus.agents.pyxis_artifact_io.os.open",
         substitute_root,
     )
 
@@ -242,7 +242,7 @@ def test_validate_pyxis_image_rejects_path_substitution_after_open(
         return descriptor
 
     monkeypatch.setattr(
-        "hephaestus.automation.pyxis_artifact_io.os.open",
+        "hephaestus.agents.pyxis_artifact_io.os.open",
         substitute_image,
     )
 
@@ -335,7 +335,7 @@ def test_validate_pyxis_quota_root_requires_finite_private_filesystem(
     """A private one-GiB filesystem can hold Linux writable outputs."""
     tmp_path.chmod(0o700)
     monkeypatch.setattr(
-        "hephaestus.automation.pyxis_artifact_io.os.fstatvfs",
+        "hephaestus.agents.pyxis_artifact_io.os.fstatvfs",
         lambda _: SimpleNamespace(
             f_bsize=4096,
             f_frsize=4096,
@@ -355,7 +355,7 @@ def test_validate_pyxis_quota_root_rejects_polling_only_storage(
     """A large host filesystem is not a hard writable-space quota."""
     tmp_path.chmod(0o700)
     monkeypatch.setattr(
-        "hephaestus.automation.pyxis_artifact_io.os.fstatvfs",
+        "hephaestus.agents.pyxis_artifact_io.os.fstatvfs",
         lambda _: SimpleNamespace(
             f_bsize=4096,
             f_frsize=4096,
@@ -380,7 +380,7 @@ def test_validate_pyxis_quota_root_accepts_shared_ancestry(
     quota = shared / "quota"
     quota.mkdir(mode=0o700)
     monkeypatch.setattr(
-        "hephaestus.automation.pyxis_artifact_io.os.fstatvfs",
+        "hephaestus.agents.pyxis_artifact_io.os.fstatvfs",
         lambda _: SimpleNamespace(
             f_bsize=4096,
             f_frsize=4096,
@@ -438,7 +438,7 @@ def test_retained_quota_binding_revalidates_the_filesystem(
     original = os.statvfs(tmp_path)
     filesystem_id = [original.f_fsid]
     monkeypatch.setattr(
-        "hephaestus.automation.pyxis_artifact_io.os.fstatvfs",
+        "hephaestus.agents.pyxis_artifact_io.os.fstatvfs",
         lambda _: SimpleNamespace(
             f_bsize=original.f_bsize,
             f_frsize=4096,

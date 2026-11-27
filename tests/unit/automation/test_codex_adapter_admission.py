@@ -234,7 +234,7 @@ def _refresh_installed_tree_lock(lock: Path, payload: dict[str, Any]) -> str:
 
 
 def _module():
-    name = "hephaestus.automation.codex_adapter_admission"
+    name = "hephaestus.agents.codex_adapter_admission"
     assert importlib.util.find_spec(name) is not None, "adapter admission is not implemented"
     return importlib.import_module(name)
 
@@ -553,7 +553,7 @@ def test_public_admission_loads_verified_installed_bytes_in_a_fresh_process(
     repository = Path(__file__).resolve().parents[3]
     code = f"""
 from pathlib import Path
-from hephaestus.automation import codex_adapter_admission as admission
+from hephaestus.agents import codex_adapter_admission as admission
 admission.sys.platform = "darwin"
 admission.platform.machine = lambda: "arm64"
 admission._virtualization_framework_available = lambda: True

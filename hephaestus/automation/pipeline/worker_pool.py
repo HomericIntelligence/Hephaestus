@@ -39,9 +39,9 @@ from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, Literal, cast
 
+import hephaestus.agents.claude_invoke as claude_invoke
+import hephaestus.agents.codex_adapter_admission as codex_adapter_admission
 import hephaestus.agents.runtime as agent_runtime
-import hephaestus.automation.claude_invoke as claude_invoke
-import hephaestus.automation.codex_adapter_admission as codex_adapter_admission
 import hephaestus.automation.git_utils as git_utils
 import hephaestus.utils.subprocess_registry as subprocess_registry
 from hephaestus.agents.codex_isolation import (
@@ -57,6 +57,10 @@ from hephaestus.agents.execution_policy import (
     resolve_policy,
 )
 from hephaestus.agents.pi_session import AgentSessionBinding
+from hephaestus.agents.pyxis_artifact_io import (
+    CrossNodePathBinding,
+    bind_cross_node_root,
+)
 from hephaestus.agents.runtime import (
     AgentExecutionError,
     resolve_agent,
@@ -283,10 +287,6 @@ from hephaestus.automation.pipeline.worker_git_inspection import (
 from hephaestus.automation.pipeline_github_review_validation import validation_plan_for_workspace
 from hephaestus.automation.podman_machine_supervisor import validate_podman_machine_name
 from hephaestus.automation.prompts._review_rubric import plugin_skills_context
-from hephaestus.automation.pyxis_artifact_io import (
-    CrossNodePathBinding,
-    bind_cross_node_root,
-)
 from hephaestus.automation.rebase_recovery import PendingRebaseStore
 from hephaestus.automation.remote_git import (
     trusted_gh_executable as _shared_trusted_gh_executable,

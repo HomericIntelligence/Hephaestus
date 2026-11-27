@@ -740,7 +740,7 @@ def test_prepare_runs_version_without_auth_and_invoke_uses_same_guest_bytes(
 @pytest.mark.parametrize("name", ("$(touch owned)", "`touch owned`", "name;command", "name value"))
 def test_adapter_command_substitution_is_rejected(name: str, tmp_path: Path) -> None:
     """The production admission path rejects command text before lock access."""
-    from hephaestus.automation import codex_adapter_admission
+    from hephaestus.agents import codex_adapter_admission
 
     with pytest.raises(
         codex_adapter_admission.CodexAdapterAdmissionError,

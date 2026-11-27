@@ -13,19 +13,19 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from hephaestus.agents import claude_invoke
+from hephaestus.agents.claude_invoke import (
+    _session_expired,
+    invoke_claude_with_session,
+    is_model_capped,
+    reset_capped_models,
+)
 from hephaestus.agents.session_errors import AgentSessionLostError
-from hephaestus.automation import claude_invoke
 from hephaestus.automation.agent_config import (
     AGENT_PLAN_REVIEWER,
     AGENT_PLANNER,
     session_jsonl_path,
     session_uuid,
-)
-from hephaestus.automation.claude_invoke import (
-    _session_expired,
-    invoke_claude_with_session,
-    is_model_capped,
-    reset_capped_models,
 )
 
 FALLBACK_MODEL = "claude-opus-4-8"
@@ -43,7 +43,7 @@ def _argv(call_args_list_entry: Any) -> list[str]:
 @pytest.fixture
 def stub_run() -> Generator[MagicMock]:
     """Patch subprocess.run to return a successful result."""
-    with patch("hephaestus.automation.claude_invoke._run_tracked") as m:
+    with patch("hephaestus.agents.claude_invoke._run_tracked") as m:
         m.return_value = MagicMock(stdout="ok", stderr="", returncode=0)
         yield m
 
@@ -53,7 +53,7 @@ def fake_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Redirect $HOME so session_jsonl_path resolves under tmp_path."""
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr(
-        "hephaestus.automation.agent_config._checkout_identity",
+        "hephaestus.agents.invocation_config._checkout_identity",
         lambda cwd, *, remaining_timeout=None: sha256(str(cwd.resolve()).encode()).hexdigest(),
     )
     return tmp_path
@@ -227,7 +227,7 @@ class TestCreateThenResume:
         dashed_path.write_text("{}\n", encoding="utf-8")
 
         with patch(
-            "hephaestus.automation.agent_config._registered_worktree_roots",
+            "hephaestus.agents.invocation_config._registered_worktree_roots",
             return_value=(dotted.resolve(),),
         ):
             _, sid = invoke_claude_with_session(
@@ -286,7 +286,7 @@ class TestCreateThenResume:
         err = subprocess.CalledProcessError(
             returncode=2, cmd=["claude"], output="", stderr="some error"
         )
-        with patch("hephaestus.automation.claude_invoke._run_tracked", side_effect=err) as m:
+        with patch("hephaestus.agents.claude_invoke._run_tracked", side_effect=err) as m:
             with pytest.raises(subprocess.CalledProcessError):
                 invoke_claude_with_session(
                     repo="R",
@@ -458,9 +458,7 @@ class TestEndToEndSessionResume:
             _make_existing_jsonl(fake_home, cwd, expected_sid)
             return MagicMock(stdout="ok", stderr="", returncode=0)
 
-        with patch(
-            "hephaestus.automation.claude_invoke._run_tracked", side_effect=_side_effect
-        ) as m:
+        with patch("hephaestus.agents.claude_invoke._run_tracked", side_effect=_side_effect) as m:
             _, sid1 = invoke_claude_with_session(
                 repo="Scylla",
                 issue=1944,
@@ -503,9 +501,7 @@ class TestEndToEndSessionResume:
             _make_existing_jsonl(fake_home, cwd, expected_sid)
             return MagicMock(stdout="ok", stderr="", returncode=0)
 
-        with patch(
-            "hephaestus.automation.claude_invoke._run_tracked", side_effect=_side_effect
-        ) as m:
+        with patch("hephaestus.agents.claude_invoke._run_tracked", side_effect=_side_effect) as m:
             _, sid1 = invoke_claude_with_session(
                 repo="Scylla",
                 issue=1944,
@@ -550,7 +546,7 @@ class TestEndToEndSessionResume:
         # Existing transcript → resume path.
         _make_existing_jsonl(fake_home, cwd, expected_sid)
 
-        with patch("hephaestus.automation.claude_invoke._run_tracked") as m:
+        with patch("hephaestus.agents.claude_invoke._run_tracked") as m:
             m.return_value = MagicMock(stdout="ok", stderr="", returncode=0)
             _, returned_sid = invoke_claude_with_session(
                 repo="R",
@@ -606,10 +602,10 @@ class TestModelCapFallback:
         cwd.mkdir()
         ok = MagicMock(stdout="fallback-ok", stderr="", returncode=0)
         with patch(
-            "hephaestus.automation.claude_invoke._run_tracked",
+            "hephaestus.agents.claude_invoke._run_tracked",
             side_effect=[_cap_error(), ok],
         ) as m:
-            with caplog.at_level(logging.WARNING, logger="hephaestus.automation.claude_invoke"):
+            with caplog.at_level(logging.WARNING, logger="hephaestus.agents.claude_invoke"):
                 out, _sid = invoke_claude_with_session(
                     repo="R",
                     issue=1,
@@ -639,7 +635,7 @@ class TestModelCapFallback:
         prompt = "sensitive fallback prompt"
         ok = MagicMock(stdout="fallback-ok", stderr="", returncode=0)
         with patch(
-            "hephaestus.automation.claude_invoke._run_tracked",
+            "hephaestus.agents.claude_invoke._run_tracked",
             side_effect=[_cap_error(), ok],
         ) as tracked:
             out, sid = invoke_claude_with_session(
@@ -672,7 +668,7 @@ class TestModelCapFallback:
         capped = MagicMock(stdout=_cap_envelope(), stderr="", returncode=0)
         ok = MagicMock(stdout='{"result": "ok"}', stderr="", returncode=0)
         with patch(
-            "hephaestus.automation.claude_invoke._run_tracked",
+            "hephaestus.agents.claude_invoke._run_tracked",
             side_effect=[capped, ok],
         ) as m:
             out, _sid = invoke_claude_with_session(
@@ -696,7 +692,7 @@ class TestModelCapFallback:
         cwd.mkdir()
         ok = MagicMock(stdout="ok", stderr="", returncode=0)
         with patch(
-            "hephaestus.automation.claude_invoke._run_tracked",
+            "hephaestus.agents.claude_invoke._run_tracked",
             side_effect=[_cap_error(), ok],
         ):
             invoke_claude_with_session(
@@ -709,7 +705,7 @@ class TestModelCapFallback:
                 cwd=cwd,
             )
         assert is_model_capped("claude-fable-5") is True
-        with patch("hephaestus.automation.claude_invoke._run_tracked", return_value=ok) as m2:
+        with patch("hephaestus.agents.claude_invoke._run_tracked", return_value=ok) as m2:
             invoke_claude_with_session(
                 repo="R",
                 issue=2,
@@ -728,7 +724,7 @@ class TestModelCapFallback:
         cwd = fake_home / "work"
         cwd.mkdir()
         with patch(
-            "hephaestus.automation.claude_invoke._run_tracked",
+            "hephaestus.agents.claude_invoke._run_tracked",
             side_effect=_cap_error(),
         ) as m:
             with pytest.raises(subprocess.CalledProcessError):
@@ -754,7 +750,7 @@ class TestModelCapFallback:
         cwd.mkdir()
         capped = MagicMock(stdout=_cap_envelope(), stderr="", returncode=0)
         with patch(
-            "hephaestus.automation.claude_invoke._run_tracked",
+            "hephaestus.agents.claude_invoke._run_tracked",
             side_effect=[capped, capped],
         ) as m:
             out, _sid = invoke_claude_with_session(
@@ -778,7 +774,7 @@ class TestModelCapFallback:
         boom = subprocess.CalledProcessError(
             returncode=1, cmd=["claude"], output="", stderr="API Error: 529 Overloaded"
         )
-        with patch("hephaestus.automation.claude_invoke._run_tracked", side_effect=boom) as m:
+        with patch("hephaestus.agents.claude_invoke._run_tracked", side_effect=boom) as m:
             with pytest.raises(subprocess.CalledProcessError):
                 invoke_claude_with_session(
                     repo="R",
@@ -797,7 +793,7 @@ class TestModelCapFallback:
         cwd.mkdir()
         envelope = json.dumps({"is_error": True, "result": "tool execution failed"})
         with patch(
-            "hephaestus.automation.claude_invoke._run_tracked",
+            "hephaestus.agents.claude_invoke._run_tracked",
             return_value=MagicMock(stdout=envelope, stderr="", returncode=0),
         ) as m:
             out, _sid = invoke_claude_with_session(
@@ -822,7 +818,7 @@ class TestModelCapFallback:
         cwd = fake_home / "work"
         cwd.mkdir()
         with patch(
-            "hephaestus.automation.claude_invoke._run_tracked",
+            "hephaestus.agents.claude_invoke._run_tracked",
             return_value=MagicMock(
                 stdout="the fix mentions /usage-credits handling", stderr="", returncode=0
             ),
@@ -846,7 +842,7 @@ class TestModelCapFallback:
         cwd.mkdir()
         ok = MagicMock(stdout="ok", stderr="", returncode=0)
         with patch(
-            "hephaestus.automation.claude_invoke._run_tracked",
+            "hephaestus.agents.claude_invoke._run_tracked",
             side_effect=[_cap_error(), ok],
         ):
             _, sid = invoke_claude_with_session(
@@ -866,7 +862,7 @@ class TestModelCapFallback:
         cwd.mkdir()
         ok = MagicMock(stdout="ok", stderr="", returncode=0)
         with patch(
-            "hephaestus.automation.claude_invoke._run_tracked",
+            "hephaestus.agents.claude_invoke._run_tracked",
             side_effect=[_cap_error(), ok],
         ) as tracked:
             invoke_claude_with_session(
@@ -887,7 +883,7 @@ class TestModelCapFallback:
         cwd.mkdir()
         with (
             patch(
-                "hephaestus.automation.claude_invoke._run_tracked", side_effect=_cap_error()
+                "hephaestus.agents.claude_invoke._run_tracked", side_effect=_cap_error()
             ) as tracked,
             pytest.raises(subprocess.CalledProcessError),
         ):
@@ -917,7 +913,7 @@ class TestModelCapFallback:
         sid = session_uuid("R", 1, AGENT_PLANNER, model, cwd=cwd)
         if lifecycle == "resume-required":
             _make_existing_jsonl(fake_home, cwd, sid)
-        with patch("hephaestus.automation.claude_invoke._run_tracked") as tracked:
+        with patch("hephaestus.agents.claude_invoke._run_tracked") as tracked:
             if error_envelope:
                 tracked.return_value = MagicMock(stdout=_cap_envelope(), stderr="", returncode=0)
                 out, returned_sid = invoke_claude_with_session(
@@ -1006,7 +1002,7 @@ class TestPromptNullByteSanitization:
         call succeeds; WITHOUT the fix, argv marshaling raises
         ``ValueError: embedded null byte`` here and never reaches the child.
 
-        The real :func:`~hephaestus.automation.claude_invoke._run_tracked` still
+        The real :func:`~hephaestus.agents.claude_invoke._run_tracked` still
         runs (Popen + process-group tracking) — only the binary is swapped — so
         the actual argv/stdin marshaling and the #2059 spawn path are exercised.
         """
@@ -1023,7 +1019,7 @@ class TestPromptNullByteSanitization:
             # Popen/process-group spawn are still exercised end-to-end.
             return real_run_tracked([*noop, *cmd[1:]], **kwargs)
 
-        monkeypatch.setattr("hephaestus.automation.claude_invoke._run_tracked", fake_run)
+        monkeypatch.setattr("hephaestus.agents.claude_invoke._run_tracked", fake_run)
 
         out, _sid = invoke_claude_with_session(
             repo="R",
