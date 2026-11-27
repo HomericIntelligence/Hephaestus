@@ -3,7 +3,7 @@
 Use this when an issue's worktree under `<repo>/build/.worktrees/issue-<N>` is
 dirty, abandoned, or blocking a clean re-run. Recovery commands here come
 directly from the worktree-manager module docstring
-(`hephaestus/automation/worktree_manager.py`).
+(`hephaestus/git/worktree_manager.py`).
 
 ## Background
 
