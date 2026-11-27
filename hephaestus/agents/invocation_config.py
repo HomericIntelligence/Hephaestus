@@ -97,6 +97,8 @@ _ALL_AGENTS = frozenset(
 # from inheriting the previous verdict. Planning and implementation resume
 # their stage sessions.
 _PER_ITERATION_REVIEWERS = frozenset({AGENT_PLAN_REVIEWER, AGENT_PR_REVIEWER})
+
+
 def _repo_scoped_git_env() -> dict[str, str]:
     """Return environment for explicit ``git -C`` calls, ignoring outer repos."""
     return {"PATH": os.defpath}
