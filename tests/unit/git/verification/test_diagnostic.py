@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from typing import Any, cast
 
 import pytest
 
@@ -32,7 +33,7 @@ class _Recorder:
 def test_failure_comment_names_the_exact_head_and_command() -> None:
     """The marker and body bind one head to the fixed check."""
     marker, body = host_verification_failure_comment(
-        PRE_PR_TEST,
+        cast(Any, PRE_PR_TEST),
         {"head_sha": "abc123", "argv": PRE_PR_TEST.argv, "failure_kind": "timeout"},
     )
 
@@ -69,7 +70,7 @@ def test_publish_returns_failure_without_raising() -> None:
     github = _Recorder(RuntimeError("write failed"))
 
     published = publish_host_verification_failure(
-        github, 7, PRE_PR_TEST, {"head_sha": "abc123"}, logging.getLogger("test")
+        github, 7, cast(Any, PRE_PR_TEST), {"head_sha": "abc123"}, logging.getLogger("test")
     )
 
     assert published is False
