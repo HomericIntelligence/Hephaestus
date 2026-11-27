@@ -2119,7 +2119,8 @@ implementation.
 
 The neutral `hephaestus/git/commit_runtime.py` module owns commit staging, message validation,
 signing, and commit creation. The shared `hephaestus/git/git_utils.py` helpers carry bounded
-Git subprocess execution for both library and product callers. Pipeline stages put immutable issue title and
+Git subprocess execution for both library and product callers. `hephaestus/git/repo_intake.py` owns
+repository intake and immutable checkout discovery. Pipeline stages put immutable issue title and
 body values in each job. The Git worker calls this neutral commit interface;
 it does not fetch issue data through an old commit adapter.
 
