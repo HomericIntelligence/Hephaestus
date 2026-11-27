@@ -61,10 +61,10 @@ passes CI, because the contamination is correct-by-construction content.
    next call reconciles by readback and may retry only when the live state
    still matches the receipt exactly. There is no automatic rollback after
    confirmed publication.
-6. The trusted remote Git implementation moves from
-   `hephaestus.automation.remote_git` to `hephaestus.github.remote_git`. The
-   old module stays as an identity-preserving compatibility export, keeping
-   the `automation → library` direction from ADR-0001.
+6. The trusted remote Git implementation lives in
+   `hephaestus.github.remote_git`. `hephaestus.git.remote_git` is the
+   identity-preserving compatibility export, keeping the `automation → library`
+   direction from ADR-0001.
 7. The process adapters gain the seams the boundary needs:
    `run_subprocess(pre_launch=...)` and `run_git(pre_launch=...)` revalidate
    local state immediately before each child launch without starting a child
@@ -114,6 +114,6 @@ passes CI, because the contamination is correct-by-construction content.
   Recovery is explicit and revalidated, which trades one extra operator step
   for no unbounded push attempts.
 - The moved `remote_git` module keeps its public names through the
-  automation compatibility export. In-repository consumers and their test
+  library compatibility export. In-repository consumers and their test
   patches point at the library path; a revert of this ADR is one revert of
   the move.

@@ -44,17 +44,15 @@ MOVERS = frozenset(
     }
 )
 
-# The exact mover-to-mover import pairs allowed on the final tree. Each pair
-# is (consumer module name, imported module name). The two pairs that import
-# ``implementation_writer`` retired with the module's move to
-# ``hephaestus.git.writer`` (#3509); their consumers retargeted in the same
-# change.
+# The exact mover-to-mover import pairs still present in the product layer.
+# Each pair is (consumer module name, imported module name). A pair retires
+# when its consumer or its target moves into ``hephaestus.git`` and the import
+# becomes a library-to-library edge. The ``implementation_writer`` pairs
+# retired with #3509; the ``commit_paths`` and ``commit_policy`` pairs retired
+# when those modules moved into ``hephaestus.git`` (issue #3512, W2 slice 1).
 INTERNAL_ALLOWED = frozenset(
     {
-        ("commit_runtime", "commit_paths"),
-        ("commit_runtime", "commit_policy"),
         ("git_utils", "commit_runtime"),
-        ("source_worktree", "commit_paths"),
         ("source_worktree", "worktree_manager"),
         ("worktree_manager", "git_utils"),
         ("worktree_manager", "repo_intake"),

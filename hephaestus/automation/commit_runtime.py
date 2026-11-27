@@ -12,21 +12,20 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from hephaestus.git.runtime import issue_ref, run
-from hephaestus.prompts import PromptCatalog
-from hephaestus.prompts.fencing import fence_content
-from hephaestus.utils.git import git_config_get
-
-from .commit_paths import (
+from hephaestus.git.commit_paths import (
     SECRET_FILE_EXTENSIONS as SECRET_FILE_EXTENSIONS,
     SECRET_FILE_NAMES as SECRET_FILE_NAMES,
     CommitPaths,
     is_bounded_commit_paths,
-    parse_porcelain_status,
+    parse_porcelain_status as parse_porcelain_status,
     reject_filtered_path_shape_changes,
     select_commit_paths,
 )
-from .commit_policy import ALLOWED_CONVENTIONAL_TYPES, normalize_conventional_type
+from hephaestus.git.commit_policy import ALLOWED_CONVENTIONAL_TYPES, normalize_conventional_type
+from hephaestus.git.runtime import issue_ref, run
+from hephaestus.prompts import PromptCatalog
+from hephaestus.prompts.fencing import fence_content
+from hephaestus.utils.git import git_config_get
 
 logger = logging.getLogger(__name__)
 

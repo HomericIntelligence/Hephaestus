@@ -81,7 +81,6 @@ from hephaestus.agents.workspace import (
     validate_workspace_binding,
 )
 from hephaestus.automation.agent_config import AGENT_COMMIT_MESSAGE
-from hephaestus.automation.commit_paths import CommitPaths
 from hephaestus.automation.first_publication_recovery import FirstPublicationStore
 from hephaestus.automation.host_capabilities import (
     QuotaLifecycleError,
@@ -288,10 +287,6 @@ from hephaestus.automation.pipeline_github_review_validation import validation_p
 from hephaestus.automation.podman_machine_supervisor import validate_podman_machine_name
 from hephaestus.automation.prompts._review_rubric import plugin_skills_context
 from hephaestus.automation.rebase_recovery import PendingRebaseStore
-from hephaestus.automation.remote_git import (
-    trusted_gh_executable as _shared_trusted_gh_executable,
-    trusted_remote_git_config as _shared_trusted_remote_git_config,
-)
 from hephaestus.automation.repo_intake import (
     RepoIntakeError,
     RepoIntakeManager,
@@ -345,7 +340,12 @@ from hephaestus.config.child_environments import (
     build_host_verification_env,
     build_python_phase_env,
 )
+from hephaestus.git.commit_paths import CommitPaths
 from hephaestus.git.gh.rate_limit import OperationDeadlineExpired
+from hephaestus.git.remote_git import (
+    trusted_gh_executable as _shared_trusted_gh_executable,
+    trusted_remote_git_config as _shared_trusted_remote_git_config,
+)
 from hephaestus.git.runtime import (
     current_operation_shutdown,
     operation_file_lock,

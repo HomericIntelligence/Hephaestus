@@ -13,17 +13,17 @@ from unittest.mock import MagicMock, call, patch
 import pytest
 
 from hephaestus.automation import commit_runtime as pr_manager
-from hephaestus.automation.commit_paths import (
-    CommitPaths,
-    is_bounded_commit_paths,
-    reject_filtered_path_shape_changes,
-)
 from hephaestus.automation.commit_runtime import (
     COMMIT_ISSUE_BODY_MAX_BYTES,
     COMMIT_ISSUE_TITLE_MAX_BYTES,
     CommitIssueMetadata,
 )
 from hephaestus.automation.prompts._shared import get_untrusted_notice
+from hephaestus.git.commit_paths import (
+    CommitPaths,
+    is_bounded_commit_paths,
+    reject_filtered_path_shape_changes,
+)
 
 
 def _status(stdout: str = "") -> MagicMock:

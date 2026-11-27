@@ -3,8 +3,8 @@
 This module owns the trusted ``gh`` executable discovery, the explicit
 ``--gh-extra-path-root`` validation, the isolated GitHub authentication
 check, and the command-scoped remote Git configuration. The automation
-product layer re-exports the same objects from
-``hephaestus.automation.remote_git`` so current callers keep object identity.
+library namespace re-exports the same objects from
+``hephaestus.git.remote_git`` so current callers keep object identity.
 """
 
 from __future__ import annotations

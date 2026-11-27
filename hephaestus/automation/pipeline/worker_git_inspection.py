@@ -12,7 +12,6 @@ from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
 
 import hephaestus.automation.git_utils as git_utils
-from hephaestus.automation.commit_paths import CommitPaths, is_bounded_commit_paths
 from hephaestus.automation.pipeline.git_jobs import (
     DIRTY_SNAPSHOT_CHANGED_FILE_MAX,
     DIRTY_SNAPSHOT_CONTENT_MAX_BYTES,
@@ -20,6 +19,7 @@ from hephaestus.automation.pipeline.git_jobs import (
     IMPLEMENTATION_INSPECTION_METADATA_MAX_BYTES,
     IMPLEMENTATION_INSPECTION_STATUS_MAX_BYTES,
 )
+from hephaestus.git.commit_paths import CommitPaths, is_bounded_commit_paths
 from hephaestus.git.config_safety import unsafe_local_git_config_key
 from hephaestus.git.snapshot import (
     _BoundedGitOutput as _BoundedGitOutput,
@@ -44,7 +44,7 @@ def _bounded_candidate_commit_paths(
     git_env: dict[str, str] | None = None,
 ) -> CommitPaths:
     """Return one bounded, filtered path manifest for candidate staging."""
-    from hephaestus.automation.commit_paths import (
+    from hephaestus.git.commit_paths import (
         parse_porcelain_status,
         reject_filtered_path_shape_changes,
         select_commit_paths,
