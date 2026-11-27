@@ -32,16 +32,16 @@ import subprocess
 from collections.abc import Callable
 from pathlib import Path
 
-import hephaestus.automation.subprocess_registry as subprocess_registry
-from hephaestus.agents.model_selection import parse_model_selection
-from hephaestus.agents.session_errors import AgentSessionLostError
-from hephaestus.automation.agent_config import (
+import hephaestus.utils.subprocess_registry as subprocess_registry
+from hephaestus.agents.invocation_config import (
     agent_default_timeout,
     fallback_model,
     resolve_session_jsonl_path,
     session_name,
     session_uuid,
 )
+from hephaestus.agents.model_selection import parse_model_selection
+from hephaestus.agents.session_errors import AgentSessionLostError
 from hephaestus.config.child_environments import build_claude_child_env
 from hephaestus.git.gh.client import ClaudeUsageCapError, PromptTooLongError
 from hephaestus.git.gh.rate_limit import resolve_quota_reset_epoch
@@ -204,7 +204,7 @@ def invoke_claude_with_session(
         issue: Issue number — leading ``#`` is stripped by
             :func:`agent_config.session_name`.
         agent: One of the ``AGENT_*`` constants in
-            :mod:`hephaestus.automation.agent_config`.
+            :mod:`hephaestus.agents.invocation_config`.
         prompt: Prompt text. Passed as a positional argv unless
             ``input_via_stdin`` is True.
         model: ``MODEL[:EFFORT]`` value. Claude uses the base model and its
@@ -406,7 +406,7 @@ def _run_tracked(
 
     Spawns the child in its OWN session (``start_new_session=True``) so it leads
     its own process group, and registers that group with
-    :mod:`~hephaestus.automation.subprocess_registry` for the duration of the
+    :mod:`~hephaestus.utils.subprocess_registry` for the duration of the
     call. A pipeline teardown (``WorkerPool.shutdown``) can then ``SIGTERM`` the
     group and free the blocked worker thread instead of leaking a runaway
     ``claude`` child (#2059). On timeout the group is killed before re-raising so

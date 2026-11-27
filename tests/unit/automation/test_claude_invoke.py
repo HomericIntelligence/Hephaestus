@@ -7,13 +7,13 @@ from pathlib import Path
 
 import pytest
 
-from hephaestus.agents.execution_policy import SessionLifecycle
-from hephaestus.automation.claude_invoke import (
+from hephaestus.agents.claude_invoke import (
     describe_claude_failure,
     detect_model_usage_cap,
     detect_server_overload,
     format_called_process_error,
 )
+from hephaestus.agents.execution_policy import SessionLifecycle
 
 # The exact model-cap phrasing observed in output2.log (2026-07-03). Unlike a
 # session-limit 429 it carries NO reset time — the remediation is a model
@@ -128,7 +128,7 @@ class TestRaiseForErrorEnvelope:
         """A 429 envelope raises ClaudeUsageCapError carrying the reset epoch."""
         import json
 
-        from hephaestus.automation.claude_invoke import raise_for_error_envelope
+        from hephaestus.agents.claude_invoke import raise_for_error_envelope
         from hephaestus.git.gh.client import ClaudeUsageCapError
 
         stdout = json.dumps(
@@ -146,7 +146,7 @@ class TestRaiseForErrorEnvelope:
         """A non-quota is_error envelope raises a plain RuntimeError."""
         import json
 
-        from hephaestus.automation.claude_invoke import raise_for_error_envelope
+        from hephaestus.agents.claude_invoke import raise_for_error_envelope
         from hephaestus.git.gh.client import ClaudeUsageCapError
 
         stdout = json.dumps({"is_error": True, "result": "tool execution failed"})
@@ -158,14 +158,14 @@ class TestRaiseForErrorEnvelope:
         """A normal (is_error absent/false) result is left untouched."""
         import json
 
-        from hephaestus.automation.claude_invoke import raise_for_error_envelope
+        from hephaestus.agents.claude_invoke import raise_for_error_envelope
 
         raise_for_error_envelope(json.dumps({"result": "Grade: A\nVerdict: GO"}))
         raise_for_error_envelope(json.dumps({"is_error": False, "result": "ok"}))
 
     def test_non_json_stdout_does_not_raise(self) -> None:
         """Plain-text or empty stdout is ignored (not every caller uses json)."""
-        from hephaestus.automation.claude_invoke import raise_for_error_envelope
+        from hephaestus.agents.claude_invoke import raise_for_error_envelope
 
         raise_for_error_envelope("just some prose")
         raise_for_error_envelope("")
@@ -174,7 +174,7 @@ class TestRaiseForErrorEnvelope:
         """A 'Prompt is too long' envelope raises PromptTooLongError, not RuntimeError (#1847)."""
         import json
 
-        from hephaestus.automation.claude_invoke import raise_for_error_envelope
+        from hephaestus.agents.claude_invoke import raise_for_error_envelope
         from hephaestus.git.gh.client import ClaudeUsageCapError, PromptTooLongError
 
         stdout = json.dumps({"is_error": True, "result": "Prompt is too long"})
@@ -265,7 +265,7 @@ def test_model_cap_without_explicit_fallback_does_not_switch(
     cached: bool,
 ) -> None:
     """A quota cap cannot choose another model without an explicit fallback."""
-    from hephaestus.automation import claude_invoke
+    from hephaestus.agents import claude_invoke
 
     seen: list[str] = []
 
@@ -295,7 +295,7 @@ def test_durable_review_never_changes_its_recorded_model(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lifecycle: str
 ) -> None:
     """Quota fallback cannot change a durable review's model identity."""
-    from hephaestus.automation import claude_invoke
+    from hephaestus.agents import claude_invoke
 
     seen: list[str] = []
 

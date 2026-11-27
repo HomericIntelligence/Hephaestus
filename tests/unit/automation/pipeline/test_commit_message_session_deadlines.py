@@ -11,7 +11,8 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from hephaestus.automation import agent_config, claude_invoke, git_utils
+from hephaestus.agents import claude_invoke, invocation_config
+from hephaestus.automation import agent_config, git_utils
 from hephaestus.automation.pipeline import worker_pool
 from hephaestus.git import runtime as git_runtime
 
@@ -54,7 +55,7 @@ def test_commit_message_discovery_stops_before_provider_after_deadline_or_cancel
         git_runtime.operation_deadline(110.0, shutdown=shutdown),
         patch.object(git_utils, "get_repo_slug", return_value="repo"),
         patch.object(
-            agent_config,
+            invocation_config,
             "subprocess",
             SimpleNamespace(run=git_read, SubprocessError=subprocess.SubprocessError),
         ),
@@ -88,7 +89,7 @@ def test_commit_message_discovery_uses_the_remaining_git_operation_time(
         git_runtime.operation_deadline(103.0, shutdown=threading.Event()),
         patch.object(git_utils, "get_repo_slug", return_value="repo"),
         patch.object(
-            agent_config,
+            invocation_config,
             "subprocess",
             SimpleNamespace(run=git_read, SubprocessError=subprocess.SubprocessError),
         ),

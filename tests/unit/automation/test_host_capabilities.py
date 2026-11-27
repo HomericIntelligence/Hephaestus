@@ -13,6 +13,7 @@ from unittest.mock import MagicMock, Mock
 
 import pytest
 
+from hephaestus.agents.pyxis_artifact_io import CrossNodePathBinding
 from hephaestus.agents.workspace import SourceLane, WorkspaceBinding
 from hephaestus.automation.host_capabilities import HdiutilQuotaBackend, PyxisQuotaBackend
 from hephaestus.automation.models import DEFAULT_STATE_DIR
@@ -20,7 +21,6 @@ from hephaestus.automation.pipeline.host_capabilities import (
     CapabilityReceiptTarget,
     CapabilityRequestTarget,
 )
-from hephaestus.automation.pyxis_artifact_io import CrossNodePathBinding
 from hephaestus.automation.source_worktree import _PreparationDeadline
 
 

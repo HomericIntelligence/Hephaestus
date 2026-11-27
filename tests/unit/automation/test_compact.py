@@ -31,7 +31,7 @@ class TestCompactSession:
     @pytest.fixture(autouse=True)
     def _stable_checkout_identity(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(
-            "hephaestus.automation.agent_config._checkout_identity",
+            "hephaestus.agents.invocation_config._checkout_identity",
             lambda _cwd, *, remaining_timeout=None: "test-checkout",
         )
 
@@ -268,7 +268,7 @@ class TestCompactSessionDiscovery:
             return subprocess.CompletedProcess(cmd, 0, stdout="/checkout/.git\n", stderr="")
 
         with (
-            patch("hephaestus.automation.agent_config.subprocess.run", side_effect=git_seam),
+            patch("hephaestus.agents.invocation_config.subprocess.run", side_effect=git_seam),
             patch("hephaestus.automation.learn.run_subprocess") as provider,
         ):
             result = compact_session(
@@ -302,7 +302,7 @@ class TestCompactSessionDiscovery:
             return subprocess.CompletedProcess(cmd, 0, stdout="/checkout/.git\n", stderr="")
 
         with (
-            patch("hephaestus.automation.agent_config.subprocess.run", side_effect=git_seam),
+            patch("hephaestus.agents.invocation_config.subprocess.run", side_effect=git_seam),
             patch("hephaestus.automation.learn.run_subprocess") as provider,
         ):
             result = compact_session(
@@ -667,7 +667,7 @@ class TestCompactTranscriptPreservation:
     ) -> None:
         """Each provider route keeps its isolated transcript fixture byte-identical."""
         monkeypatch.setattr(
-            "hephaestus.automation.agent_config._checkout_identity",
+            "hephaestus.agents.invocation_config._checkout_identity",
             lambda _cwd, *, remaining_timeout=None: "test-checkout",
         )
         sentinel = b'{"type":"message","text":"original turn"}\n' + (b"x" * 4096)

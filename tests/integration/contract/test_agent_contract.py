@@ -7,9 +7,9 @@ from pathlib import Path
 
 import pytest
 
+from hephaestus.agents.claude_invoke import invoke_claude_with_session
 from hephaestus.agents.runtime import is_agent_authenticated
 from hephaestus.automation.agent_config import AGENT_PLANNER
-from hephaestus.automation.claude_invoke import invoke_claude_with_session
 
 pytestmark = [pytest.mark.integration, pytest.mark.contract]
 
