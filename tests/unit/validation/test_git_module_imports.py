@@ -53,11 +53,11 @@ MOVERS = frozenset(
 # The ``git_utils`` -> ``commit_runtime`` pair retired when ``commit_runtime``
 # moved into the library (issue #3512, W2 slice 2). The ``worktree_manager`` ->
 # ``git_utils`` pair retired when ``git_utils`` moved into the library (issue
-# #3512, W2 slice 3).
+# #3512, W2 slice 3). The ``worktree_manager`` -> ``repo_intake`` pair retired
+# when ``repo_intake`` moved into the library (issue #3512, W2 slice 4).
 INTERNAL_ALLOWED = frozenset(
     {
         ("source_worktree", "worktree_manager"),
-        ("worktree_manager", "repo_intake"),
     }
 )
 

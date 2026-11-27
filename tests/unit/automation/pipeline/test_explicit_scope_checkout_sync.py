@@ -27,7 +27,7 @@ from hephaestus.automation.pipeline.stage_base import Stage
 from hephaestus.automation.pipeline.stages.repo import RepoIssueSource
 from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
 from hephaestus.automation.pipeline.worker_pool import WorkerPool
-from hephaestus.automation.repo_intake import RepoIntakeManager
+from hephaestus.git.repo_intake import RepoIntakeManager
 from tests.unit.automation.pipeline.conftest import FakeWorkerPool, fake_worker_factories
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
 

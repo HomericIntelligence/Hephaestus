@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from hephaestus.automation.repo_intake import RepoIntakeError
 from hephaestus.automation.source_worktree import SourceWorkspaceManager
+from hephaestus.git.repo_intake import RepoIntakeError
 from tests.unit.automation.test_repo_intake import _make_repository, _manager, _run_git
 
 
@@ -76,7 +76,7 @@ def test_intake_worker_base_rejects_a_redirected_build_directory(tmp_path: Path)
 @pytest.mark.precommit
 def test_intake_worker_base_survives_launch_cleanup(tmp_path: Path) -> None:
     """The durable registration still answers after its launch intake is gone."""
-    from hephaestus.automation.repo_intake import intake_worker_base
+    from hephaestus.git.repo_intake import intake_worker_base
     from hephaestus.git.runtime import git_metadata_lock_path
 
     caller, remote = _make_repository(tmp_path)
@@ -95,7 +95,7 @@ def test_intake_worker_base_survives_launch_cleanup(tmp_path: Path) -> None:
 @pytest.mark.precommit
 def test_intake_worker_base_rejects_a_foreign_active_launch_root(tmp_path: Path) -> None:
     """A root from an earlier launch cannot satisfy the worker-base equality."""
-    from hephaestus.automation.repo_intake import intake_worker_base
+    from hephaestus.git.repo_intake import intake_worker_base
     from hephaestus.git.runtime import git_metadata_lock_path
 
     caller, remote = _make_repository(tmp_path)

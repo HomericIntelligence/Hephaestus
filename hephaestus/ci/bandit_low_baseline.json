@@ -88,7 +88,7 @@
     "hephaestus/automation/podman_machine_supervisor.py::B404": 1,
     "hephaestus/automation/podman_machine_supervisor.py::B603": 1,
     "hephaestus/automation/reconcile_implementation_labels.py::B404": 1,
-    "hephaestus/automation/repo_intake.py::B404": 1,
+    "hephaestus/git/repo_intake.py::B404": 1,
     "hephaestus/automation/source_worktree.py::B404": 1,
     "hephaestus/automation/source_worktree.py::B603": 1,
     "hephaestus/automation/source_worktree.py::B607": 1,

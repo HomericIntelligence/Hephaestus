@@ -11,7 +11,7 @@ from pathlib import Path
 import hephaestus.automation.pipeline.coordinator_types as ct
 import hephaestus.automation.pipeline.implementer_checkpoint as _checkpoint
 from hephaestus.automation.pipeline.jobs import AgentJob, GitJob, JobHandle, JobResult
-from hephaestus.automation.repo_intake import RepoIntakeError, RepoIntakeReceipt
+from hephaestus.git.repo_intake import RepoIntakeError, RepoIntakeReceipt
 from hephaestus.resilience import is_transient_subprocess_error
 
 from .athena_skill_jobs import AthenaSkillJob

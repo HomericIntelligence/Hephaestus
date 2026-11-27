@@ -287,11 +287,6 @@ from hephaestus.automation.pipeline_github_review_validation import validation_p
 from hephaestus.automation.podman_machine_supervisor import validate_podman_machine_name
 from hephaestus.automation.prompts._review_rubric import plugin_skills_context
 from hephaestus.automation.rebase_recovery import PendingRebaseStore
-from hephaestus.automation.repo_intake import (
-    RepoIntakeError,
-    RepoIntakeManager,
-    repository_worker_path_is_valid,
-)
 from hephaestus.automation.repository_validation_runtime import (
     AdmittedRuntime,
     admit_execution_runtime,
@@ -345,6 +340,11 @@ from hephaestus.git.gh.rate_limit import OperationDeadlineExpired
 from hephaestus.git.remote_git import (
     trusted_gh_executable as _shared_trusted_gh_executable,
     trusted_remote_git_config as _shared_trusted_remote_git_config,
+)
+from hephaestus.git.repo_intake import (
+    RepoIntakeError,
+    RepoIntakeManager,
+    repository_worker_path_is_valid,
 )
 from hephaestus.git.runtime import (
     current_operation_shutdown,

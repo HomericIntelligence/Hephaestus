@@ -67,12 +67,12 @@ from hephaestus.automation.pipeline.stages.durable_request import PENDING_GITHUB
 from hephaestus.automation.pipeline.stages.implementation import DIRTY_RECOVERY_WAIT
 from hephaestus.automation.pipeline.work_item import ItemKind, ItemResult, WorkItem
 from hephaestus.automation.pipeline.worker_pool import WorkerPool
-from hephaestus.automation.repo_intake import (
+from hephaestus.automation.source_worktree import SourceWorkspaceManager
+from hephaestus.automation.state_labels import STATE_NEEDS_PLAN
+from hephaestus.git.repo_intake import (
     RepoIntakeError,
     RepoIntakeManager,
 )
-from hephaestus.automation.source_worktree import SourceWorkspaceManager
-from hephaestus.automation.state_labels import STATE_NEEDS_PLAN
 from hephaestus.resilience import (
     all_circuit_breaker_snapshots,
     get_circuit_breaker,

@@ -129,7 +129,6 @@ from hephaestus.automation.pipeline.worker_pool import (
     _verifier_owned_runtime_environment,
 )
 from hephaestus.automation.prompts.pr_review import PrReviewPromptSizeError
-from hephaestus.automation.repo_intake import RepoIntakeError, RepoIntakeManager
 from hephaestus.automation.source_worktree import (
     SourceWorkspaceCreationError,
     SourceWorkspaceError,
@@ -153,6 +152,7 @@ from hephaestus.config.child_environments import (
 )
 from hephaestus.git import git_utils
 from hephaestus.git.commit_runtime import CommitIssueMetadata
+from hephaestus.git.repo_intake import RepoIntakeError, RepoIntakeManager
 from hephaestus.git.runtime import operation_file_lock
 from hephaestus.git.snapshot import _terminate_bounded_process_tree
 from hephaestus.git.writer import ImplementationWriterHandoff
