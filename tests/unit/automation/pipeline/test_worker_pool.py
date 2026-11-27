@@ -1245,7 +1245,7 @@ def test_codex_boundary_failure_blocks_commit_and_push(pool: WorkerPool, tmp_pat
 
     with (
         patch(
-            "hephaestus.automation.codex_adapter_admission.admit_codex_adapter",
+            "hephaestus.agents.codex_adapter_admission.admit_codex_adapter",
             return_value=MagicMock(),
         ) as admit,
         patch(
@@ -1291,7 +1291,7 @@ def test_issue_2472_unplanned_paths_warn_without_blocking_codex_publication(
             "worktree_path": tmp_path,
             "branch": "2472-auto-impl",
             "agent": "codex",
-            "allowed_paths": ("hephaestus/automation/claude_invoke.py",),
+            "allowed_paths": ("hephaestus/agents/claude_invoke.py",),
             "scope_history_base_sha": base_sha,
         },
     )
@@ -1585,7 +1585,7 @@ def test_codex_implementation_builds_one_frozen_admitted_request(
             return_value=boundary,
         ),
         patch(
-            "hephaestus.automation.codex_adapter_admission.admit_codex_adapter",
+            "hephaestus.agents.codex_adapter_admission.admit_codex_adapter",
             return_value=admission,
         ),
         patch(f"{_WP}.stage_linux_executable", return_value=staged),
@@ -4250,7 +4250,7 @@ class TestWorkerPoolSubmitComplete:
             patch(f"{_WP}._validate_pyxis_image", return_value=metadata),
             patch(f"{_WP}._validate_pyxis_quota_root", return_value=tmp_path),
             patch(
-                "hephaestus.automation.pyxis_artifact_io._require_trusted_ancestry",
+                "hephaestus.agents.pyxis_artifact_io._require_trusted_ancestry",
                 side_effect=fixture_ancestry,
             ),
             patch(f"{_WP}._stage_verified_pyxis_image", return_value=metadata) as stage_image,
@@ -20793,7 +20793,7 @@ class TestShutdownReapsSubprocess:
         subprocess kept running. Now the child is spawned via the real
         ``_run_tracked`` (process group + registry) and SIGTERMed on shutdown.
         """
-        from hephaestus.automation import claude_invoke
+        from hephaestus.agents import claude_invoke
 
         started = threading.Event()
         real_run_tracked = claude_invoke._run_tracked
@@ -23269,7 +23269,7 @@ def test_repository_validation_linux_mounts_runtime_read_only(
         patch(f"{_WP}._validate_pyxis_image", return_value=metadata),
         patch(f"{_WP}._validate_pyxis_quota_root", return_value=tmp_path),
         patch(
-            "hephaestus.automation.pyxis_artifact_io._require_trusted_ancestry",
+            "hephaestus.agents.pyxis_artifact_io._require_trusted_ancestry",
             side_effect=fixture_ancestry,
         ),
         patch(f"{_WP}._stage_verified_pyxis_image", return_value=metadata),

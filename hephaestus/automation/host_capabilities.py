@@ -16,6 +16,7 @@ from dataclasses import asdict, replace
 from pathlib import Path
 
 import hephaestus.automation.pipeline.host_verification_pyxis as host_verification_pyxis
+from hephaestus.agents.pyxis_artifact_io import CrossNodePathBinding
 from hephaestus.automation.direct_review_recovery import _write_receipt
 from hephaestus.automation.models import DEFAULT_STATE_DIR
 from hephaestus.automation.pipeline.diagnostics import redact_diagnostic_text
@@ -29,7 +30,6 @@ from hephaestus.automation.pipeline.host_capabilities import (
     SigningConfigurationError,
 )
 from hephaestus.automation.pipeline.jobs import JobResult
-from hephaestus.automation.pyxis_artifact_io import CrossNodePathBinding
 from hephaestus.automation.source_worktree import _PreparationDeadline
 from hephaestus.config.child_environments import read_approved_parent_env
 

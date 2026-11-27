@@ -16,7 +16,7 @@ from typing import Any
 
 import pytest
 
-from hephaestus.automation import codex_adapter_admission as admission
+from hephaestus.agents import codex_adapter_admission as admission
 
 pytestmark = [
     pytest.mark.integration,

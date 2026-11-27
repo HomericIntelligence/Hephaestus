@@ -30,7 +30,7 @@ def test_provider_accepts_arbitrary_model(agent: str) -> None:
 
 def test_unset_codex_model_uses_tool_default() -> None:
     """An omitted model does not inject a named default into a new session."""
-    assert runtime._codex_model_args("", use_default=True) == []
+    assert runtime._codex_model_args("") == []
 
 
 def test_model_parser_preserves_case_and_former_alias() -> None:

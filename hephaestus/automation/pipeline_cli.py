@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import logging
 import os
-import re
 import subprocess
 import sys
 import tempfile
@@ -17,6 +16,7 @@ from pathlib import Path
 from threading import Event
 
 from hephaestus._version_lookup import get_version
+from hephaestus.agents.catalog import UnsupportedAgentError
 from hephaestus.agents.runtime import resolve_agent
 from hephaestus.automation._review_utils import build_automation_parser
 from hephaestus.automation.event_log_io import (
@@ -552,13 +552,13 @@ def _error_exit(args: argparse.Namespace, message: str, json_message: str | None
     return 1
 
 
-def _localize_cli_error(message: str | None) -> str:
-    """Translate an authored CLI error and preserve external error text."""
+def _localize_cli_error(message: str | BaseException | None) -> str:
+    """Translate one CLI error through its type, not through its wording."""
     if message is None:
         return ""
-    if match := re.fullmatch(r"Unsupported agent: (?P<agent>.+)", message):
-        return text("Unsupported agent: %(agent)s", **match.groupdict())
-    return text(message)
+    if isinstance(message, UnsupportedAgentError):
+        return text("Unsupported agent: %(agent)s", agent=message.agent)
+    return text(str(message))
 
 
 def _parse_stages(value: str) -> tuple[StageName, ...]:
@@ -1018,7 +1018,7 @@ def _run(args: argparse.Namespace, *, profile: str) -> int:
     try:
         args.agent, role_agents = resolve_role_agents(args, active_roles, resolver=resolve_agent)
     except ValueError as exc:
-        build_parser(profile=profile).error(_localize_cli_error(str(exc)))
+        build_parser(profile=profile).error(_localize_cli_error(exc))
     for role, provider in role_agents.items():
         setattr(args, f"{role}_agent", provider)
     org, repos, error = _resolve_org_and_repos(args)

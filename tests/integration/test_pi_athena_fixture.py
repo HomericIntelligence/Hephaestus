@@ -274,7 +274,7 @@ def test_successful_pr_backed_learn_fixture(tmp_path: Path) -> None:
             side_effect=AssertionError("learning must not run Pi smoke"),
         ) as pi_smoke,
         patch(
-            "hephaestus.automation.claude_invoke.invoke_claude_with_session",
+            "hephaestus.agents.claude_invoke.invoke_claude_with_session",
             side_effect=AssertionError("learning must not invoke Claude"),
         ) as claude,
         patch(
