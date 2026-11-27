@@ -58,7 +58,7 @@ MOVERS = frozenset(
 # ``source_worktree`` -> ``worktree_manager`` pair retired when ``worktree_manager``
 # moved into the library (issue #3512, W2 slice 5). No internal mover-to-mover
 # edges remain in the product layer.
-INTERNAL_ALLOWED = frozenset()
+INTERNAL_ALLOWED: frozenset[tuple[str, str]] = frozenset()
 
 _LIB_ROOT = Path(hephaestus.__file__).parent
 _AUTOMATION_ROOT = _LIB_ROOT / "automation"

@@ -79,17 +79,17 @@ def test_product_callers_bind_relocated_objects_by_identity(caller: str, name: s
 def test_module_patch_points_resolve_at_the_new_path() -> None:
     """Verify retargeted string patch points resolve at the new lookup path."""
     with patch("hephaestus.git.worktree_manager.run") as run_mock:
-        assert worktree_manager.run is run_mock
+        assert cast(Any, worktree_manager).run is run_mock
     with patch("hephaestus.git.worktree_manager.get_repo_root") as repo_root_mock:
-        assert worktree_manager.get_repo_root is repo_root_mock
+        assert cast(Any, worktree_manager).get_repo_root is repo_root_mock
     with patch("hephaestus.git.worktree_manager.is_clean_working_tree") as clean_mock:
-        assert worktree_manager.is_clean_working_tree is clean_mock
+        assert cast(Any, worktree_manager).is_clean_working_tree is clean_mock
     with patch("hephaestus.git.worktree_manager.operation_file_lock") as lock_mock:
-        assert worktree_manager.operation_file_lock is lock_mock
+        assert cast(Any, worktree_manager).operation_file_lock is lock_mock
     with patch("hephaestus.git.worktree_manager.run_subprocess") as subprocess_mock:
-        assert worktree_manager.run_subprocess is subprocess_mock
+        assert cast(Any, worktree_manager).run_subprocess is subprocess_mock
     with patch("hephaestus.git.worktree_manager.shutil.rmtree") as rmtree_mock:
-        assert worktree_manager.shutil.rmtree is rmtree_mock
+        assert cast(Any, worktree_manager).shutil.rmtree is rmtree_mock
 
 
 def test_worktree_manager_does_not_import_the_product_layer() -> None:
