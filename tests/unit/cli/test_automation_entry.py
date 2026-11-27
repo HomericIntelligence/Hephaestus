@@ -26,6 +26,7 @@ ENTRY_POINTS: dict[str, str] = {
     "review_prs_main": "hephaestus.automation.pr_reviewer",
     "ensure_state_labels_main": "hephaestus.automation.ensure_state_labels",
     "reconcile_implementation_labels_main": "hephaestus.automation.reconcile_implementation_labels",
+    "learn_main": "hephaestus.cli.learn",
 }
 
 

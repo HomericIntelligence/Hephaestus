@@ -25,6 +25,7 @@ __all__ = [
     "automation_loop_main",
     "ensure_state_labels_main",
     "implement_issues_main",
+    "learn_main",
     "plan_issues_main",
     "reconcile_implementation_labels_main",
     "review_prs_main",
@@ -84,6 +85,11 @@ def implement_issues_main(argv: list[str] | None = None) -> int:
 def review_prs_main(argv: list[str] | None = None) -> int:
     """Entry point for the ``hephaestus-review-prs`` console script."""
     return _run("hephaestus.automation.pr_reviewer", argv)
+
+
+def learn_main(argv: list[str] | None = None) -> int:
+    """Entry point for the ``hephaestus-learn`` console script."""
+    return _run("hephaestus.cli.learn", argv)
 
 
 def ensure_state_labels_main(argv: list[str] | None = None) -> int:

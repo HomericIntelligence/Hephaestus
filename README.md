@@ -318,7 +318,7 @@ remaining narrowly approved runtime variables and the deny-by-default policy.
 
 Run any command with `--help` to see full usage.
 
-The 60 console scripts are declared in `[project.scripts]` in
+The 61 console scripts are declared in `[project.scripts]` in
 [`pyproject.toml`](pyproject.toml).
 
 ### Automation
@@ -453,6 +453,7 @@ sync (#993).
 | `hephaestus-gh` | Run `gh` through Hephaestus retry, circuit-breaker, and throttle handling |
 | `hephaestus-github-stats` | GitHub contribution statistics via the `gh` CLI |
 | `hephaestus-label-severity` | Reconcile the `severity:*` label for a GitHub issue from its issue-form Severity answer |
+| `hephaestus-learn` | Resume a session by id and run one learn turn; durable delivery stays queue-owned |
 | `hephaestus-tidy` | Clean merged branches; `--rebase-all` enables rebases and agent conflict resolution |
 | `hephaestus-prepare-worktree` | Safely create an isolated worktree at an attested start point |
 | `hephaestus-audit-worktrees` | Emit a read-only inventory of registered worktrees |

@@ -29,6 +29,7 @@ import os
 import re
 import signal
 import subprocess
+import threading
 from collections.abc import Callable
 from pathlib import Path
 
@@ -43,9 +44,10 @@ from hephaestus.agents.invocation_config import (
 from hephaestus.agents.model_selection import parse_model_selection
 from hephaestus.agents.session_errors import AgentSessionLostError
 from hephaestus.config.child_environments import build_claude_child_env
+from hephaestus.errors import ExternalToolError
 from hephaestus.git.gh.client import ClaudeUsageCapError, PromptTooLongError
 from hephaestus.git.gh.rate_limit import resolve_quota_reset_epoch
-from hephaestus.utils.helpers import strip_null_bytes
+from hephaestus.utils.helpers import run_subprocess, strip_null_bytes
 
 logger = logging.getLogger(__name__)
 
@@ -290,6 +292,75 @@ def invoke_claude_with_session(
             _record_model_cap(effective, fallback)
             return _attempt(fallback)
     return stdout, sid
+
+
+def resume_claude_session(
+    *,
+    session_id: str,
+    prompt: str,
+    cwd: Path,
+    timeout: int | None = None,
+    remaining_timeout: Callable[[], int] | None = None,
+    shutdown: threading.Event | None = None,
+) -> str:
+    """Resume one existing Claude session and return its turn output.
+
+    The caller supplies the opaque session id. This helper does not derive an
+    id from a repository, an issue, or a role. It sends one prompt into the
+    named transcript through a tracked subprocess.
+
+    Args:
+        session_id: Opaque identifier of an existing Claude session.
+        prompt: Text sent to the resumed session as its next turn.
+        cwd: Project directory that holds the session transcript.
+        timeout: Subprocess timeout in seconds. The shared library default
+            applies when this value is omitted.
+        remaining_timeout: Optional operation deadline and cancellation check.
+        shutdown: Optional cancellation event for the provider subprocess.
+
+    Returns:
+        The stdout of the resumed turn.
+
+    Raises:
+        ValueError: If the session id is empty or contains a NUL byte.
+        AgentSessionLostError: If the named session no longer exists.
+        ExternalToolError: If the CLI fails for any other reason.
+        subprocess.TimeoutExpired: If the call exceeds its deadline.
+
+    """
+    if not isinstance(session_id, str) or not session_id.strip():
+        raise ValueError("session id must be a nonempty string")
+    if "\x00" in session_id:
+        raise ValueError("session id must not contain a NUL byte")
+    effective_timeout = agent_default_timeout() if timeout is None else timeout
+    cmd = [
+        "claude",
+        "--resume",
+        session_id,
+        "--output-format",
+        "text",
+        "--print",
+    ]
+    try:
+        result = run_subprocess(
+            cmd,
+            input_text=strip_null_bytes(prompt),
+            cwd=str(cwd),
+            timeout=effective_timeout,
+            env=build_claude_child_env(),
+            check=True,
+            log_on_error=False,
+            track_process_group=True,
+            shutdown=shutdown,
+            remaining_timeout=remaining_timeout,
+        )
+    except subprocess.CalledProcessError as exc:
+        stderr = _subprocess_stream_text(exc.stderr)
+        stdout = _subprocess_stream_text(exc.stdout)
+        if _session_expired(stderr, stdout):
+            raise AgentSessionLostError(f"Claude session {session_id!r} is missing") from exc
+        raise ExternalToolError(f"claude --resume failed: {describe_claude_failure(exc)}") from exc
+    return result.stdout
 
 
 def _invoke_claude_once(

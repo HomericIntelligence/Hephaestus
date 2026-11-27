@@ -865,6 +865,7 @@ base-importable shim in `hephaestus.cli.automation_entry`. The shim checks for
 the `[automation]` extra: on a base install it reports a configuration error
 with a recovery instruction instead of a raw `ModuleNotFoundError` traceback
 (issue #3528). With the extra, the shim delegates to the automation module.
+`hephaestus-learn` uses the same `[automation]`-extra shim. It resumes a session by id and runs one learn turn outside the queue-owned durable-delivery lane.
 
 | Console script | Entry module | Main stage scope |
 |----------------|--------------|------------------|
