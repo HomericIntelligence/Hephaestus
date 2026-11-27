@@ -9,6 +9,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from hephaestus.agents import invocation_config
+from hephaestus.agents.claude_invoke import invoke_claude_with_session
 from hephaestus.agents.workspace import WorkspaceBinding
 from hephaestus.automation import agent_config
 from hephaestus.automation.agent_config import (
@@ -16,7 +18,6 @@ from hephaestus.automation.agent_config import (
     session_jsonl_path,
     session_uuid,
 )
-from hephaestus.automation.claude_invoke import invoke_claude_with_session
 from hephaestus.automation.pipeline.jobs import AgentJob, JobHandle, JobResult
 from hephaestus.automation.pipeline.routing import StageName
 from hephaestus.automation.pipeline.worker_pool import WorkerPool
@@ -31,7 +32,7 @@ def test_registered_worktree_resolves_repo_root_transcript(
     worktree = repo_root / "build" / ".worktrees" / "issue-2284"
     worktree.mkdir(parents=True)
     monkeypatch.setattr(
-        agent_config,
+        invocation_config,
         "_checkout_identity",
         lambda _cwd, *, remaining_timeout=None: "checkout-family",
     )
@@ -42,7 +43,7 @@ def test_registered_worktree_resolves_repo_root_transcript(
     transcript.write_text("{}\n", encoding="utf-8")
 
     with patch(
-        "hephaestus.automation.agent_config._registered_worktree_roots",
+        "hephaestus.agents.invocation_config._registered_worktree_roots",
         return_value=(repo_root.resolve(), worktree.resolve()),
     ):
         assert agent_config.resolve_session_jsonl_path(sid, worktree) == transcript
@@ -68,12 +69,12 @@ def test_repo_root_turn_then_worker_turn_resumes_same_transcript(
         return MagicMock(stdout="Verdict: GO", stderr="", returncode=0)
 
     monkeypatch.setattr(
-        agent_config,
+        invocation_config,
         "_registered_worktree_roots",
         lambda _cwd, *, remaining_timeout=None: (repo_root.resolve(), worktree.resolve()),
     )
     monkeypatch.setattr(
-        agent_config,
+        invocation_config,
         "_checkout_identity",
         lambda _cwd, *, remaining_timeout=None: "checkout-family",
     )
@@ -89,7 +90,7 @@ def test_repo_root_turn_then_worker_turn_resumes_same_transcript(
     )
     try:
         with (
-            patch("hephaestus.automation.claude_invoke._run_tracked", side_effect=fake_run),
+            patch("hephaestus.agents.claude_invoke._run_tracked", side_effect=fake_run),
             patch(
                 "hephaestus.automation.pipeline.worker_pool.resolve_agent",
                 return_value="claude",

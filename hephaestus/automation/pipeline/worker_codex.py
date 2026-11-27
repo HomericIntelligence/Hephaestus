@@ -12,8 +12,8 @@ from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
+import hephaestus.agents.codex_adapter_admission as codex_adapter_admission
 import hephaestus.agents.runtime as agent_runtime
-import hephaestus.automation.codex_adapter_admission as codex_adapter_admission
 import hephaestus.automation.pipeline.codex_worktree_boundary as codex_worktree_boundary
 from hephaestus.agents.codex_isolation import (
     CodexExecutionPolicyV1,

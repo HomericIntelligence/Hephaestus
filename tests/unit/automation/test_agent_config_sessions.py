@@ -12,6 +12,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from hephaestus.agents import invocation_config
 from hephaestus.automation import agent_config
 from hephaestus.automation.agent_config import (
     AGENT_COMMIT_MESSAGE,
@@ -42,7 +43,7 @@ def non_repo_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
             "GIT_CEILING_DIRECTORIES": str(tmp_path.parent.resolve()),
         }
 
-    monkeypatch.setattr(agent_config, "_repo_scoped_git_env", isolated_git_env)
+    monkeypatch.setattr(invocation_config, "_repo_scoped_git_env", isolated_git_env)
     return tmp_path
 
 
@@ -248,7 +249,7 @@ class TestSessionUUID:
             "e17008d36888029c191703d4285805b8b5f8567805ed625ede5fc882f039ad79"
         )
         monkeypatch.setattr(
-            agent_config,
+            invocation_config,
             "_checkout_identity",
             lambda cwd, *, remaining_timeout=None: "CHECKOUT",
         )
@@ -265,7 +266,7 @@ class TestSessionUUID:
         worktree.mkdir(parents=True)
 
         with patch(
-            "hephaestus.automation.agent_config.subprocess.run",
+            "hephaestus.agents.invocation_config.subprocess.run",
             return_value=MagicMock(stdout=f"{common_dir}\n"),
         ):
             root_sid = session_uuid("Repo", 2284, AGENT_PLANNER, "fable", cwd=repo_root)
@@ -282,7 +283,7 @@ class TestSessionUUID:
         dotted.mkdir(parents=True)
         dashed.mkdir(parents=True)
         monkeypatch.setattr(
-            "hephaestus.automation.agent_config._checkout_identity",
+            "hephaestus.agents.invocation_config._checkout_identity",
             lambda cwd, *, remaining_timeout=None: str(cwd.resolve()),
         )
 
@@ -418,7 +419,7 @@ class TestSessionJsonlPath:
         transcript.write_text("{}\n", encoding="utf-8")
 
         with patch(
-            "hephaestus.automation.agent_config._registered_worktree_roots",
+            "hephaestus.agents.invocation_config._registered_worktree_roots",
             return_value=(repo_root.resolve(), worktree.resolve()),
         ):
             assert resolve_session_jsonl_path(sid, repo_root) == transcript
@@ -441,7 +442,7 @@ class TestSessionJsonlPath:
         foreign_transcript.write_text("{}\n", encoding="utf-8")
 
         with patch(
-            "hephaestus.automation.agent_config._registered_worktree_roots",
+            "hephaestus.agents.invocation_config._registered_worktree_roots",
             return_value=(local.resolve(), local_worktree.resolve()),
         ):
             resolved = resolve_session_jsonl_path(sid, local_worktree)
@@ -471,7 +472,7 @@ class TestSessionJsonlPath:
 
         git_failure = subprocess.CalledProcessError(128, ["git"])
         with patch(
-            "hephaestus.automation.agent_config.subprocess.run",
+            "hephaestus.agents.invocation_config.subprocess.run",
             side_effect=git_failure,
         ):
             dotted_sid = session_uuid("Repo", 2284, AGENT_PLAN_REVIEWER, "fable", cwd=dotted)
@@ -486,7 +487,7 @@ class TestSessionJsonlPath:
         dashed_path.parent.mkdir(parents=True, exist_ok=True)
         dashed_path.write_text("{}\n", encoding="utf-8")
         with patch(
-            "hephaestus.automation.agent_config._registered_worktree_roots",
+            "hephaestus.agents.invocation_config._registered_worktree_roots",
             return_value=(dotted.resolve(),),
         ):
             resolved = resolve_session_jsonl_path(dotted_sid, dotted)
@@ -498,7 +499,7 @@ class TestSessionJsonlPath:
         dotted_path.parent.mkdir(parents=True, exist_ok=True)
         dotted_path.write_text("{}\n", encoding="utf-8")
         with patch(
-            "hephaestus.automation.agent_config._registered_worktree_roots",
+            "hephaestus.agents.invocation_config._registered_worktree_roots",
             return_value=(dotted.resolve(), dotted_worktree.resolve()),
         ):
             assert resolve_session_jsonl_path(dotted_sid, dotted_worktree) == dotted_path
@@ -519,7 +520,7 @@ class TestSessionJsonlPath:
         )
 
         with patch(
-            "hephaestus.automation.agent_config.subprocess.run",
+            "hephaestus.agents.invocation_config.subprocess.run",
             return_value=MagicMock(stdout=output),
         ) as run:
             roots = agent_config._registered_worktree_roots(worktree)
@@ -573,7 +574,7 @@ class TestSessionJsonlPath:
         sid = session_uuid("Repo", 2284, AGENT_PLAN_REVIEWER, "fable")
 
         with patch(
-            "hephaestus.automation.agent_config.subprocess.run",
+            "hephaestus.agents.invocation_config.subprocess.run",
             side_effect=subprocess.CalledProcessError(128, ["git"]),
         ) as run:
             assert resolve_session_jsonl_path(sid, cwd) == session_jsonl_path(sid, cwd)
@@ -596,7 +597,7 @@ class TestSessionJsonlPath:
             path.write_text("{}\n", encoding="utf-8")
 
         with patch(
-            "hephaestus.automation.agent_config._registered_worktree_roots",
+            "hephaestus.agents.invocation_config._registered_worktree_roots",
             return_value=tuple(root.resolve() for root in (repo_root, worktree_a, worktree_b)),
         ):
             expected = min(paths, key=str)
@@ -636,7 +637,7 @@ class TestTranscriptWorktreeLifecycle:
         removed_worktree.rmdir()
 
         with patch(
-            "hephaestus.automation.agent_config._registered_worktree_roots",
+            "hephaestus.agents.invocation_config._registered_worktree_roots",
             return_value=(repo_root.resolve(), replacement_worktree.resolve()),
         ):
             assert resolve_session_jsonl_path(sid, replacement_worktree) == transcript
@@ -656,7 +657,7 @@ class TestTranscriptWorktreeLifecycle:
         transcript.write_text(f'{{"cwd": "{repo_root.resolve()}"}}\n', encoding="utf-8")
 
         with patch(
-            "hephaestus.automation.agent_config._registered_worktree_roots",
+            "hephaestus.agents.invocation_config._registered_worktree_roots",
             return_value=(repo_root.resolve(), replacement.resolve()),
         ):
             assert resolve_session_jsonl_path(sid, replacement) == transcript
@@ -675,7 +676,7 @@ class TestTranscriptWorktreeLifecycle:
         transcript.write_text(f'{{"cwd": "{worktree.resolve()}"}}\n', encoding="utf-8")
 
         with patch(
-            "hephaestus.automation.agent_config._registered_worktree_roots",
+            "hephaestus.agents.invocation_config._registered_worktree_roots",
             return_value=(repo_root.resolve(), worktree.resolve()),
         ):
             assert resolve_session_jsonl_path(sid, worktree) == transcript
@@ -695,7 +696,7 @@ class TestTranscriptWorktreeLifecycle:
         transcript.write_text(f'{{"cwd": "{repo_root.resolve()}"}}\n', encoding="utf-8")
 
         with patch(
-            "hephaestus.automation.agent_config._registered_worktree_roots",
+            "hephaestus.agents.invocation_config._registered_worktree_roots",
             return_value=(repo_root.resolve(), sibling_worktree.resolve()),
         ):
             assert resolve_session_jsonl_path(sid, sibling_worktree) == transcript
@@ -712,7 +713,7 @@ class TestTranscriptWorktreeLifecycle:
         transcript.write_text(f'{{"cwd": "{cwd.resolve()}"}}\n', encoding="utf-8")
 
         with patch(
-            "hephaestus.automation.agent_config.subprocess.run",
+            "hephaestus.agents.invocation_config.subprocess.run",
             side_effect=subprocess.CalledProcessError(128, ["git"]),
         ):
             assert resolve_session_jsonl_path("session-id", cwd) == transcript

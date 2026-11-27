@@ -14,7 +14,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from hephaestus.automation.codex_adapter_admission import _ISOLATED_ADAPTER_HELPER
+from hephaestus.agents.codex_adapter_admission import _ISOLATED_ADAPTER_HELPER
 
 
 @pytest.fixture
