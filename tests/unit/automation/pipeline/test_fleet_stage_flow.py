@@ -208,7 +208,7 @@ def test_fleet_rejects_other_model_dispatch_branches_before_worker_submission(
 
 def test_fleet_commit_uses_existing_deterministic_message_without_provider(tmp_path, monkeypatch):
     """The controlled commit path must not create a hidden model turn."""
-    from hephaestus.automation import commit_runtime
+    from hephaestus.git import commit_runtime
 
     coordinator, _, _, binding, loop, _ = _stage_case(tmp_path)
     provider = Mock(return_value='{"subject":"feat: Provider-generated message","body":""}')

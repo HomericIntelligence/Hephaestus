@@ -13,7 +13,6 @@ import pytest
 
 import hephaestus.git.runtime as git_runtime
 from hephaestus.automation import git_utils
-from hephaestus.automation.commit_runtime import CommitIssueMetadata
 from hephaestus.automation.git_utils import (
     BranchPublicationError,
     BranchPublicationRemoteHeadChangedError,
@@ -37,6 +36,7 @@ from hephaestus.automation.git_utils import (
     safe_git_fetch,
     sync_worktree_to_remote_branch,
 )
+from hephaestus.git.commit_runtime import CommitIssueMetadata
 
 
 @pytest.mark.parametrize(

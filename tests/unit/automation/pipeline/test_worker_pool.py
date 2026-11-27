@@ -55,7 +55,6 @@ from hephaestus.automation.agent_config import (
     AGENT_IMPLEMENTER,
     AGENT_PR_REVIEWER,
 )
-from hephaestus.automation.commit_runtime import CommitIssueMetadata
 from hephaestus.automation.host_capabilities import ValidatedSigningProvider
 from hephaestus.automation.models import DEFAULT_STATE_DIR
 from hephaestus.automation.pipeline import worker_pool as worker_pool_module
@@ -152,6 +151,7 @@ from hephaestus.config.child_environments import (
     build_git_child_env,
     build_nested_host_verification_env,
 )
+from hephaestus.git.commit_runtime import CommitIssueMetadata
 from hephaestus.git.runtime import operation_file_lock
 from hephaestus.git.snapshot import _terminate_bounded_process_tree
 from hephaestus.git.writer import ImplementationWriterHandoff
@@ -16411,7 +16411,7 @@ class TestGitOps:
             patch.object(pool, "_host_capabilities", _validated_signing_capabilities()),
             patch(f"{_WP}._read_host_git_signing_config", return_value=signing),
             patch(
-                "hephaestus.automation.commit_runtime._generate_commit_message",
+                "hephaestus.git.commit_runtime._generate_commit_message",
                 return_value="test: keep hooks active",
             ),
         ):

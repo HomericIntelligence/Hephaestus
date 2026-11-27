@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from hephaestus.automation import commit_runtime as pr_manager
+from hephaestus.git import commit_runtime as pr_manager
 
 _GIT_REPO_ENV_KEYS = (
     "GIT_DIR",

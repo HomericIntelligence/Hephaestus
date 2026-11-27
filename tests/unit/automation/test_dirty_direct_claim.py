@@ -798,7 +798,7 @@ def test_dirty_publication_missing_runner_preserves_before_stage(tmp_path: Path)
         host_capabilities=WorkerCapabilities(None, "unit-worker", FakeSigningProvider()),
     )
     try:
-        with patch("hephaestus.automation.commit_runtime._stage_commit_paths") as stage:
+        with patch("hephaestus.git.commit_runtime._stage_commit_paths") as stage:
             result = pool._run_git(
                 GitJob(
                     repo="project",
@@ -871,7 +871,7 @@ def test_failed_commit_helper_cannot_advance_dirty_receipt(tmp_path: Path) -> No
                 return_value=build_git_child_env(),
             ),
             patch(
-                "hephaestus.automation.commit_runtime._commit_with_signature",
+                "hephaestus.git.commit_runtime._commit_with_signature",
                 side_effect=fail_after_commit,
             ),
         ):
@@ -967,7 +967,7 @@ def test_dirty_publication_preserves_exact_scope_and_lease(
                 return_value=build_git_child_env(),
             ),
             patch(
-                "hephaestus.automation.commit_runtime._commit_with_signature", side_effect=commit
+                "hephaestus.git.commit_runtime._commit_with_signature", side_effect=commit
             ) as commit_call,
             patch.object(pool, "_is_exact_recovery_commit", return_value=True),
             patch.object(
