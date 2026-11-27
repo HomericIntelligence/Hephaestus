@@ -315,8 +315,8 @@ are library members. `hephaestus/fleet/` holds the contained runtime, the build
 controller, and the worker entry points. It does not import
 `hephaestus.automation`. Fleet code that needs Git capture or deadline helpers
 imports `hephaestus.git`. The Git library also holds the relocated lifecycle
-modules: config safety, commit paths and policy, remote Git, runtime, snapshot,
-and writer.
+modules: config safety, commit paths and policy, commit runtime, remote Git,
+runtime, snapshot, and writer.
 
 ---
 
@@ -2117,7 +2117,7 @@ touch `WorkItem`s or stage queues. GitHub I/O is allowed only through the
 closed typed runner; generic worker code does not import the GitHub
 implementation.
 
-The neutral `commit_runtime` module owns commit staging, message validation,
+The neutral `hephaestus/git/commit_runtime.py` module owns commit staging, message validation,
 signing, and commit creation. Pipeline stages put immutable issue title and
 body values in each job. The Git worker calls this neutral commit interface;
 it does not fetch issue data through an old commit adapter.

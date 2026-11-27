@@ -13,7 +13,7 @@ from unittest.mock import Mock
 import pytest
 
 from hephaestus.agents.workspace import DirtyPlanIdentity, SourceLane, WorkspaceBinding
-from hephaestus.automation import commit_runtime, source_worktree
+from hephaestus.automation import source_worktree
 from hephaestus.automation.pipeline import worker_pool
 from hephaestus.automation.pipeline.git_jobs import GitJob
 from hephaestus.automation.pipeline.github_jobs import DirtyDirectPrStateRead
@@ -27,6 +27,7 @@ from hephaestus.automation.source_worktree import (
     SourceWorkspacePreparationError,
 )
 from hephaestus.config.child_environments import build_git_child_env
+from hephaestus.git import commit_runtime
 from hephaestus.git.snapshot import _dirty_worktree_content_snapshot
 from hephaestus.utils.file_lock import file_lock
 from tests.unit.agents.test_dirty_workspace import _claim

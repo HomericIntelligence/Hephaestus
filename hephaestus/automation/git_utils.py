@@ -17,12 +17,12 @@ from pathlib import Path
 from typing import Any
 
 import hephaestus.git.runtime as _git_runtime
-from hephaestus.automation.commit_runtime import (
+from hephaestus.constants import agent_git_timeout
+from hephaestus.git.commit_runtime import (
     CommitIssueMetadata,
     CommitMessageAgent,
     commit_changes as _commit_changes,
 )
-from hephaestus.constants import agent_git_timeout
 from hephaestus.utils.git import _is_full_commit_sha
 from hephaestus.utils.retry import retry_with_backoff
 

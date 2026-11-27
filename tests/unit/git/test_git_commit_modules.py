@@ -44,8 +44,8 @@ def test_commit_policy_helpers_are_callable_from_the_library() -> None:
 
 def test_product_callers_bind_the_relocated_objects() -> None:
     """Verify consumers keep the same object as the relocated definition."""
-    from hephaestus.automation import commit_runtime
     from hephaestus.automation.pipeline.stages.implementation import implementation
+    from hephaestus.git import commit_runtime
     from hephaestus.git.commit_paths import parse_porcelain_status
     from hephaestus.git.commit_policy import normalize_strict_conventional_title
 

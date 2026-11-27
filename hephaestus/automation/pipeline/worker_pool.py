@@ -9091,7 +9091,7 @@ class WorkerPool:
 
     def _git_publish_dirty_direct_continuation(self, job: GitJob) -> JobResult:
         """Publish one consumed dirty turn under the complete writer lock set."""
-        from hephaestus.automation.commit_runtime import _commit_with_signature, _stage_commit_paths
+        from hephaestus.git.commit_runtime import _commit_with_signature, _stage_commit_paths
 
         phase = "pre_stage"
         committed = False
