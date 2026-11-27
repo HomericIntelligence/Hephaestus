@@ -64,7 +64,7 @@ def _patch_run_and_repo_root(module: str) -> Generator[GitMocks]:
 @pytest.fixture
 def git_utils_mocks() -> Generator[GitMocks]:
     """Mock ``run`` + ``get_repo_root`` as seen by ``git_utils`` (#1417)."""
-    yield from _patch_run_and_repo_root("hephaestus.automation.git_utils")
+    yield from _patch_run_and_repo_root("hephaestus.git.git_utils")
 
 
 @pytest.fixture

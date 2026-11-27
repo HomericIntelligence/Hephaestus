@@ -12,8 +12,7 @@ from unittest.mock import patch
 
 import pytest
 
-from hephaestus.automation import git_utils
-from hephaestus.git import snapshot as worktree_snapshot
+from hephaestus.git import git_utils, snapshot as worktree_snapshot
 from hephaestus.git.snapshot import _path_content_identity
 
 

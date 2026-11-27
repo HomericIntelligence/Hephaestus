@@ -30,9 +30,9 @@ def test_commit_metadata_rejects_an_invalid_issue_number() -> None:
         commit_runtime.CommitIssueMetadata(number=0, title="feat: add helper", body="")
 
 
-def test_product_caller_binds_the_relocated_commit_changes() -> None:
-    """Verify the product-layer helper keeps the same commit function object."""
-    from hephaestus.automation import git_utils
+def test_relocated_helper_binds_the_commit_changes() -> None:
+    """Verify the relocated helper keeps the same commit function object."""
+    from hephaestus.git import git_utils
 
     assert cast(Any, git_utils)._commit_changes is commit_runtime.commit_changes
 

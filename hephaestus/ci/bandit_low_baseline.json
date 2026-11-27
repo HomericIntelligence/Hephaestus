@@ -28,7 +28,7 @@
     "hephaestus/agents/codex_adapter_admission.py::B603": 1,
     "hephaestus/automation/current_plan.py::B404": 1,
     "hephaestus/automation/ensure_state_labels.py::B404": 1,
-    "hephaestus/automation/git_utils.py::B404": 1,
+    "hephaestus/git/git_utils.py::B404": 1,
     "hephaestus/automation/github_api/__init__.py::B404": 1,
     "hephaestus/automation/github_api/cache.py::B404": 1,
     "hephaestus/automation/github_api/cache.py::B603": 1,

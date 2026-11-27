@@ -2,7 +2,7 @@
 
 Replaces ad-hoc module-level ``dict`` caches that have a TOCTOU race between
 the membership check and the assignment, and that never expire. Used by
-``hephaestus.automation.git_utils`` for repo-info/slug memoization.
+``hephaestus.git.git_utils`` for repo-info/slug memoization.
 """
 
 from __future__ import annotations

@@ -13,14 +13,13 @@ from unittest.mock import Mock
 
 import pytest
 
-from hephaestus.automation import git_utils
 from hephaestus.automation.pipeline import repository_lock
 from hephaestus.automation.pipeline.git_jobs import GitJob
 from hephaestus.automation.pipeline.job_results import JobResult
 from hephaestus.automation.pipeline.repository_lock import RepositoryOperationLock
 from hephaestus.automation.pipeline.worker_pool import WorkerPool
 from hephaestus.automation.pipeline_github import PipelineGitHub
-from hephaestus.git import runtime as git_runtime
+from hephaestus.git import git_utils, runtime as git_runtime
 from hephaestus.utils.file_lock import LockUnavailableError, file_lock
 
 

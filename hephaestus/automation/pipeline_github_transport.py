@@ -18,7 +18,6 @@ from hephaestus.automation._review_utils import (
     get_pr_head_branch,
     has_exact_closing_line,
 )
-from hephaestus.automation.git_utils import issue_auto_impl_branch_name
 from hephaestus.automation.github_api import gh_call
 from hephaestus.automation.github_api.graphql import (
     GraphQLMutationSpec,
@@ -52,6 +51,7 @@ from hephaestus.automation.state_labels import (
     has_label,
     is_implementation_go,
 )
+from hephaestus.git.git_utils import issue_auto_impl_branch_name
 from hephaestus.utils.file_lock import LockUnavailableError, file_lock
 
 from .operation_deadlines import GitHubCommandRunner, PipelineGitHubDeadlineMixin

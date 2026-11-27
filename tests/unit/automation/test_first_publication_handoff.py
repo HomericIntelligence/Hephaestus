@@ -13,13 +13,13 @@ from typing import Any
 import pytest
 
 from hephaestus.agents.workspace import SourceLane
-from hephaestus.automation import git_utils
 from hephaestus.automation.pipeline.git_jobs import GitJob
 from hephaestus.automation.pipeline.worker_pool import _RemoteGitAuthenticationError
 from hephaestus.automation.source_worktree import (
     SourceWorkspaceManager,
     _PreparationDeadline,
 )
+from hephaestus.git import git_utils
 from tests.unit.automation.pipeline.test_worker_pool import _git
 from tests.unit.automation.test_first_publication_admission import _retain_failed_publication
 from tests.unit.automation.test_first_publication_process import _pool, _publication_job

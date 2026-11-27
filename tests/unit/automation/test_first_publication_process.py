@@ -18,13 +18,13 @@ from typing import Any
 import pytest
 
 from hephaestus.agents.workspace import SourceLane
-from hephaestus.automation import git_utils
 from hephaestus.automation.first_publication_recovery import FirstPublicationStore
 from hephaestus.automation.pipeline.git_jobs import GitJob
 from hephaestus.automation.pipeline.host_capabilities import WorkerCapabilities
 from hephaestus.automation.pipeline.worker_pool import WorkerPool
 from hephaestus.automation.source_worktree import SourceWorkspaceManager
 from hephaestus.config.child_environments import build_git_child_env
+from hephaestus.git import git_utils
 from tests.unit.automation.pipeline.conftest import FakeSigningProvider
 from tests.unit.automation.pipeline.test_worker_pool import _git, _worker_repository
 from tests.unit.automation.test_rebase_recovery import (

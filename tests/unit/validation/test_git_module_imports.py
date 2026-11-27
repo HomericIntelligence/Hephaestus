@@ -51,11 +51,12 @@ MOVERS = frozenset(
 # retired with #3509; the ``commit_paths`` and ``commit_policy`` pairs retired
 # when those modules moved into ``hephaestus.git`` (issue #3512, W2 slice 1).
 # The ``git_utils`` -> ``commit_runtime`` pair retired when ``commit_runtime``
-# moved into the library (issue #3512, W2 slice 2).
+# moved into the library (issue #3512, W2 slice 2). The ``worktree_manager`` ->
+# ``git_utils`` pair retired when ``git_utils`` moved into the library (issue
+# #3512, W2 slice 3).
 INTERNAL_ALLOWED = frozenset(
     {
         ("source_worktree", "worktree_manager"),
-        ("worktree_manager", "git_utils"),
         ("worktree_manager", "repo_intake"),
     }
 )

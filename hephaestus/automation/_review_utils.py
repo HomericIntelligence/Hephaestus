@@ -20,9 +20,9 @@ from hephaestus.cli.utils import (
     add_logging_args,
     add_version_arg,
 )
+from hephaestus.git.git_utils import issue_auto_impl_branch_name
 from hephaestus.prompts import add_prompt_dir_argument
 
-from .git_utils import issue_auto_impl_branch_name
 from .github_api import _gh_call
 from .models import DEFAULT_STATE_DIR as DEFAULT_STATE_DIR, DEFAULT_WORKER_COUNT
 from .review_json_blocks import json_block_bodies
