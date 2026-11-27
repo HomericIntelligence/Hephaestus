@@ -4,6 +4,9 @@ from pathlib import Path
 from hephaestus.agents.execution_policy import AgentOperation, AgentRole, ExecutionRequest
 from hephaestus.agents.workspace import SourceLane
 from hephaestus.automation.prompts.pr_review import build_bounded_review_validation_prompt
+from hephaestus.git.verification import (
+    EMPTY_HOST_VERIFICATIONS_JSON as EMPTY_HOST_VERIFICATIONS_JSON,
+)
 
 from ...coordinator_sessions import agent_session_lifecycle
 from ...github_jobs import FrozenJson, GitHubJob, PrReviewReconciled, ReconcilePrReviewRequest
@@ -117,7 +120,7 @@ class PrReviewPost(_PrReviewHost):
                 "pr_title": pr_context.get("pr_title", ""),
                 "pr_description": pr_context.get("pr_description", ""),
                 "repository_validation_json": "",
-                "host_verifications_json": "[]",
+                "host_verifications_json": EMPTY_HOST_VERIFICATIONS_JSON,
                 "review_context_kind": _review_context_kind(item),
             },
             descr="validate",

@@ -7,6 +7,11 @@ from hephaestus.agents.execution_policy import (
 from hephaestus.agents.workspace import SourceLane
 from hephaestus.automation.prompts.pr_review import build_bounded_pr_review_analysis_prompt
 from hephaestus.automation.source_worktree import SourceWorkspaceError
+from hephaestus.git.verification import (
+    EMPTY_HOST_VERIFICATION_BOOTSTRAP_JSON as EMPTY_HOST_VERIFICATION_BOOTSTRAP_JSON,
+    EMPTY_HOST_VERIFICATIONS_JSON as EMPTY_HOST_VERIFICATIONS_JSON,
+    HOST_VERIFICATION_WORKSPACE_KEY as HOST_VERIFICATION_WORKSPACE_KEY,
+)
 
 from ...coordinator_sessions import agent_session_lifecycle
 from ...diagnostics import redact_diagnostic_text
@@ -83,7 +88,7 @@ class PrReviewJobs(_PrReviewHost):
 
     def on_enter(self, item: WorkItem, ctx: StageContext) -> StageOutcome | None:
         """Reset the round state when a new implementation pass starts."""
-        for key in ("host_verification_workspace",):
+        for key in (HOST_VERIFICATION_WORKSPACE_KEY,):
             item.payload.pop(key, None)
         if item.pr is not None:
             item.payload.pop("reviewed_pr_head_sha", None)
@@ -353,8 +358,8 @@ class PrReviewJobs(_PrReviewHost):
                 "pr_description": item.payload.get("pr_description", ""),
                 "advise_findings": item.payload.get("advise_findings", ""),
                 "repository_validation_json": "",
-                "host_verifications_json": "[]",
-                "host_verification_bootstrap_json": "",
+                "host_verifications_json": EMPTY_HOST_VERIFICATIONS_JSON,
+                "host_verification_bootstrap_json": EMPTY_HOST_VERIFICATION_BOOTSTRAP_JSON,
                 "include_nitpicks": ctx.config.nitpick,
                 "review_context_kind": _review_context_kind(item),
                 "reviewer_provider": reviewer_agent,
