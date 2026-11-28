@@ -355,6 +355,10 @@ The [Fleet worker contract](docs/fleet-worker.md) describes the separate
 app-server adapter, private attachment, and recovery limits. Fleet does not
 change the existing queue's label or publication authority.
 
+The [Codex attention adapter](docs/fleet-codex-attention.md) observes unmanaged
+interactive Codex sessions through private hook metadata. It emits sanitized
+Odysseus observations without task, conversation-control, or approval authority.
+
 The [private build-log service](docs/fleet-build-artifacts.md) supplies retained
 output to Agamemnon. Its operator configuration binds existing evidence; it
 does not grant build execution or prove producer deployment.
