@@ -7,7 +7,7 @@ import os
 import subprocess
 from unittest.mock import MagicMock, patch
 
-from hephaestus.github.skill_pr_review import (
+from hephaestus.git.github.skill_pr_review import (
     _git_read_environment,
     collect_pr_evidence_main,
     pr_diff_context_main,
@@ -84,8 +84,8 @@ def test_git_read_environment_is_a_named_minimal_allowlist(monkeypatch) -> None:
     assert "HEPH_GH_TIMEOUT" not in environment
 
 
-@patch("hephaestus.github.skill_pr_review.configure_github_throttle_from_args")
-@patch("hephaestus.github.skill_pr_review.gh_call")
+@patch("hephaestus.git.github.skill_pr_review.configure_github_throttle_from_args")
+@patch("hephaestus.git.github.skill_pr_review.gh_call")
 def test_resolve_pr_emits_open_pr_metadata_after_repository_identity_check(
     mock_gh_call: MagicMock, _mock_throttle: MagicMock, capsys
 ) -> None:
@@ -122,8 +122,8 @@ def test_resolve_pr_emits_open_pr_metadata_after_repository_identity_check(
     assert mock_gh_call.call_args_list[0].args[0][:3] == ["pr", "view", "42"]
 
 
-@patch("hephaestus.github.skill_pr_review.configure_github_throttle_from_args")
-@patch("hephaestus.github.skill_pr_review.gh_call")
+@patch("hephaestus.git.github.skill_pr_review.configure_github_throttle_from_args")
+@patch("hephaestus.git.github.skill_pr_review.gh_call")
 def test_resolve_pr_reports_foreign_pr_as_an_operational_error(
     mock_gh_call: MagicMock, _mock_throttle: MagicMock, capsys
 ) -> None:
@@ -154,7 +154,7 @@ def test_resolve_pr_reports_foreign_pr_as_an_operational_error(
     assert "does not belong to target repository" in capsys.readouterr().err
 
 
-@patch("hephaestus.github.skill_pr_review.configure_github_throttle_from_args")
+@patch("hephaestus.git.github.skill_pr_review.configure_github_throttle_from_args")
 def test_resolve_pr_rejects_numeric_identifier_without_explicit_target(
     _mock_throttle: MagicMock, capsys
 ) -> None:
@@ -164,8 +164,8 @@ def test_resolve_pr_rejects_numeric_identifier_without_explicit_target(
     assert "require --target-host and --target-repository" in capsys.readouterr().err
 
 
-@patch("hephaestus.github.skill_pr_review.configure_github_throttle_from_args")
-@patch("hephaestus.github.skill_pr_review.gh_call")
+@patch("hephaestus.git.github.skill_pr_review.configure_github_throttle_from_args")
+@patch("hephaestus.git.github.skill_pr_review.gh_call")
 def test_resolve_pr_rejects_non_immutable_provider_revisions(
     mock_gh_call: MagicMock, _mock_throttle: MagicMock, capsys
 ) -> None:
@@ -200,8 +200,8 @@ def test_resolve_pr_rejects_non_immutable_provider_revisions(
     assert "lowercase 40-hex Git commit OID" in capsys.readouterr().err
 
 
-@patch("hephaestus.github.skill_pr_review.configure_github_throttle_from_args")
-@patch("hephaestus.github.skill_pr_review.gh_call")
+@patch("hephaestus.git.github.skill_pr_review.configure_github_throttle_from_args")
+@patch("hephaestus.git.github.skill_pr_review.gh_call")
 def test_collect_evidence_keeps_pending_checks_and_paginated_paths(
     mock_gh_call: MagicMock, _mock_throttle: MagicMock, capsys
 ) -> None:
@@ -242,8 +242,8 @@ def test_collect_evidence_keeps_pending_checks_and_paginated_paths(
     assert "--slurp" in mock_gh_call.call_args_list[2].args[0]
 
 
-@patch("hephaestus.github.skill_pr_review.configure_github_throttle_from_args")
-@patch("hephaestus.github.skill_pr_review.gh_call")
+@patch("hephaestus.git.github.skill_pr_review.configure_github_throttle_from_args")
+@patch("hephaestus.git.github.skill_pr_review.gh_call")
 def test_collect_evidence_preserves_newline_in_changed_filename(
     mock_gh_call: MagicMock, _mock_throttle: MagicMock, capsys
 ) -> None:
@@ -275,8 +275,8 @@ def test_collect_evidence_preserves_newline_in_changed_filename(
     assert json.loads(capsys.readouterr().out)["changed_files"] == [filename]
 
 
-@patch("hephaestus.github.skill_pr_review.configure_github_throttle_from_args")
-@patch("hephaestus.github.skill_pr_review.gh_call")
+@patch("hephaestus.git.github.skill_pr_review.configure_github_throttle_from_args")
+@patch("hephaestus.git.github.skill_pr_review.gh_call")
 def test_collect_evidence_rejects_partial_metadata_as_json(
     mock_gh_call: MagicMock, _mock_throttle: MagicMock, capsys
 ) -> None:
@@ -308,8 +308,8 @@ def test_collect_evidence_rejects_partial_metadata_as_json(
     assert "body" in payload["details"]
 
 
-@patch("hephaestus.github.skill_pr_review.configure_github_throttle_from_args")
-@patch("hephaestus.github.skill_pr_review.gh_call")
+@patch("hephaestus.git.github.skill_pr_review.configure_github_throttle_from_args")
+@patch("hephaestus.git.github.skill_pr_review.gh_call")
 def test_collect_evidence_reports_github_failures_as_json(
     mock_gh_call: MagicMock, _mock_throttle: MagicMock, capsys
 ) -> None:
@@ -325,7 +325,7 @@ def test_collect_evidence_reports_github_failures_as_json(
     }
 
 
-@patch("hephaestus.github.skill_pr_review.run_git")
+@patch("hephaestus.git.github.skill_pr_review.run_git")
 def test_diff_context_uses_the_supplied_base_for_both_lenses(
     mock_run_git: MagicMock, capsys
 ) -> None:
@@ -362,7 +362,7 @@ def test_diff_context_uses_the_supplied_base_for_both_lenses(
     assert first_call.kwargs["env"]["GIT_NO_REPLACE_OBJECTS"] == "1"
 
 
-@patch("hephaestus.github.skill_pr_review.run_git")
+@patch("hephaestus.git.github.skill_pr_review.run_git")
 def test_diff_context_reports_invalid_refs_as_json(mock_run_git: MagicMock, capsys) -> None:
     """Diff context keeps invalid Git references machine-readable."""
     mock_run_git.return_value = _completed(stderr="unknown revision", returncode=128)
@@ -376,7 +376,7 @@ def test_diff_context_reports_invalid_refs_as_json(mock_run_git: MagicMock, caps
     }
 
 
-@patch("hephaestus.github.skill_pr_review.configure_github_throttle_from_args")
+@patch("hephaestus.git.github.skill_pr_review.configure_github_throttle_from_args")
 def test_resolve_pr_json_error_is_machine_readable(_mock_throttle: MagicMock, capsys) -> None:
     """The standard --json error contract is available for orchestrators."""
     assert (
@@ -398,7 +398,7 @@ def test_resolve_pr_json_error_is_machine_readable(_mock_throttle: MagicMock, ca
     assert "invalid pull-request identifier" in payload["message"]
 
 
-@patch("hephaestus.github.skill_pr_review.configure_github_throttle_from_args")
+@patch("hephaestus.git.github.skill_pr_review.configure_github_throttle_from_args")
 def test_resolve_pr_human_error_uses_stable_template(_mock_throttle: MagicMock, capsys) -> None:
     """Translate an authored resolution error and keep its runtime identifier."""
     from hephaestus.cli.localization import using_localizer
@@ -421,8 +421,8 @@ def test_resolve_pr_human_error_uses_stable_template(_mock_throttle: MagicMock, 
     assert "identifiant de demande non valide : 'invalid'" in capsys.readouterr().err
 
 
-@patch("hephaestus.github.skill_pr_review.configure_github_throttle_from_args")
-@patch("hephaestus.github.skill_pr_review.gh_call")
+@patch("hephaestus.git.github.skill_pr_review.configure_github_throttle_from_args")
+@patch("hephaestus.git.github.skill_pr_review.gh_call")
 def test_resolve_pr_rejects_missing_immutable_refs_as_json(
     mock_gh_call: MagicMock, _mock_throttle: MagicMock, capsys
 ) -> None:

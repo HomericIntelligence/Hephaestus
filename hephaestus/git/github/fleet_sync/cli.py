@@ -20,14 +20,14 @@ from hephaestus.cli.utils import (
 )
 from hephaestus.errors import boundary_main
 from hephaestus.git.gh.client import positive_timeout
-from hephaestus.github.fleet_sync.config import resolve_fleet_config
-from hephaestus.github.fleet_sync.models import (
+from hephaestus.git.github.fleet_sync.config import resolve_fleet_config
+from hephaestus.git.github.fleet_sync.models import (
     ASCII_SYMBOLS,
     DEFAULT_FLEET_TIMEOUTS,
     UNICODE_SYMBOLS,
     FleetTimeouts,
 )
-from hephaestus.github.fleet_sync.sync_coordinator import process_repo
+from hephaestus.git.github.fleet_sync.sync_coordinator import process_repo
 from hephaestus.prompts import add_prompt_dir_argument
 
 logger = logging.getLogger(__name__)

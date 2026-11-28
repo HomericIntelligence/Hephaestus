@@ -191,7 +191,7 @@ Normal comparison mode never rewrites the baseline.
 
 Because this repository exposes no network service, there is no in-process
 request rate limiter. The one external-call surface is the GitHub API
-(`hephaestus.github`, `hephaestus.automation`); callers there rely on the
+(`hephaestus.git.github`, `hephaestus.automation`); callers there rely on the
 GitHub client's built-in retry/backoff and on GitHub's own per-token rate
 limits. Downstream services that embed these utilities are responsible for
 applying their own rate limiting and abuse controls at their request edge.

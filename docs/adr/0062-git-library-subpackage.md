@@ -4,6 +4,8 @@
 - Date: 2026-11-09
 - Tracks: #3504
 
+> Path names in this ADR are historical. The GitHub library tree now lives under `hephaestus/git/github/` after #3514.
+
 ## Context
 
 Epic #3504 groups the Git-facing modules into one library subpackage. Today

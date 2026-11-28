@@ -38,15 +38,15 @@ from hephaestus.config.child_environments import build_git_child_env, build_remo
 from hephaestus.errors import boundary_main
 from hephaestus.git.config_safety import unsafe_local_git_config_key
 from hephaestus.git.gh.client import gh_call, positive_timeout
-from hephaestus.git.runtime import operation_file_lock
-from hephaestus.github.remote_git import (
+from hephaestus.git.github.remote_git import (
     add_gh_extra_path_root_arg,
     trusted_gh_authenticated,
     trusted_gh_executable,
     trusted_remote_git_config,
 )
-from hephaestus.github.skill_pr_review import repository_from_pr_url, validate_pr_identifier
-from hephaestus.github.skill_worktrees import reject_symlinks_below
+from hephaestus.git.github.skill_pr_review import repository_from_pr_url, validate_pr_identifier
+from hephaestus.git.github.skill_worktrees import reject_symlinks_below
+from hephaestus.git.runtime import operation_file_lock
 from hephaestus.utils.git import GitPreLaunchError, run_git
 
 #: The receipt schema owned by this module. Field sets are exact.

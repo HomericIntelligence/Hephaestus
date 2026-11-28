@@ -6,8 +6,8 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from hephaestus.github.fleet_sync.gpg import get_resign_exec
-from hephaestus.github.fleet_sync.models import (
+from hephaestus.git.github.fleet_sync.gpg import get_resign_exec
+from hephaestus.git.github.fleet_sync.models import (
     DEFAULT_FLEET_TIMEOUTS,
     UNICODE_SYMBOLS,
     FleetTimeouts,

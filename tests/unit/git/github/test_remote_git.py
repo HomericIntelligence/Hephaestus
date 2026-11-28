@@ -9,7 +9,7 @@ from unittest.mock import patch
 import pytest
 
 from hephaestus.config.child_environments import build_git_signing_env, build_remote_git_env
-from hephaestus.github.remote_git import (
+from hephaestus.git.github.remote_git import (
     TrustedRemoteGit,
     gh_extra_path_root_type,
     trusted_gh_authenticated,
@@ -36,15 +36,15 @@ def test_remote_credentials_are_not_local(tokens: dict[str, str]) -> None:
 def test_missing_auth_never_runs_git(tmp_path: Path, failure: str) -> None:
     with (
         patch(
-            "hephaestus.github.remote_git.trusted_gh_executable",
+            "hephaestus.git.github.remote_git.trusted_gh_executable",
             return_value=None if failure == "gh" else "/trusted/gh",
         ),
         patch(
-            "hephaestus.github.remote_git.trusted_gh_authenticated",
+            "hephaestus.git.github.remote_git.trusted_gh_authenticated",
             return_value=failure != "login",
         ),
         patch(
-            "hephaestus.github.remote_git.trusted_remote_git_config",
+            "hephaestus.git.github.remote_git.trusted_remote_git_config",
             return_value=None if failure == "ssh" else ("-c", "credential.helper=trusted"),
         ),
         patch("hephaestus.utils.helpers.run_subprocess") as run,
@@ -66,10 +66,10 @@ def test_missing_auth_never_runs_git(tmp_path: Path, failure: str) -> None:
 )
 def test_remote_failures_remove_diagnostics(tmp_path: Path, failure: object) -> None:
     with (
-        patch("hephaestus.github.remote_git.trusted_gh_executable", return_value="/trusted/gh"),
-        patch("hephaestus.github.remote_git.trusted_gh_authenticated", return_value=True),
+        patch("hephaestus.git.github.remote_git.trusted_gh_executable", return_value="/trusted/gh"),
+        patch("hephaestus.git.github.remote_git.trusted_gh_authenticated", return_value=True),
         patch(
-            "hephaestus.github.remote_git.trusted_remote_git_config",
+            "hephaestus.git.github.remote_git.trusted_remote_git_config",
             return_value=("-c", "credential.helper=trusted"),
         ),
         patch(

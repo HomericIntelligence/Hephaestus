@@ -7,7 +7,7 @@ import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from hephaestus.github.repository_evidence import repository_evidence_main
+from hephaestus.git.github.repository_evidence import repository_evidence_main
 
 
 def _completed(
@@ -25,7 +25,7 @@ def _git(cwd: Path, *arguments: str) -> str:
     return result.stdout.strip()
 
 
-@patch("hephaestus.github.repository_evidence.run_git")
+@patch("hephaestus.git.github.repository_evidence.run_git")
 def test_repository_evidence_collects_a_ten_commit_window_and_matches(
     mock_run_git: MagicMock, capsys
 ) -> None:
@@ -56,7 +56,7 @@ def test_repository_evidence_collects_a_ten_commit_window_and_matches(
     ]
 
 
-@patch("hephaestus.github.repository_evidence.run_git")
+@patch("hephaestus.git.github.repository_evidence.run_git")
 def test_repository_evidence_reports_an_unborn_head_without_a_traceback(
     mock_run_git: MagicMock, capsys
 ) -> None:

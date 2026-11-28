@@ -15,7 +15,7 @@ CWE-94 issue-body injection class). The server-controlled issue number is
 validated numeric before use.
 
 Usage:
-    python -m hephaestus.github.severity_label \
+    python -m hephaestus.git.github.severity_label \
       --repo owner/name --issue-number 42 --body-file issue-body.md
 """
 

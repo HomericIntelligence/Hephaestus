@@ -91,19 +91,6 @@
             "python": "${workspaceFolder}/.venv/bin/python",
             "cwd": "${workspaceFolder}",
             "justMyCode": false
-        },
-        {
-            "name": "hephaestus-merge-prs --dry-run",
-            "type": "debugpy",
-            "request": "launch",
-            "module": "hephaestus.github.pr_merge",
-            "args": [
-                "--dry-run"
-            ],
-            "console": "integratedTerminal",
-            "python": "${workspaceFolder}/.venv/bin/python",
-            "cwd": "${workspaceFolder}",
-            "justMyCode": false
         }
     ]
 }

@@ -1,4 +1,4 @@
-"""Unit tests for hephaestus.github.tidy — focusing on parse_problem_branches and timeouts."""
+"""Unit tests for hephaestus.git.github.tidy — focusing on parse_problem_branches and timeouts."""
 
 import argparse
 import asyncio
@@ -12,7 +12,7 @@ from unittest.mock import ANY, MagicMock, call, patch
 
 import pytest
 
-from hephaestus.github.tidy import (
+from hephaestus.git.github.tidy import (
     _detect_default_branch,
     _in_git_repo,
     _repo_root,
@@ -20,7 +20,7 @@ from hephaestus.github.tidy import (
     parse_problem_branches,
 )
 
-tidy_module = importlib.import_module("hephaestus.github.tidy")
+tidy_module = importlib.import_module("hephaestus.git.github.tidy")
 
 
 @pytest.mark.parametrize(
@@ -478,7 +478,7 @@ def test_cleanup_stale_worktrees_dry_run_reports_closed_issue_without_removing(
     worktree_path = tmp_path / "123-finished"
     worktree_path.mkdir()
     porcelain = _candidate_worktree_porcelain(tmp_path, worktree_path, "123-finished")
-    caplog.set_level("INFO", logger="hephaestus.github.tidy")
+    caplog.set_level("INFO", logger="hephaestus.git.github.tidy")
     if not hasattr(tidy_module, "_cleanup_stale_worktrees"):
         pytest.fail("tidy does not yet implement stale-worktree cleanup")
     monkeypatch.setattr(tidy_module, "_worktree_porcelain", lambda: porcelain)
@@ -503,7 +503,7 @@ def test_cleanup_stale_worktree_with_space_path(
     spaced_path = tmp_path / "123 finished"
     spaced_path.mkdir()
     porcelain = _candidate_worktree_porcelain(tmp_path, spaced_path, "123-finished")
-    caplog.set_level("INFO", logger="hephaestus.github.tidy")
+    caplog.set_level("INFO", logger="hephaestus.git.github.tidy")
     monkeypatch.setattr(
         tidy_module,
         "_worktree_porcelain",
@@ -532,7 +532,7 @@ def test_cleanup_stale_worktree_with_newline_path(
     newline_path = tmp_path / "123\nfinished"
     newline_path.mkdir()
     porcelain = _candidate_worktree_porcelain(tmp_path, newline_path, "123-finished")
-    caplog.set_level("INFO", logger="hephaestus.github.tidy")
+    caplog.set_level("INFO", logger="hephaestus.git.github.tidy")
     monkeypatch.setattr(
         tidy_module,
         "_worktree_porcelain",
@@ -573,7 +573,7 @@ def test_cleanup_skips_locked_worktree_with_space_path(
             "",
         )
     )
-    caplog.set_level("INFO", logger="hephaestus.github.tidy")
+    caplog.set_level("INFO", logger="hephaestus.git.github.tidy")
     monkeypatch.setattr(
         tidy_module,
         "_worktree_porcelain",
@@ -617,7 +617,7 @@ def test_cleanup_reports_prunable_worktree_as_incomplete(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """A prunable registration requires separate recovery before cleanup."""
-    caplog.set_level("ERROR", logger="hephaestus.github.tidy")
+    caplog.set_level("ERROR", logger="hephaestus.git.github.tidy")
     monkeypatch.setattr(
         tidy_module,
         "_worktree_porcelain",
@@ -638,7 +638,7 @@ def test_cleanup_reports_worktree_inside_git_metadata_as_incomplete(
     metadata_path.mkdir(parents=True)
     porcelain = _candidate_worktree_porcelain(tmp_path, metadata_path, "123-finished")
     is_dirty = MagicMock(side_effect=AssertionError("must not inspect Git metadata"))
-    caplog.set_level("ERROR", logger="hephaestus.github.tidy")
+    caplog.set_level("ERROR", logger="hephaestus.git.github.tidy")
     monkeypatch.setattr(tidy_module, "_worktree_porcelain", lambda: porcelain)
     monkeypatch.setattr(tidy_module, "_issue_is_closed", lambda issue: issue == 123)
     monkeypatch.setattr(tidy_module, "_branch_is_merged", lambda branch, trunk: False)
@@ -666,7 +666,7 @@ def test_cleanup_reports_common_git_metadata_worktree_as_incomplete(
     metadata_path.mkdir(parents=True)
     porcelain = _candidate_worktree_porcelain(linked_root, metadata_path, "123-finished")
     is_dirty = MagicMock(side_effect=AssertionError("must not inspect Git metadata"))
-    caplog.set_level("ERROR", logger="hephaestus.github.tidy")
+    caplog.set_level("ERROR", logger="hephaestus.git.github.tidy")
     monkeypatch.setattr(tidy_module, "_worktree_porcelain", lambda: porcelain)
     monkeypatch.setattr(tidy_module, "_issue_is_closed", lambda issue: issue == 123)
     monkeypatch.setattr(tidy_module, "_branch_is_merged", lambda branch, trunk: False)
@@ -779,7 +779,7 @@ def test_cleanup_rechecks_metadata_before_status(
         return porcelain
 
     is_dirty = MagicMock(side_effect=AssertionError("must not inspect Git metadata"))
-    caplog.set_level("ERROR", logger="hephaestus.github.tidy")
+    caplog.set_level("ERROR", logger="hephaestus.git.github.tidy")
     monkeypatch.setattr(tidy_module, "_worktree_porcelain", worktree_porcelain)
     monkeypatch.setattr(tidy_module, "_issue_is_closed", lambda issue: issue == 123)
     monkeypatch.setattr(tidy_module, "_branch_is_merged", lambda branch, trunk: False)
@@ -822,7 +822,7 @@ def test_cleanup_skips_candidate_that_disappears_before_status(
             "",
         )
     )
-    caplog.set_level("WARNING", logger="hephaestus.github.tidy")
+    caplog.set_level("WARNING", logger="hephaestus.git.github.tidy")
     monkeypatch.setattr(tidy_module, "_worktree_porcelain", lambda: porcelain)
     monkeypatch.setattr(tidy_module, "_issue_is_closed", lambda issue: issue == 123)
     monkeypatch.setattr(tidy_module, "_branch_is_merged", lambda branch, trunk: False)
@@ -849,7 +849,7 @@ def test_cleanup_reports_initial_missing_worktree_as_incomplete(
     porcelain = _candidate_worktree_porcelain(tmp_path, missing_path, "123-finished")
     issue_is_closed = MagicMock()
     branch_is_merged = MagicMock()
-    caplog.set_level("WARNING", logger="hephaestus.github.tidy")
+    caplog.set_level("WARNING", logger="hephaestus.git.github.tidy")
     monkeypatch.setattr(tidy_module, "_worktree_porcelain", lambda: porcelain)
     monkeypatch.setattr(tidy_module, "_issue_is_closed", issue_is_closed)
     monkeypatch.setattr(tidy_module, "_branch_is_merged", branch_is_merged)
@@ -1019,7 +1019,7 @@ def test_cleanup_reports_status_failure_as_incomplete(
     worktree_path = tmp_path / "123-finished"
     worktree_path.mkdir()
     porcelain = _candidate_worktree_porcelain(tmp_path, worktree_path, "123-finished")
-    caplog.set_level("WARNING", logger="hephaestus.github.tidy")
+    caplog.set_level("WARNING", logger="hephaestus.git.github.tidy")
     monkeypatch.setattr(tidy_module, "_worktree_porcelain", lambda: porcelain)
     monkeypatch.setattr(tidy_module, "_issue_is_closed", lambda issue: issue == 123)
     monkeypatch.setattr(tidy_module, "_branch_is_merged", lambda branch, trunk: False)
@@ -1056,7 +1056,7 @@ def test_cleanup_retains_branch_when_conditional_delete_detects_a_new_ref(
             subprocess.CompletedProcess([], 1, stdout="", stderr="ref changed"),
         )
     )
-    caplog.set_level("WARNING", logger="hephaestus.github.tidy")
+    caplog.set_level("WARNING", logger="hephaestus.git.github.tidy")
     monkeypatch.setattr(tidy_module, "_worktree_porcelain", MagicMock(side_effect=(porcelain,) * 3))
     monkeypatch.setattr(tidy_module, "_issue_is_closed", lambda issue: issue == 123)
     monkeypatch.setattr(tidy_module, "_branch_is_merged", lambda branch, trunk: True)
@@ -1101,7 +1101,7 @@ def test_remove_worktree_retains_an_unmerged_inspected_commit(
             subprocess.CompletedProcess([], 0, stdout=f"{trunk_head}\n", stderr=""),
         )
     )
-    caplog.set_level("WARNING", logger="hephaestus.github.tidy")
+    caplog.set_level("WARNING", logger="hephaestus.git.github.tidy")
     monkeypatch.setattr(tidy_module, "run_git", run_git)
     monkeypatch.setattr(tidy_module, "_branch_is_merged", lambda branch, trunk: False)
 
@@ -1127,7 +1127,7 @@ def test_remove_worktree_reports_retained_branch(
     """A conditional branch-delete failure leaves cleanup incomplete and visible."""
     expected_head = "a" * 40
     trunk_head = "b" * 40
-    caplog.set_level("WARNING", logger="hephaestus.github.tidy")
+    caplog.set_level("WARNING", logger="hephaestus.git.github.tidy")
     run_git = MagicMock(
         side_effect=(
             subprocess.CompletedProcess([], 0, stdout="", stderr=""),
@@ -1173,7 +1173,7 @@ def test_remove_worktree_reports_branch_delete_exception(
     """A conditional branch-delete exception leaves cleanup incomplete and visible."""
     expected_head = "a" * 40
     trunk_head = "b" * 40
-    caplog.set_level("WARNING", logger="hephaestus.github.tidy")
+    caplog.set_level("WARNING", logger="hephaestus.git.github.tidy")
     run_git = MagicMock(
         side_effect=(
             subprocess.CompletedProcess([], 0, stdout="", stderr=""),
@@ -1311,7 +1311,7 @@ def test_cleanup_reports_worktree_removal_failure(
     )
     inventories = MagicMock(side_effect=(porcelain, porcelain, porcelain))
     run_git = MagicMock(side_effect=subprocess.CalledProcessError(1, ["git", "worktree", "remove"]))
-    caplog.set_level("WARNING", logger="hephaestus.github.tidy")
+    caplog.set_level("WARNING", logger="hephaestus.git.github.tidy")
     monkeypatch.setattr(tidy_module, "_worktree_porcelain", inventories)
     monkeypatch.setattr(tidy_module, "_issue_is_closed", lambda issue: issue == 123)
     monkeypatch.setattr(tidy_module, "_branch_is_merged", lambda branch, trunk: False)
@@ -1582,7 +1582,7 @@ class TestTidyHandlers:
 
 
 class TestMain:
-    """Smoke tests for hephaestus.github.tidy.main() covering --json branches."""
+    """Smoke tests for hephaestus.git.github.tidy.main() covering --json branches."""
 
     @pytest.mark.usefixtures("require_git_path_format", "require_git_worktree_list_z")
     def test_cleanup_from_linked_worktree_never_targets_primary(
@@ -1675,7 +1675,7 @@ class TestMain:
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         """Inventory failures stop cleanup with one actionable error."""
-        caplog.set_level("ERROR", logger="hephaestus.github.tidy")
+        caplog.set_level("ERROR", logger="hephaestus.git.github.tidy")
         run_git = MagicMock(
             side_effect=failure if isinstance(failure, subprocess.TimeoutExpired) else None,
             return_value=failure if isinstance(failure, subprocess.CompletedProcess) else None,
@@ -1773,7 +1773,7 @@ class TestMain:
             "sys.argv",
             ["hephaestus-tidy", "--cleanup-stale-worktrees", "--agent", "claude"],
         )
-        caplog.set_level("ERROR", logger="hephaestus.github.tidy")
+        caplog.set_level("ERROR", logger="hephaestus.git.github.tidy")
 
         assert tidy_module.main() == 1
         assert "requires Git 2.36 or later" in caplog.text
@@ -2002,35 +2002,35 @@ class TestTimeoutHandling:
 
     def test_working_tree_clean_with_timeout(self) -> None:
         """_working_tree_clean propagates TimeoutExpired."""
-        with patch("hephaestus.github.tidy._shared_working_tree_clean") as shared_clean:
+        with patch("hephaestus.git.github.tidy._shared_working_tree_clean") as shared_clean:
             shared_clean.side_effect = subprocess.TimeoutExpired(["git"], 10)
             with pytest.raises(subprocess.TimeoutExpired):
                 _working_tree_clean()
 
     def test_working_tree_clean_uses_shared_helper(self) -> None:
         """_working_tree_clean routes git status through the shared git helper."""
-        with patch("hephaestus.github.tidy._shared_working_tree_clean") as shared_clean:
+        with patch("hephaestus.git.github.tidy._shared_working_tree_clean") as shared_clean:
             shared_clean.return_value = True
             assert _working_tree_clean() is True
             shared_clean.assert_called_once_with()
 
     def test_in_git_repo_with_timeout(self) -> None:
         """_in_git_repo propagates TimeoutExpired."""
-        with patch("hephaestus.github.tidy._shared_in_git_repo") as shared_in_repo:
+        with patch("hephaestus.git.github.tidy._shared_in_git_repo") as shared_in_repo:
             shared_in_repo.side_effect = subprocess.TimeoutExpired(["git"], 10)
             with pytest.raises(subprocess.TimeoutExpired):
                 _in_git_repo()
 
     def test_in_git_repo_uses_shared_helper(self) -> None:
         """_in_git_repo routes git rev-parse through the shared git helper."""
-        with patch("hephaestus.github.tidy._shared_in_git_repo") as shared_in_repo:
+        with patch("hephaestus.git.github.tidy._shared_in_git_repo") as shared_in_repo:
             shared_in_repo.return_value = True
             assert _in_git_repo() is True
             shared_in_repo.assert_called_once_with()
 
     def test_repo_root_uses_shared_helper(self) -> None:
         """_repo_root routes git root detection through the shared git helper."""
-        with patch("hephaestus.github.tidy._shared_repo_root") as shared_repo_root:
+        with patch("hephaestus.git.github.tidy._shared_repo_root") as shared_repo_root:
             shared_repo_root.return_value = Path("/path/to/repo")
             assert _repo_root() == Path("/path/to/repo")
             shared_repo_root.assert_called_once_with()
@@ -2040,7 +2040,7 @@ class TestTimeoutHandling:
     ) -> None:
         """Removed HEPH_AGENT_REBASE_TIMEOUT is inert; explicit timeout wins."""
         monkeypatch.setenv("HEPH_AGENT_REBASE_TIMEOUT", "1234")
-        with patch("hephaestus.github.tidy.run_agent_text") as run_agent:
+        with patch("hephaestus.git.github.tidy.run_agent_text") as run_agent:
             run_agent.return_value = MagicMock(stdout="rebased")
 
             tidy_module._run_direct_rebase_agent(
@@ -2052,7 +2052,7 @@ class TestTimeoutHandling:
 
     def test_direct_rebase_agent_default_timeout(self) -> None:
         """Default rebase-agent timeout is AGENT_REBASE_TIMEOUT (2400)."""
-        with patch("hephaestus.github.tidy.run_agent_text") as run_agent:
+        with patch("hephaestus.git.github.tidy.run_agent_text") as run_agent:
             run_agent.return_value = MagicMock(stdout="rebased")
 
             tidy_module._run_direct_rebase_agent("codex", "prompt", "feature/a", Path("/repo"))

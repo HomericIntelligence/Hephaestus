@@ -8,7 +8,7 @@ import pytest
 
 from hephaestus.agents.runtime import _pi_env
 from hephaestus.forensics import coredump_handler, gdb_runner
-from hephaestus.github.fleet_sync import cli as fleet_cli
+from hephaestus.git.github.fleet_sync import cli as fleet_cli
 from hephaestus.nats.config import NATSConfig
 
 

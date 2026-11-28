@@ -7,13 +7,13 @@ from unittest.mock import patch
 
 import pytest
 
-from hephaestus.github.fleet_sync import resolve_fleet_config
+from hephaestus.git.github.fleet_sync import resolve_fleet_config
 
 
 @pytest.fixture
 def no_discovered_config():
     """Disable .fleet.yml auto-discovery so env/CLI layers are tested in isolation."""
-    with patch("hephaestus.github.fleet_sync.config._find_default_config", return_value=None):
+    with patch("hephaestus.git.github.fleet_sync.config._find_default_config", return_value=None):
         yield
 
 
@@ -99,7 +99,7 @@ class TestResolveFleetConfig:
         # Mock _find_default_config to return the tmp_path config file
         # This isolates the test from the development environment and makes it portable
         # to installed packages where the bundled .fleet.yml won't exist
-        with patch("hephaestus.github.fleet_sync.config._find_default_config") as mock_find:
+        with patch("hephaestus.git.github.fleet_sync.config._find_default_config") as mock_find:
             mock_find.return_value = cfg
             org, repos = resolve_fleet_config(cli_org=None, cli_repos=None, config_path=None)
 
@@ -123,7 +123,7 @@ class TestResolveFleetConfig:
         Regression for issue #1510: the ValueError→RuntimeError type flip in load_config
         must not cause the 'Failed to load fleet config from {path}' wrapper to be lost.
         """
-        from hephaestus.github import fleet_sync
+        from hephaestus.git.github import fleet_sync
 
         monkeypatch.setitem(sys.modules, "yaml", None)
         cfg = tmp_path / ".fleet.yml"

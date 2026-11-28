@@ -74,7 +74,7 @@ _COMMIT_FORBIDDEN_PREFIXES = (
     "hephaestus.automation.pr_manager",
     "hephaestus.automation.github_api",
     "hephaestus.automation.pipeline_github",
-    "hephaestus.github",
+    "hephaestus.git.github",
 )
 
 
@@ -398,8 +398,8 @@ def test_worker_commit_dependency_closure_excludes_github_product_modules() -> N
         module
         for module in reachable
         if module == "hephaestus.automation.pr_manager"
-        or module == "hephaestus.github"
-        or module.startswith("hephaestus.github.")
+        or module == "hephaestus.git.github"
+        or module.startswith("hephaestus.git.github.")
         or module.startswith("hephaestus.automation.github_api")
         or module.startswith("hephaestus.automation.pipeline_github")
     }

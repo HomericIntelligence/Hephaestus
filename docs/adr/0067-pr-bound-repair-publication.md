@@ -27,7 +27,7 @@ passes CI, because the contamination is correct-by-construction content.
 
 ## Decision
 
-1. `hephaestus/github/skill_pr_worktrees.py` owns two Provisional console
+1. `hephaestus/git/github/skill_pr_worktrees.py` owns two Provisional console
    scripts, `hephaestus-prepare-pr-worktree` and
    `hephaestus-publish-pr-worktree`. Each repair binds to one observed pull
    request through a strict schema-version-1 preparation receipt that records
@@ -62,7 +62,7 @@ passes CI, because the contamination is correct-by-construction content.
    still matches the receipt exactly. There is no automatic rollback after
    confirmed publication.
 6. The trusted remote Git implementation lives in
-   `hephaestus.github.remote_git`. `hephaestus.git.remote_git` is the
+   `hephaestus.git.github.remote_git`. `hephaestus.git.remote_git` is the
    identity-preserving compatibility export, keeping the `automation → library`
    direction from ADR-0001.
 7. The process adapters gain the seams the boundary needs:

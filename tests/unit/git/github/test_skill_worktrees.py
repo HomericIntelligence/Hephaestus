@@ -7,7 +7,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from hephaestus.github.skill_worktrees import (
+from hephaestus.git.github.skill_worktrees import (
     audit_worktrees_main,
     prepare_worktree_main,
     remove_worktree_main,
@@ -237,7 +237,7 @@ def test_audit_worktrees_reports_git_failures_as_json(monkeypatch, capsys) -> No
     """The audit CLI returns its standard JSON error envelope on Git failure."""
     failure = subprocess.CompletedProcess(["git"], 1, stdout="", stderr="not a repository")
     monkeypatch.setattr(
-        "hephaestus.github.skill_worktrees.run_git", lambda *_args, **_kwargs: failure
+        "hephaestus.git.github.skill_worktrees.run_git", lambda *_args, **_kwargs: failure
     )
 
     assert audit_worktrees_main(["--json"]) == 1
@@ -259,7 +259,7 @@ def test_remove_worktree_preserves_a_dirty_worktree(tmp_path: Path, monkeypatch,
     (worktree / "dirty.txt").write_text("dirty\n", encoding="utf-8")
     monkeypatch.chdir(repository)
 
-    with caplog.at_level("WARNING", logger="hephaestus.github.skill_worktrees"):
+    with caplog.at_level("WARNING", logger="hephaestus.git.github.skill_worktrees"):
         assert remove_worktree_main([str(worktree), "--expected-head", expected_head]) == 0
 
     assert worktree.exists()
@@ -282,7 +282,7 @@ def test_remove_worktree_preserves_ignored_user_data(tmp_path: Path, monkeypatch
     monkeypatch.chdir(repository)
 
     try:
-        with caplog.at_level("WARNING", logger="hephaestus.github.skill_worktrees"):
+        with caplog.at_level("WARNING", logger="hephaestus.git.github.skill_worktrees"):
             assert remove_worktree_main([str(worktree), "--expected-head", expected_head]) == 0
         assert worktree.exists()
         assert (worktree / "preserve.ignored").exists()

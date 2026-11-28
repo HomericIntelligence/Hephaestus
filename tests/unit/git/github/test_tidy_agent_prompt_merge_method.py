@@ -1,6 +1,6 @@
 """Regression: tidy agent-prompt template must not arm auto-merge."""
 
-from hephaestus.github import tidy
+from hephaestus.git.github import tidy
 
 
 def test_agent_prompt_does_not_arm_auto_merge() -> None:

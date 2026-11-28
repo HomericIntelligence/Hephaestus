@@ -4,6 +4,8 @@
 - Date: 2026-10-23
 - Tracks: #3358
 
+> The paths below are historical. Live GitHub library code now lives under `hephaestus/git/github/` and `tests/unit/git/github/` after #3514.
+
 ## Context
 
 PR #3340 preserved leftover check-run work from the old issue #2479 checkout;
