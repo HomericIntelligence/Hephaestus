@@ -10,17 +10,17 @@ from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import replace
 
-from hephaestus.automation.mnemosyne_delivery import valid_delivery_receipt
-from hephaestus.git.source_worktree import _PreparationDeadline
-from hephaestus.utils import subprocess_registry
-
-from .athena_skill_jobs import (
+from hephaestus.automation.athena_jobs import (
     AthenaSkillExecutor,
     AthenaSkillJob,
     AthenaSkillResult,
     athena_workspace_lease,
     cleanup_athena_workspace,
 )
+from hephaestus.automation.mnemosyne_delivery import valid_delivery_receipt
+from hephaestus.git.source_worktree import _PreparationDeadline
+from hephaestus.utils import subprocess_registry
+
 from .git_jobs import GitJob
 from .job_results import JobHandle, JobResult
 from .worker_completion import resolve_worker_future

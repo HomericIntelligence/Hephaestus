@@ -9,11 +9,11 @@ from typing import Any
 import pytest
 
 from hephaestus.agents.workspace import SourceLane, WorkspaceBinding
-from hephaestus.automation.learning_journal import LearningJournalStore
-from hephaestus.automation.pipeline.athena_skill_jobs import (
+from hephaestus.automation.athena_jobs import (
     AthenaSkillJob,
     AthenaSkillResult,
 )
+from hephaestus.automation.learning_journal import LearningJournalStore
 from hephaestus.automation.pipeline.jobs import JobResult
 from hephaestus.automation.pipeline.routing import StageName
 from hephaestus.automation.pipeline.stage_base import Disposition

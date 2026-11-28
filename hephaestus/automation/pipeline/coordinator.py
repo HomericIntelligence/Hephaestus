@@ -13,6 +13,7 @@ from pathlib import Path
 
 import hephaestus.automation.pipeline.coordinator_types as ct
 import hephaestus.automation.pipeline.seeding as _seeding
+from hephaestus.automation.athena_jobs import AthenaSkillExecutor
 from hephaestus.automation.host_capabilities import ValidatedSigningProvider, select_quota_backend
 from hephaestus.automation.pipeline.athena_executor_scope import (
     pipeline_requires_athena_executor,
@@ -38,7 +39,6 @@ from hephaestus.automation.pipeline.work_item import (
 )
 from hephaestus.git.git_utils import issue_auto_impl_branch_name
 
-from .athena_skill_jobs import AthenaSkillExecutor
 from .coordinator_dispatch import ImplementationDispatcher
 from .coordinator_execution import ExecutionCoordinator
 from .coordinator_issue_classification import IssueClassificationCoordinator

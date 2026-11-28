@@ -6,10 +6,10 @@ from typing import Any
 
 from hephaestus.agents.workspace import SourceLane
 from hephaestus.automation.agent_config import learn_claude_timeout, learn_model
+from hephaestus.automation.athena_jobs import AthenaSkillJob, AthenaSkillRequest, AthenaSkillResult
 from hephaestus.automation.learning_journal import LearningJournalStore
 from hephaestus.automation.mnemosyne_delivery import valid_delivery_receipt
 
-from ...athena_skill_jobs import AthenaSkillJob, AthenaSkillRequest, AthenaSkillResult
 from ...job_results import JobResult
 from ...routing import Disposition, StageName, StageOutcome
 from ...stage_base import source_workspace_binding, stage_timeout

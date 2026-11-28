@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 
-from hephaestus.automation.pipeline.athena_skill_jobs import AthenaSkillJob, AthenaSkillRequest
+from hephaestus.automation.athena_jobs import AthenaSkillJob, AthenaSkillRequest
 from hephaestus.automation.pipeline.auxiliary_worker_pool import AuxiliaryWorkerPool
 from hephaestus.automation.pipeline.coordinator import Coordinator
 from hephaestus.automation.pipeline.coordinator_types import PipelineConfig

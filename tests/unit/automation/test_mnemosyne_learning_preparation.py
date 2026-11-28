@@ -7,6 +7,7 @@ from pathlib import Path, PurePosixPath
 
 import pytest
 
+from hephaestus.automation.learning_intent import LearningIntent
 from hephaestus.automation.mnemosyne_binding import MnemosyneBindingReceipt
 from hephaestus.automation.mnemosyne_delivery import LearnDeliveryError
 from hephaestus.automation.mnemosyne_learning_preparation import (
@@ -19,7 +20,6 @@ from hephaestus.automation.mnemosyne_learning_preparation import (
     PreparedLearningChange,
     PreparedLearningWorkspace,
 )
-from hephaestus.automation.pipeline.work_item import LearningIntent
 from hephaestus.automation.review_journal import (
     IssueComment,
 )

@@ -23,7 +23,7 @@ from hephaestus.agents.execution_policy import (
 )
 from hephaestus.agents.workspace import SourceLane, WorkspaceBinding
 from hephaestus.automation.agent_config import AGENT_IMPLEMENTER
-from hephaestus.automation.pipeline.athena_skill_jobs import AthenaSkillJob, AthenaSkillResult
+from hephaestus.automation.athena_jobs import AthenaSkillJob, AthenaSkillResult
 from hephaestus.automation.pipeline.github_jobs import (
     CurrentPlanScopeRead,
     GitHubJob,

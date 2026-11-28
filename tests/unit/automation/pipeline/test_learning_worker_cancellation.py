@@ -13,7 +13,7 @@ from typing import Any
 import pytest
 
 from hephaestus.agents.workspace import SourceLane
-from hephaestus.automation.pipeline.athena_skill_jobs import (
+from hephaestus.automation.athena_jobs import (
     AthenaSkillExecutor,
     AthenaSkillJob,
     AthenaSkillRequest,

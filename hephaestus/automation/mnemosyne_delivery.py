@@ -10,13 +10,13 @@ from pathlib import Path
 from typing import Protocol
 from urllib.parse import urlparse
 
+from hephaestus.automation.athena_jobs import (
+    LearnDeliveryError as LearnDeliveryError,
+    valid_delivery_receipt as valid_delivery_receipt,
+)
 from hephaestus.config.child_environments import build_git_signing_env
 from hephaestus.git.github.remote_git import TrustedRemoteGit
 from hephaestus.utils.helpers import NETWORK_TIMEOUT, run_subprocess
-
-
-class LearnDeliveryError(RuntimeError):
-    """Raised when learning cannot be proven by a PR readback receipt."""
 
 
 class LearnGitHub(Protocol):
@@ -341,26 +341,3 @@ class LearnDeliveryService:
                 if line.strip()
             )
         )
-
-
-def valid_delivery_receipt(value: object) -> bool:
-    """Return True when a value is a PR-backed learning receipt."""
-    if isinstance(value, LearnDeliveryReceipt):
-        return bool(
-            value.pr_url
-            and value.pr_number > 0
-            and value.commit_sha
-            and value.readback_head_sha == value.commit_sha
-            and not value.local_only
-        )
-    if isinstance(value, dict):
-        commit_sha = value.get("commit_sha")
-        return bool(
-            value.get("pr_url")
-            and isinstance(value.get("pr_number"), int)
-            and int(value.get("pr_number", 0)) > 0
-            and isinstance(commit_sha, str)
-            and value.get("readback_head_sha") == commit_sha
-            and value.get("local_only") is not True
-        )
-    return False

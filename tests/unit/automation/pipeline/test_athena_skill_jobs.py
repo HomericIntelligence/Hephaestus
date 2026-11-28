@@ -13,7 +13,7 @@ from unittest.mock import patch
 import pytest
 
 from hephaestus.agents.workspace import SourceLane, WorkspaceBinding
-from hephaestus.automation.pipeline.athena_skill_jobs import (
+from hephaestus.automation.athena_jobs import (
     AthenaSkillJob,
     AthenaSkillRequest,
     AthenaSkillResult,

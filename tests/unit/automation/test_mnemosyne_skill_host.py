@@ -11,6 +11,7 @@ from unittest.mock import patch
 import pytest
 
 from hephaestus.automation.athena_contract import AthenaContractReceipt
+from hephaestus.automation.athena_jobs import AthenaSkillRequest
 from hephaestus.automation.mnemosyne_binding import MnemosyneBindingReceipt
 from hephaestus.automation.mnemosyne_corpus import (
     MnemosyneCorpusError,
@@ -26,7 +27,6 @@ from hephaestus.automation.mnemosyne_skill_host import (
     fence_untrusted_context,
     persist_athena_skill_result,
 )
-from hephaestus.automation.pipeline.athena_skill_jobs import AthenaSkillRequest
 
 
 def _contract() -> AthenaContractReceipt:

@@ -8,6 +8,8 @@ from pathlib import Path, PurePosixPath
 from unittest.mock import patch
 
 from hephaestus.automation.athena_contract import AthenaContractReceipt
+from hephaestus.automation.athena_jobs import AthenaSkillRequest
+from hephaestus.automation.learning_intent import LearningIntent
 from hephaestus.automation.mnemosyne_binding import MnemosyneBindingError, MnemosyneBindingReceipt
 from hephaestus.automation.mnemosyne_corpus import MnemosyneCorpusResult
 from hephaestus.automation.mnemosyne_delivery import (
@@ -26,8 +28,6 @@ from hephaestus.automation.mnemosyne_skill_host import (
     DefaultLearnDeliveryBackend,
     MnemosyneSkillHost,
 )
-from hephaestus.automation.pipeline.athena_skill_jobs import AthenaSkillRequest
-from hephaestus.automation.pipeline.work_item import LearningIntent
 
 
 def _contract() -> AthenaContractReceipt:

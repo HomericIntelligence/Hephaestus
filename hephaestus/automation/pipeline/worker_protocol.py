@@ -3,7 +3,8 @@
 from threading import Event
 from typing import Protocol
 
-from .athena_skill_jobs import AthenaSkillJob
+from hephaestus.automation.athena_jobs import AthenaSkillJob
+
 from .github_jobs import GitHubJob
 from .jobs import AgentJob, BuildTestJob, CompactJob, GitJob, JobHandle, JobResult
 from .queues import CompletionQueue

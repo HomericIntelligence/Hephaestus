@@ -23,6 +23,7 @@ from typing import Any, Protocol
 import yaml
 
 from hephaestus.automation.github_api import gh_call
+from hephaestus.automation.learning_intent import LearningIntent, LearningIntentKind
 from hephaestus.automation.mnemosyne_binding import MnemosyneBindingReceipt
 from hephaestus.automation.mnemosyne_delivery import LearnDeliveryError, LearnDeliveryRequest
 from hephaestus.automation.mnemosyne_node_runtime import node_package_tree, node_runtime_files
@@ -30,7 +31,6 @@ from hephaestus.automation.mnemosyne_validator_dependencies import (
     prepare_dependencies,
     run_learning_subprocess,
 )
-from hephaestus.automation.pipeline.work_item import LearningIntent, LearningIntentKind
 from hephaestus.config.child_environments import build_git_child_env
 from hephaestus.git.github.remote_git import TrustedRemoteGit
 from hephaestus.io.utils import write_secure
@@ -634,8 +634,8 @@ class MnemosyneLearningPreparationService:
     ) -> None:
         """Require review when a supplied candidate could duplicate an entry."""
         from hephaestus.automation.athena_contract import load_athena_contract_receipt
+        from hephaestus.automation.athena_jobs import AthenaSkillRequest
         from hephaestus.automation.mnemosyne_corpus_reader import DefaultCorpusReader
-        from hephaestus.automation.pipeline.athena_skill_jobs import AthenaSkillRequest
 
         if not isinstance(source, PostMergeLearningSource) or not source.verification_evidence:
             raise LearnDeliveryError("learning_deferred:implementation_evidence_required")

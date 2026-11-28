@@ -14,6 +14,7 @@ from hephaestus.automation.athena_contract import (
     AthenaContractReceipt,
     load_athena_contract_receipt,
 )
+from hephaestus.automation.athena_jobs import AthenaSkillRequest, AthenaSkillResult
 from hephaestus.automation.github_api import gh_call
 from hephaestus.automation.mnemosyne_binding import (
     MnemosyneBindingError,
@@ -33,7 +34,6 @@ from hephaestus.automation.mnemosyne_delivery import (
 from hephaestus.automation.mnemosyne_learning_preparation import (
     MnemosyneLearningPreparationService,
 )
-from hephaestus.automation.pipeline.athena_skill_jobs import AthenaSkillRequest, AthenaSkillResult
 from hephaestus.io.utils import write_secure
 from hephaestus.utils import subprocess_registry
 
