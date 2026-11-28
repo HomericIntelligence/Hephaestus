@@ -70,11 +70,11 @@ from hephaestus.agents.runtime import (
     agent_uses_configured_model_default,
 )
 from hephaestus.agents.workspace import SourceLane, WorkspaceBinding
+from hephaestus.automation.athena_jobs import AthenaSkillJob, AthenaSkillRequest, AthenaSkillResult
 from hephaestus.automation.operation_deadlines import operation_deadline_after
 from hephaestus.automation.state_labels import STATE_SKIP
 from hephaestus.git.source_worktree import _PreparationDeadline
 
-from .athena_skill_jobs import AthenaSkillJob, AthenaSkillRequest, AthenaSkillResult
 from .events import StageEvent
 from .github_jobs import GitHubJob
 from .jobs import AgentJob, BuildTestJob, CompactJob, GitJob, JobHandle, JobResult

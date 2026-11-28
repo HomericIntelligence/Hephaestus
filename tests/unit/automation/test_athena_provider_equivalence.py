@@ -6,7 +6,7 @@ from __future__ import annotations
 from dataclasses import replace
 from pathlib import Path
 
-from hephaestus.automation.pipeline.athena_skill_jobs import build_athena_skill_request
+from hephaestus.automation.athena_jobs import build_athena_skill_request
 
 
 def test_providers_build_equivalent_advise_requests_except_runtime_adapter(tmp_path: Path) -> None:

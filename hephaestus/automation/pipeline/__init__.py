@@ -14,7 +14,12 @@ from importlib import import_module
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from .athena_skill_jobs import AthenaSkillJob, AthenaSkillRequest, AthenaSkillResult
+    from hephaestus.automation.athena_jobs import (
+        AthenaSkillJob,
+        AthenaSkillRequest,
+        AthenaSkillResult,
+    )
+
     from .auxiliary_worker_pool import AuxiliaryWorkerPool
     from .coordinator import run_pipeline
     from .coordinator_types import PipelineConfig
@@ -76,9 +81,9 @@ __all__ = [
 _LAZY_EXPORTS: dict[str, str] = {
     "RepositoryValidationExecution": "hephaestus.automation.pipeline.repository_validation",
     "AgentJob": "hephaestus.automation.pipeline.jobs",
-    "AthenaSkillJob": "hephaestus.automation.pipeline.athena_skill_jobs",
-    "AthenaSkillRequest": "hephaestus.automation.pipeline.athena_skill_jobs",
-    "AthenaSkillResult": "hephaestus.automation.pipeline.athena_skill_jobs",
+    "AthenaSkillJob": "hephaestus.automation.athena_jobs",
+    "AthenaSkillRequest": "hephaestus.automation.athena_jobs",
+    "AthenaSkillResult": "hephaestus.automation.athena_jobs",
     "AuxiliaryWorkerPool": "hephaestus.automation.pipeline.auxiliary_worker_pool",
     "BuildTestJob": "hephaestus.automation.pipeline.jobs",
     "CompactJob": "hephaestus.automation.pipeline.jobs",

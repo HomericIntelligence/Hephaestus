@@ -8,7 +8,7 @@ from unittest.mock import Mock
 import pytest
 
 from hephaestus.agents.workspace import SourceLane
-from hephaestus.automation.pipeline.athena_skill_jobs import AthenaSkillJob
+from hephaestus.automation.athena_jobs import AthenaSkillJob
 from hephaestus.automation.pipeline.jobs import AgentJob
 from hephaestus.automation.pipeline.stages import JobRequest
 from hephaestus.automation.pipeline.stages.implementation import implementation

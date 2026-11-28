@@ -19,9 +19,9 @@ from typing import Any, TypedDict
 
 import pytest
 
+from hephaestus.automation.athena_jobs import AthenaSkillJob, AthenaSkillResult
 from hephaestus.automation.operation_deadlines import operation_deadline_after
 from hephaestus.automation.pipeline import admission
-from hephaestus.automation.pipeline.athena_skill_jobs import AthenaSkillJob, AthenaSkillResult
 from hephaestus.automation.pipeline.github_jobs import GitHubJob, GitHubJobRunner
 from hephaestus.automation.pipeline.jobs import (
     AgentJob,

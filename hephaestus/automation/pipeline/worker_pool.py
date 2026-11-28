@@ -81,6 +81,12 @@ from hephaestus.agents.workspace import (
     validate_workspace_binding,
 )
 from hephaestus.automation.agent_config import AGENT_COMMIT_MESSAGE
+from hephaestus.automation.athena_jobs import (
+    AthenaSkillExecutor,
+    AthenaSkillJob,
+    AthenaSkillResult,
+    athena_workspace_lease,
+)
 from hephaestus.automation.first_publication_recovery import FirstPublicationStore
 from hephaestus.automation.host_capabilities import (
     QuotaLifecycleError,
@@ -90,12 +96,6 @@ from hephaestus.automation.host_capabilities import (
 )
 from hephaestus.automation.learn import compact_agent_session
 from hephaestus.automation.models import DEFAULT_STATE_DIR
-from hephaestus.automation.pipeline.athena_skill_jobs import (
-    AthenaSkillExecutor,
-    AthenaSkillJob,
-    AthenaSkillResult,
-    athena_workspace_lease,
-)
 from hephaestus.automation.pipeline.diagnostics import (
     _JOB_RESULT_ERROR_MAX as _ERR_MAX,
     _JOB_RESULT_TAIL as _TAIL,

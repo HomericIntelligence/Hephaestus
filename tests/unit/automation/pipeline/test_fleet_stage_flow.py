@@ -11,7 +11,7 @@ import pytest
 
 from hephaestus.agents.execution_policy import AgentOperation
 from hephaestus.agents.workspace import SourceLane
-from hephaestus.automation.pipeline.athena_skill_jobs import AthenaSkillJob, AthenaSkillRequest
+from hephaestus.automation.athena_jobs import AthenaSkillJob, AthenaSkillRequest
 from hephaestus.automation.pipeline.git_jobs import GitJob
 from hephaestus.automation.pipeline.github_jobs import GitHubJob, ReadCurrentPlanScopeRequest
 from hephaestus.automation.pipeline.job_results import JobResult

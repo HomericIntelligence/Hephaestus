@@ -10,8 +10,9 @@ from unittest.mock import Mock
 import pytest
 
 from hephaestus.agents.workspace import WorkspaceBinding
-from hephaestus.automation.pipeline import athena_skill_jobs, worker_pool
-from hephaestus.automation.pipeline.athena_skill_jobs import AthenaSkillJob, AthenaSkillRequest
+from hephaestus.automation import athena_jobs
+from hephaestus.automation.athena_jobs import AthenaSkillJob, AthenaSkillRequest
+from hephaestus.automation.pipeline import worker_pool
 from hephaestus.git.source_worktree import SourceWorkspacePreparationError
 
 
@@ -44,7 +45,7 @@ def test_host_skill_validation_uses_its_execution_deadline(
         clock[0] = 131.0
         return tmp_path
 
-    monkeypatch.setattr(athena_skill_jobs, "validate_workspace_binding", validate)
+    monkeypatch.setattr(athena_jobs, "validate_workspace_binding", validate)
     executor = Mock()
     pool = worker_pool.WorkerPool(
         size=1,

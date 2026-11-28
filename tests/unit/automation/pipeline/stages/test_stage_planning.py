@@ -15,13 +15,13 @@ import pytest
 import hephaestus.automation.github_api as github_api_mod
 import hephaestus.automation.pipeline_github as pg
 from hephaestus.agents.workspace import SourceLane
+from hephaestus.automation.athena_jobs import AthenaSkillJob, AthenaSkillResult
 from hephaestus.automation.issue_waves import (
     WAVE_LEASE_PAYLOAD,
     WAVE_NON_CODE_INTENT_PAYLOAD,
     WAVE_NON_CODE_PAYLOAD,
     IssueWaveStore,
 )
-from hephaestus.automation.pipeline.athena_skill_jobs import AthenaSkillJob, AthenaSkillResult
 from hephaestus.automation.pipeline.jobs import AgentJob, GitJob, JobResult
 from hephaestus.automation.pipeline.routing import Disposition, StageOutcome
 from hephaestus.automation.pipeline.stage_results import Continue, JobRequest

@@ -48,7 +48,7 @@ def test_source_worktree_exposes_its_public_contract() -> None:
     ("caller", "name"),
     [
         ("hephaestus.automation.host_capabilities", "_PreparationDeadline"),
-        ("hephaestus.automation.pipeline.athena_skill_jobs", "SourceWorkspaceManager"),
+        ("hephaestus.automation.athena_jobs", "SourceWorkspaceManager"),
         ("hephaestus.automation.pipeline.auxiliary_worker_pool", "_PreparationDeadline"),
         ("hephaestus.automation.pipeline.diagnostics", "SourceWorkspaceRecoveryKind"),
         ("hephaestus.automation.pipeline.fleet_execution", "FleetAttemptFence"),

@@ -16,7 +16,7 @@ import pytest
 
 import hephaestus.agents.runtime as agent_runtime
 from hephaestus.agents.workspace import WorkspaceBinding
-from hephaestus.automation.pipeline.athena_skill_jobs import (
+from hephaestus.automation.athena_jobs import (
     AthenaSkillJob,
     AthenaSkillRequest,
     AthenaSkillResult,

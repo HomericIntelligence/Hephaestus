@@ -29,10 +29,10 @@ import pytest
 
 from hephaestus.agents.runtime import AgentRunResult
 from hephaestus.agents.workspace import SourceLane
+from hephaestus.automation.athena_jobs import AthenaSkillJob
 from hephaestus.automation.direct_review_recovery import record_direct_review_recovery
 from hephaestus.automation.pipeline import worker_pool as worker_pool_module
 from hephaestus.automation.pipeline.admission import PlanFileClaim
-from hephaestus.automation.pipeline.athena_skill_jobs import AthenaSkillJob
 from hephaestus.automation.pipeline.coordinator import Coordinator
 from hephaestus.automation.pipeline.coordinator_types import _FAIL_BACK_CAP, PipelineConfig
 from hephaestus.automation.pipeline.direct_scope_keys import (
