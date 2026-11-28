@@ -2304,7 +2304,7 @@ The exhaustive classification is maintained in the
 - [`CompactJob`](../hephaestus/automation/pipeline/jobs.py) — a bounded
  compaction turn for a persisted session. The requesting stage owns that
  session. PR review does not compact the implementation writer.
-- [`AthenaSkillJob(kind="learn")`](../hephaestus/automation/pipeline/athena_skill_jobs.py)
+- [`AthenaSkillJob(kind="learn")`](../hephaestus/automation/athena_jobs.py)
  is the only learning job accepted by the auxiliary pool. That pool also
  accepts only `remove_worktree` and `release_branch_reservation` Git cleanup.
  It has no generic agent-dispatch path.
