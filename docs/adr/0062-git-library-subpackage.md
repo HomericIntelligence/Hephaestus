@@ -10,7 +10,7 @@
 
 Epic #3504 groups the Git-facing modules into one library subpackage. Today
 `hephaestus/git/` holds `__init__.py` and `gh/` only (#3513, merged). The
-planned moves put the git-lifecycle modules (#3512), the `hephaestus/git/github/`
+planned moves put the git-lifecycle modules (#3512), the `hephaestus/github/`
 tree (#3514), the pipeline GitHub tiers (#3515), and host verification
 (#3517) under it. ADR-0001 now names `git` in the library-layer list, so the
 subpackage needs a recorded home decision.
